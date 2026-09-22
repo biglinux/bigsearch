@@ -1,0 +1,31 @@
+# Generated snapshot manifest; sources and dependency features are preserved.
+bin = [{ name = "big-search", path = "src/main.rs" }]
+
+[package]
+name = "big-search"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+description = "Lean unprivileged filename + content search for the Linux desktop"
+license = "MIT OR Apache-2.0"
+workspace = "../.."
+
+[dependencies]
+anyhow = { version = "1.0.103" }
+big-indexd-client = { path = "../../../big-framework/crates/foundation/big-indexd-client", version = "0.1.0" }
+big-search-config = { path = "../../../big-framework/crates/foundation/big-search-config", version = "0.1.0" }
+big-os-kit = { path = "../../../big-framework/crates/foundation/big-os-kit", version = "0.1.0" }
+env_logger = { version = "0.11.11" }
+file-format = { version = "0.29" }
+ignore = { version = "0.4.27" }
+imagesize = { version = "0.14" }
+libc = { version = "0.2.186" }
+log = { version = "0.4.33" }
+notify = { version = "8.2" }
+quick-xml = { version = "0.41.0" }
+rusqlite = { version = "0.40.1", default-features = false, features = ["cache"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150" }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "isomp4", "mkv", "ogg", "flac", "wav"] }
+tantivy = { version = "0.26.1" }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

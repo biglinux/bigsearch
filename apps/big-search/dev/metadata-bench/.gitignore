@@ -1,0 +1,6 @@
+# machine-specific, regenerable, holds personal absolute paths
+corpus/
+# build output + raw run capture
+rust-bench/target/
+RESULTS-raw.txt
+FULLHOME-out.txt

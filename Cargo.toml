@@ -1,0 +1,14 @@
+# Generated snapshot manifest; sources and dependency features are preserved.
+
+[workspace]
+resolver = "3"
+members = ["apps/big-search"]
+exclude = ["apps/big-search/fuzz"]
+package = { edition = "2024", rust-version = "1.98.1", license = "MIT", repository = "https://github.com/biglinux/big", homepage = "https://github.com/biglinux/big", authors = ["BigLinux contributors"] }
+
+[patch]
+crates-io = { libspa-sys = { path = "../big-framework/vendor/libspa-sys-0.10.0" } }
+
+[profile]
+dev = { debug = "line-tables-only" }
+release = { lto = "thin", codegen-units = 1, strip = "symbols" }

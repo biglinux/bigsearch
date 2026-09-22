@@ -1,0 +1,64 @@
+# systemd *user* unit — install to ~/.config/systemd/user/big-search.service
+# then: systemctl --user enable --now big-search.service
+#
+# Runs unprivileged. Indexing throttles itself (nice 19 + idle I/O) at the
+# thread level, so the unit does NOT set Nice — the query path stays responsive.
+[Unit]
+Description=big-search file index daemon
+Documentation=https://github.com/Lord-Deepankar/big-search
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/big-search daemon
+Restart=on-failure
+RestartSec=5
+UMask=0077
+Environment=RUST_LOG=info,tantivy=warn,symphonia_core=error,symphonia_format_isomp4=error,symphonia_bundle_mp3=error
+# Provenance: record where files came from (xattr origin URL) as they arrive.
+# BIG_SEARCH_ORIGIN_WATCH defaults to off in code, so it must be set here.
+Environment=BIG_SEARCH_ORIGIN_WATCH=1
+Environment=BIG_SEARCH_ORIGIN_XATTR=1
+Environment=BIG_SEARCH_ORIGIN_QUERY=1
+# Metadata extraction is NOT set here on purpose: config.toml owns it
+# (`metadata`, default false, per-source overridable). An Environment= line
+# would silently win over the user's config and make that setting a no-op.
+# Bound total memory: soft-throttle reclaims page cache, hard cap is a safety net
+# (the extraction worker pool uses a bounded queue so anonymous RSS stays low).
+CPUWeight=20
+IOAccounting=yes
+IOWeight=20
+MemoryHigh=512M
+MemoryMax=768M
+TasksMax=64
+
+# --- hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Writable holes: the index lives under XDG_DATA_HOME, the socket under the
+# per-user runtime dir (%t). Both standard paths so the CLI client finds them too.
+ReadWritePaths=%h/.local/share %t
+# Private writable /tmp: with ProtectSystem=strict + ProtectHome=read-only every
+# default temp dir is read-only, which broke SQLite temp spill files
+# (SQLITE_IOERR_GETTEMPPATH) and aborted the startup reconcile. The daemon also
+# sets SQLITE_TMPDIR to its data dir; this covers any other temp user (poppler).
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @mount @reboot @swap @obsolete
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,33 @@
+/target/
+mutants.out/
+mutants.out.old/
+apps/*/po/*~
+.tmp-multimedia-port/
+**/packaging/arch/**/pkg/
+**/packaging/arch/**/src/
+
+# Build output at any depth. The root-anchored rule above missed
+# apps/*/target/, which is why UI-smoke artefacts ended up tracked.
+target/
+build/
+# Consolidated workspace tarballs produced by the packaging runs.
+*.tar.gz
+# Scratch SDK trees from the Debian/Wayland framework builds.
+.tmp-*/
+.ruff_cache/
+messages.mo
+
+# Baseline portrait PNGs are a build/release artifact; only the manifest is tracked.
+docs/portraits/*.png
+
+# `scripts/a11y-walk.py` imports `scripts/eis_keys.py`, and Python leaves this behind.
+__pycache__/
+
+# Fuzzer-accumulated inputs: the fuzz_targets are tracked, the corpora are not.
+**/fuzz/corpus/
+# A one-off external audit dump kept locally, not part of the codebase.
+docs/auditoria-externa-2026-09-11/
+# Runtime pidfile from the memory-soak monitor.
+*.pid
+
+/vendor-offline

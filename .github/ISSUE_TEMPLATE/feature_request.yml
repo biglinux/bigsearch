@@ -1,0 +1,17 @@
+name: Workflow improvement
+description: Propose a focused improvement without prescribing an unnecessary rewrite.
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What workflow is difficult today?
+      description: Product, user goal, current behavior and concrete example.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed improvement and tradeoffs
+      description: Include accessibility, older hardware, data safety and standalone/shared-session implications; distinguish wishes from existing APIs.
+    validations:
+      required: true

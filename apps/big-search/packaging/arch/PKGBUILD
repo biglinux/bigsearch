@@ -1,0 +1,73 @@
+# Maintainer: Bruno Gonçalves <miguelantonio01@tty12.org>
+pkgname=big-search
+pkgver=r1824.3522ef5d
+pkgrel=1
+pkgdesc="Lean unprivileged filename + content search daemon for the Linux desktop"
+arch=('x86_64')
+url="https://github.com/Lord-Deepankar/big-search"
+license=('Apache-2.0')
+depends=('poppler' 'sqlite' 'gcc-libs')
+makedepends=('cargo' 'pkgconf')
+source=()
+sha256sums=()
+
+# The cargo target every recipe in this workspace shares, so the second package
+# onward compiles only what differs instead of rebuilding the whole dependency
+# graph. Defined once here because build(), check() and package() must all agree
+# on it — package() installs from it, so a single missed reference is a recipe
+# that builds and then cannot find its own binary.
+_target="${BIG_CARGO_TARGET_DIR:-${HOME}/.cache/big-cargo-target}"
+
+_package_dir() {
+    cd "$(dirname "${BASH_SOURCE[0]}")"
+    pwd -P
+}
+
+_project_dir() {
+    cd "${BIG_SEARCH_SOURCE:-$(_package_dir)/../..}"
+    pwd -P
+}
+
+pkgver() {
+    cd "$(_project_dir)"
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    else
+        printf '%s' "$pkgver"
+    fi
+}
+
+prepare() {
+    cd "$(_project_dir)"
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$(_project_dir)"
+    # The same shared target the other recipes symlink to. This one builds in
+    # place rather than into a copy, so it only needs the directory pointed
+    # somewhere the next package can reuse.
+    cargo build --frozen --release --target-dir "$_target"
+}
+
+check() {
+    cd "$(_project_dir)"
+    # Daemon IPC integration tests bind Unix sockets; run them outside makepkg.
+    cargo test --frozen --release --target-dir "$_target" --lib --bins --test cli
+
+    export TMPDIR="$(_package_dir)/test-tmp"
+    mkdir -p "$TMPDIR"
+    cargo test --frozen --release --target-dir "$_target" --doc
+}
+
+package() {
+    cd "$(_project_dir)"
+    install -Dm755 "$_target/release/big-search" "$pkgdir/usr/bin/big-search"
+
+    install -Dm644 /dev/null "$pkgdir/usr/lib/systemd/user/big-search.service"
+    sed 's|%h/.local/bin/big-search|/usr/bin/big-search|' packaging/big-search.service \
+        > "$pkgdir/usr/lib/systemd/user/big-search.service"
+
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 DESIGN.md "$pkgdir/usr/share/doc/$pkgname/DESIGN.md"
+}

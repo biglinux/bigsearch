@@ -1,0 +1,41 @@
+msrv = "1.98.1"
+
+# ── Complexity thresholds ──────────────────────────────────────────
+cognitive-complexity-threshold = 25
+too-many-arguments-threshold = 8
+type-complexity-threshold = 300
+excessive-nesting-threshold = 10
+
+# ── Naming / style thresholds ─────────────────────────────────────
+single-char-binding-names-threshold = 5
+enum-variant-name-threshold = 3
+struct-field-name-threshold = 3
+
+# ── Size thresholds ───────────────────────────────────────────────
+trivial-copy-size-limit = 16
+large-error-threshold = 256
+
+# ── Dependency duplicates (cargo-deny covers this too) ────────────
+allowed-duplicate-crates = []
+
+# Raw process and stdin primitives bypass the workspace's argv, cancellation,
+# timeout, and worker boundaries. Filesystem calls are reviewed at their actual
+# call sites because this global list cannot distinguish UI work from workers,
+# caches, tests, or the storage owner itself.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "TASK-1: use big-os-kit subprocess specs/wrappers instead of raw Command" },
+    { path = "std::io::stdin", reason = "TASK-1: stdin is a blocking stream; keep it in workers/engines, not UI/app code" },
+    # A message to a component whose runtime already finished is nothing to do,
+    # not a crash. `input()` panics there, and a panic raised inside a GLib
+    # callback cannot unwind: it aborts the process, which for us is the whole
+    # desktop. Send through the raw channel and ignore a closed receiver:
+    # `let _ = sender.input_sender().send(msg);`
+    { path = "relm4::channel::component::ComponentSender::input", reason = "panics once the component has shut down; use `let _ = sender.input_sender().send(msg)`" },
+    { path = "relm4::channel::component::AsyncComponentSender::input", reason = "panics once the component has shut down; use `let _ = sender.input_sender().send(msg)`" },
+    { path = "relm4::channel::component::FactorySender::input", reason = "panics once the component has shut down; use `let _ = sender.input_sender().send(msg)`" },
+    { path = "relm4::channel::component::AsyncFactorySender::input", reason = "panics once the component has shut down; use `let _ = sender.input_sender().send(msg)`" },
+]
+
+disallowed-types = [
+    { path = "std::process::Command", reason = "TASK-1: use big-os-kit subprocess specs/wrappers instead of raw Command" },
+]
