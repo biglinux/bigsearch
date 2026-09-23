@@ -188,6 +188,10 @@ impl State {
         if limit == 0 || self.clear_before_persist {
             return Ok(Vec::new());
         }
+        // The empty cursor sorts before every (absolute) path, so a bare
+        // `path > ?` also starts a pass. Every keyset query here relies on that:
+        // an `?2 = '' OR` guard stops SQLite seeking the primary key, and each
+        // page becomes a scan from the namespace's first row.
         let after = after.unwrap_or_default();
         let mut stmt = self
             .conn
@@ -195,7 +199,7 @@ impl State {
                 "
                 SELECT path FROM file_state
                 WHERE namespace = ?1
-                  AND (?2 = '' OR path > ?2)
+                  AND path > ?2
                   AND NOT EXISTS (
                       SELECT 1 FROM temp.current_scan_seen AS seen
                       WHERE seen.path = file_state.path
@@ -243,7 +247,7 @@ impl State {
                 LEFT JOIN file_state AS catalog
                   ON catalog.namespace = ?2 AND catalog.path = mine.path
                 WHERE mine.namespace = ?1
-                  AND (?3 = '' OR mine.path > ?3)
+                  AND mine.path > ?3
                   AND catalog.path IS NULL
                 ORDER BY mine.path
                 LIMIT ?4
@@ -286,7 +290,7 @@ impl State {
                 LEFT JOIN file_state AS done
                   ON done.namespace = ?2 AND done.path = catalog.path
                 WHERE catalog.namespace = ?1
-                  AND (?3 = '' OR catalog.path > ?3)
+                  AND catalog.path > ?3
                   AND (done.path IS NULL
                        OR done.mtime != catalog.mtime
                        OR done.size != catalog.size)
@@ -329,7 +333,7 @@ impl State {
                 .prepare(
                     "
                     SELECT path FROM file_state
-                    WHERE namespace = ?1 AND (?2 = '' OR path > ?2)
+                    WHERE namespace = ?1 AND path > ?2
                     ORDER BY path
                     LIMIT ?3
                     ",
