@@ -140,6 +140,10 @@ struct ContentBackfill {
     /// All remaining pending files are inside their cooldown: sleep until the
     /// earliest one becomes eligible instead of polling every idle tick.
     snooze_until: Option<Instant>,
+    /// When the next batch of a running pass is due, set from how long the
+    /// last batch took and how busy the machine is. A deadline, not a delay:
+    /// file events that arrive meanwhile must not keep pushing it back.
+    next_batch_at: Option<Instant>,
     /// Shared gauge read by the IPC thread: files currently deferred by the
     /// cooldown (the "content results may be incomplete" hint).
     deferred_gauge: Arc<AtomicU64>,
@@ -163,6 +167,7 @@ impl ContentBackfill {
             rescan_requested: false,
             bypass_cooldown: false,
             snooze_until: None,
+            next_batch_at: None,
             deferred_gauge,
             // The first pass after a start prunes unconditionally: deletions may
             // have happened while the daemon was down.
@@ -235,7 +240,9 @@ impl ContentBackfill {
             Some(deadline) => deadline
                 .saturating_duration_since(Instant::now())
                 .max(self.idle_delay),
-            None => self.idle_delay,
+            None => self.next_batch_at.map_or(self.idle_delay, |at| {
+                at.saturating_duration_since(Instant::now())
+            }),
         }
     }
 }
@@ -396,6 +403,7 @@ pub fn run(
                 Ok(message) => message,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     content_backfill.snooze_until = None; // slept through the cooldown
+                    content_backfill.next_batch_at = None;
                     // One page of the catalogue per idle turn, and only while
                     // the machine has nothing better to do.
                     if !history_pass_done {
@@ -412,6 +420,8 @@ pub fn run(
                         &mut content_backfill,
                     ) {
                         log::error!("content backfill failed: {e:#}");
+                        // A writer that failed mid-batch is not trusted for the next one.
+                        let _ = close_index_writer(&mut content_writer);
                         content_backfill.request();
                     }
                     runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
@@ -612,6 +622,7 @@ fn run_content_backfill_batch(
     f: &ContentFields,
     content_backfill: &mut ContentBackfill,
 ) -> Result<()> {
+    let started = Instant::now();
     // Only when something was actually deleted. Proving "no orphans" still costs
     // a full scan of the content namespace — 19 865 page reads on this corpus —
     // and running that at the start of every pass meant paying it after every
@@ -647,7 +658,9 @@ fn run_content_backfill_batch(
     content::record_skipped_candidates(&batch.non_candidates)
         .context("record policy-skipped entries")?;
 
-    if !batch.files.is_empty() {
+    let processed = if batch.files.is_empty() {
+        None
+    } else {
         let attempted = batch.files.len();
         let indexed = content::index_content_limited_with_writer(
             open_content_writer(content_index, writer)?,
@@ -655,17 +668,31 @@ fn run_content_backfill_batch(
             batch.files,
             Some(content_backfill.batch_limit),
         )?;
-        close_index_writer(writer).context("close content writer")?;
         crate::throttle::release_idle_memory();
+        Some((attempted, indexed))
+    };
+    let work = started.elapsed();
+    // Mid-pass the writer stays open, so a batch costs its own commit and not a
+    // wait for every merge the pass has started so far; the rest before the
+    // next one follows how long this one took and how busy the machine is.
+    let pace = batch.has_more.then(|| crate::throttle::backfill_pace(work));
+    if let Some((attempted, indexed)) = processed {
+        let next = pace.map_or_else(String::new, |(load, pause)| {
+            format!(", {load:?}: next batch in {} ms", pause.as_millis())
+        });
         log::info!(
-            "content backfill: processed {attempted} files, indexed {indexed} bodies (limit {} files / {} MiB)",
+            "content backfill: processed {attempted} files, indexed {indexed} bodies in {} ms{next} (limit {} files / {} MiB)",
+            work.as_millis(),
             content_backfill.batch_limit,
             content::daemon_batch_byte_limit() / (1 << 20)
         );
     }
-    if batch.has_more {
-        return Ok(()); // still mid-pass; the next idle tick continues at the cursor
+    if let Some((_, pause)) = pace {
+        content_backfill.next_batch_at = Some(Instant::now() + pause);
+        return Ok(());
     }
+    close_index_writer(writer).context("close content writer")?;
+    crate::throttle::release_idle_memory();
     if batch.deferred > 0 {
         // Only cooldown-protected files remain: sleep until the earliest one
         // becomes eligible (or a content search warms the backfill sooner).
