@@ -227,6 +227,11 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
     if !crate::settings::content_index_enabled() {
         return Ok(0);
     }
+    let f = content_fields(index)?;
+    // One writer for the whole pass. A writer per batch, dropped without
+    // waiting, leaves its merges running: a cold pass over 220 000 files had
+    // 23 writers merging at once, 466 segments and nearly 1 GB resident.
+    let mut writer = crate::index::content_writer(index).context("content writer")?;
     let mut indexed_total = 0u64;
     let mut cursor: CatalogCursor = None;
     loop {
@@ -241,8 +246,9 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
             }
             break;
         }
-        indexed_total = indexed_total.saturating_add(index_content_limited(
-            index,
+        indexed_total = indexed_total.saturating_add(index_content_limited_with_writer(
+            &mut writer,
+            &f,
             batch.files,
             Some(catalog_content_batch_limit()),
         )?);
@@ -250,6 +256,9 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
             break;
         }
     }
+    writer
+        .wait_merging_threads()
+        .context("wait content merges")?;
     Ok(indexed_total)
 }
 
@@ -263,7 +272,11 @@ pub fn index_content_limited(
     }
     let f = content_fields(index)?;
     let mut writer = crate::index::content_writer(index).context("content writer")?;
-    index_content_limited_with_writer(&mut writer, &f, files, limit)
+    let indexed = index_content_limited_with_writer(&mut writer, &f, files, limit)?;
+    writer
+        .wait_merging_threads()
+        .context("wait content merges")?;
+    Ok(indexed)
 }
 
 pub fn index_content_limited_with_writer(
