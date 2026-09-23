@@ -397,8 +397,12 @@ fn ensure_content_state_matches_index(content_index: &tantivy::Index) -> Result<
     if cached_content_paths == 0 {
         return Ok(());
     }
+    // Only an empty index proves the rows lie. Fewer documents than rows is the
+    // normal state: policy-skipped files and files with no extractable body
+    // keep a row without a document. Treating that as divergence wiped every
+    // extraction done so far at each restart before the first pass completed.
     let indexed_content_documents = index::document_count(&content_index.reader()?)?;
-    if indexed_content_documents < cached_content_paths as u64 {
+    if indexed_content_documents == 0 {
         log::warn!(
             "content index/state divergence detected: {indexed_content_documents} content docs for {cached_content_paths} cached paths; rebuilding content cache"
         );
