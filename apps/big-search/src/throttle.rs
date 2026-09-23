@@ -246,13 +246,16 @@ fn cgroup_cpu_seconds(cgroup: &std::path::Path) -> Option<f64> {
     Some(usec as f64 / 1e6)
 }
 
+/// Where systemd mounts the cgroup v2 hierarchy.
+pub(crate) const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
 /// This process's cgroup v2 directory, from the `0::` line of `/proc/self/cgroup`.
-fn own_cgroup_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn own_cgroup_dir() -> Option<std::path::PathBuf> {
     let text = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let relative = text.lines().find_map(|line| line.strip_prefix("0::"))?;
     let relative = relative.trim().trim_start_matches('/');
     (!relative.split('/').any(|part| part == ".."))
-        .then(|| std::path::Path::new("/sys/fs/cgroup").join(relative))
+        .then(|| std::path::Path::new(CGROUP_ROOT).join(relative))
 }
 
 /// Whether the machine has a mains supply and none of them is plugged in.

@@ -12,9 +12,8 @@ workspace = "../.."
 
 [dependencies]
 anyhow = { version = "1.0.103" }
-big-indexd-client = { path = "../../../big-framework/crates/foundation/big-indexd-client", version = "0.1.0" }
-big-search-config = { path = "../../../big-framework/crates/foundation/big-search-config", version = "0.1.0" }
-big-os-kit = { path = "../../../big-framework/crates/foundation/big-os-kit", version = "0.1.0" }
+big-indexd-client = { path = "../../crates/foundation/big-indexd-client", version = "0.1.0" }
+big-search-config = { path = "../../crates/foundation/big-search-config", version = "0.1.0" }
 env_logger = { version = "0.11.11" }
 file-format = { version = "0.29" }
 ignore = { version = "0.4.27" }

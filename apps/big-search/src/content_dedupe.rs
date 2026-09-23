@@ -272,7 +272,6 @@ struct FiemapExtent {
 #[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
-    use big_os_kit::subprocess::{BigSubprocessOutputMode, BigSubprocessSpec};
 
     #[test]
     fn content_signatures_skip_shared_physical_identity() {
@@ -340,16 +339,7 @@ mod tests {
         // a flaky assert depending on writeback timing.
         std::fs::File::open(&first).unwrap().sync_all().unwrap();
 
-        let reflink = BigSubprocessSpec::builder()
-            .program("cp")
-            .arg("--reflink=always")
-            .arg(&first)
-            .arg(&second)
-            .stdout(BigSubprocessOutputMode::Null)
-            .stderr(BigSubprocessOutputMode::Null)
-            .build()
-            .run();
-        if !reflink.is_ok_and(|output| output.status.success()) {
+        if crate::history::clone_file(&first, &second).is_err() {
             std::fs::remove_dir_all(&base).ok();
             return;
         }

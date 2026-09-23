@@ -12,7 +12,8 @@ sessão de teste. Baixo consumo é uma meta; esta página não apresenta benchma
 ## Experimente este componente
 
 Execute na raiz deste Git, com Rust/Cargo 1.98.1, bibliotecas nativas e vendor
-já preparados. Dependências diretas de repositórios: `big-framework`
+já preparados. Dependências diretas de repositórios: nenhuma. Os outros programas usam este
+por meio de `big-indexd-client` e incorporam `big-search-settings`.
 Mantenha os irmãos necessários nos commits selecionados pelo integrador; eles
 não são baixados automaticamente. Os diretórios das fontes mantêm seus nomes
 originais. O inventário em [Componentes](docs/COMPONENTS.md) contém os caminhos locais.

@@ -8,8 +8,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use big_os_kit::subprocess::BigSubprocessSpec;
-
 pub use big_search_config::{ContentIndexMode, SymlinkPolicy};
 /// The configuration file's own shape lives in `big-search-config`, which the
 /// desktop's settings window writes and this service reads. Named here the way
@@ -249,12 +247,58 @@ fn low_memory_capacity(bytes: Option<u64>) -> bool {
 
 /// Physical memory for presentation, not a budget for the indexer.
 pub fn total_memory_bytes() -> Option<u64> {
-    big_os_kit::system_memory::total_memory_bytes()
+    static TOTAL: OnceLock<Option<u64>> = OnceLock::new();
+    *TOTAL.get_or_init(|| {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        mem_total_bytes(&text)
+    })
 }
 
-/// Shared framework policy includes visible cgroup high/max ancestors.
+/// Memory this service may size itself against: physical RAM, or less when
+/// its own cgroup or one above it sets `memory.high` or `memory.max`. `None`
+/// when the cgroup cannot be read, so callers keep their conservative defaults.
 pub fn effective_memory_bytes() -> Option<u64> {
-    big_os_kit::system_memory::effective_memory_bytes()
+    static CAPACITY: OnceLock<Option<u64>> = OnceLock::new();
+    *CAPACITY.get_or_init(|| {
+        let mut dir = crate::throttle::own_cgroup_dir()?;
+        std::fs::metadata(dir.join("cgroup.controllers")).ok()?;
+        let mut limit = total_memory_bytes();
+        loop {
+            for control in ["memory.high", "memory.max"] {
+                let text = std::fs::read_to_string(dir.join(control)).unwrap_or_default();
+                if let Some(bytes) = cgroup_limit_bytes(&text) {
+                    limit = Some(limit.map_or(bytes, |known| known.min(bytes)));
+                }
+            }
+            if dir == Path::new(crate::throttle::CGROUP_ROOT) || !dir.pop() {
+                break;
+            }
+        }
+        limit
+    })
+}
+
+/// `MemTotal` from `/proc/meminfo`, in bytes. `None` when missing, zero,
+/// repeated or not in kB.
+fn mem_total_bytes(meminfo: &str) -> Option<u64> {
+    let mut values = meminfo
+        .lines()
+        .filter_map(|line| line.strip_prefix("MemTotal:"));
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let mut fields = value.split_whitespace();
+    let kib: u64 = fields.next()?.parse().ok()?;
+    (fields.next() == Some("kB") && fields.next().is_none() && kib > 0)
+        .then(|| kib.checked_mul(1024))
+        .flatten()
+}
+
+/// A finite cgroup memory control in bytes; `max` (unlimited) and anything
+/// unreadable are `None`.
+fn cgroup_limit_bytes(text: &str) -> Option<u64> {
+    text.trim().parse().ok()
 }
 
 /// Adaptive per-file extracted text cap. This replaced the old fixed 1 MiB cap.
@@ -462,31 +506,12 @@ fn resolve(source_configuration: SourceConfiguration, defaults: &Defaults) -> So
     }
 }
 
-/// Filesystem UUID + label for the mount backing `path`, via `findmnt` (argv
-/// array, util-linux). `None` for either when unknown.
+/// Filesystem UUID + label for the mount backing `path`. `None` for either
+/// when unknown.
 fn device_uuid_label(path: &Path) -> (Option<String>, Option<String>) {
-    let Ok(out) = BigSubprocessSpec::builder()
-        .program("findmnt")
-        .args(["-no", "UUID,LABEL", "-P", "--target"])
-        .arg(path)
-        .build()
-        .run()
-    else {
-        return (None, None);
-    };
-    if !out.status.success() {
-        return (None, None);
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    // findmnt -P prints `UUID="…" LABEL="…"`.
-    let field = |key: &str| -> Option<String> {
-        let needle = format!("{key}=\"");
-        let start = text.find(&needle)? + needle.len();
-        let end = text[start..].find('"')? + start;
-        let value = &text[start..end];
-        (!value.is_empty()).then(|| value.to_string())
-    };
-    (field("UUID"), field("LABEL"))
+    crate::mounts::mount_for(path).map_or((None, None), |mount| {
+        crate::mounts::uuid_label(&mount.source)
+    })
 }
 
 /// Documented `config.toml` template, seeded once (never overwrites edits).
@@ -571,18 +596,33 @@ mod tests {
     #[test]
     fn cgroup_capacity_controls_extraction_and_low_memory_defaults() {
         // A large host running a 768 MiB indexer must use the small policy.
-        let capacity = big_os_kit::system_memory::MemoryCapacity {
-            physical_bytes: Some(64 * GIB),
-            cgroup_high_bytes: Some(768 * MIB),
-            cgroup_max_bytes: Some(GIB),
-            cgroup_status: big_os_kit::system_memory::CgroupMemoryStatus::Observed,
-        }
-        .sizing_bytes();
+        let capacity = [64 * GIB, 768 * MIB, GIB].into_iter().min();
         assert!(low_memory_capacity(capacity));
         assert_eq!(adaptive_extract_max_mb_for(capacity), 4);
         assert_eq!(adaptive_extract_max_mb_for(Some(4 * GIB)), 8);
         assert_eq!(adaptive_extract_max_mb_for(Some(8 * GIB)), 16);
         assert_eq!(adaptive_extract_max_mb_for(Some(64 * GIB)), 32);
+    }
+
+    #[test]
+    fn memory_readings_reject_what_they_cannot_trust() {
+        assert_eq!(
+            mem_total_bytes("MemTotal: 1024 kB\nMemFree: 4 kB\n"),
+            Some(1_048_576)
+        );
+        for text in [
+            "",
+            "MemTotal: 0 kB",
+            "MemTotal: bad kB",
+            "MemTotal: 50 MB",
+            "MemTotal: 18446744073709551615 kB",
+            "MemTotal: 1 kB\nMemTotal: 2 kB",
+        ] {
+            assert_eq!(mem_total_bytes(text), None, "{text}");
+        }
+        assert_eq!(cgroup_limit_bytes("536870912\n"), Some(512 * MIB));
+        assert_eq!(cgroup_limit_bytes("max\n"), None);
+        assert_eq!(cgroup_limit_bytes(""), None);
     }
 
     #[test]

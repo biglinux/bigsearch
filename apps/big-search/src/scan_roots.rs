@@ -1,7 +1,6 @@
 //! Resolve the configured scan roots: expand top-level symlinks under a root
 //! into real, disjoint local directories according to the symlink policy,
 //! rejecting network/virtual mounts and operating-system trees.
-use big_os_kit::subprocess::BigSubprocessSpec;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,20 +219,8 @@ fn is_hidden_path(path: &Path) -> bool {
 }
 
 fn mount_kind_for_path(path: &Path) -> MountKind {
-    let Ok(output) = BigSubprocessSpec::builder()
-        .program("findmnt")
-        .args(["-no", "FSTYPE", "--target"])
-        .arg(path)
-        .build()
-        .run()
-    else {
-        return MountKind::Unknown;
-    };
-    if !output.status.success() {
-        return MountKind::Unknown;
-    }
-    let fstype = String::from_utf8_lossy(&output.stdout);
-    classify_fstype(fstype.trim())
+    crate::mounts::mount_for(path)
+        .map_or(MountKind::Unknown, |mount| classify_fstype(&mount.fstype))
 }
 
 fn classify_fstype(fstype: &str) -> MountKind {

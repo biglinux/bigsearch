@@ -12,7 +12,8 @@ Low resource use is a design goal, not a benchmark claim on this page.
 ## Try this component
 
 Run from this Git's root with Rust/Cargo 1.98.1, native libraries and Cargo vendor
-already prepared. Direct repository dependencies: `big-framework`
+already prepared. Direct repository dependencies: none. Other programs use this one through
+`big-indexd-client` and embed `big-search-settings`.
 Keep required siblings at the revisions selected by integration; Cargo does not
 clone them automatically. Source directories retain their original names.
 [Components](docs/COMPONENTS.md) lists the local members, manifests and entry points.

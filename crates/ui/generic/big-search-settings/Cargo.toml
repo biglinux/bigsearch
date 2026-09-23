@@ -1,0 +1,26 @@
+# Generated snapshot manifest; sources and dependency features are preserved.
+
+[package]
+name = "big-search-settings"
+version = "0.1.0"
+publish = false
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT"
+description = "The window every BigLinux program opens to configure the system search"
+repository = "https://github.com/biglinux/big"
+homepage = "https://github.com/biglinux/big"
+authors = ["BigLinux contributors"]
+metadata = { cargo-machete = { ignored = ["gettext-rs"] } }
+workspace = "../../../.."
+
+[dependencies]
+adw = { version = "0.9", features = ["v1_9"], package = "libadwaita" }
+gtk = { version = "0.11", features = ["v4_22"], package = "gtk4" }
+gettext-rs = { version = "0.7", features = ["gettext-system"] }
+big-indexd-client = { path = "../../../foundation/big-indexd-client", version = "0.1.0" }
+big-search-config = { path = "../../../foundation/big-search-config", version = "0.1.0" }
+log = { version = "0.4", features = ["std"] }
+
+[lints]
+rust = { missing_docs = "warn" }

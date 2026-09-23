@@ -213,7 +213,7 @@ impl History {
                 return disabled(Unavailable::NoReflink);
             }
         };
-        let disk = big_os_kit::filesystem_capacity::filesystem_capacity(&crate::config::data_dir())
+        let disk = disk_capacity(&crate::config::data_dir())
             .map(|capacity| capacity.total_bytes)
             .unwrap_or(0);
         Self {
@@ -675,9 +675,7 @@ impl History {
         if self.conn.is_none() {
             return Ok(());
         }
-        let Ok(capacity) =
-            big_os_kit::filesystem_capacity::filesystem_capacity(&crate::config::data_dir())
-        else {
+        let Ok(capacity) = disk_capacity(&crate::config::data_dir()) else {
             return Ok(());
         };
         let low = capacity.available_bytes < LOW_DISK_BYTES
@@ -700,9 +698,7 @@ impl History {
                 break;
             }
             self.drop_versions(&dropped)?;
-            let Ok(now) =
-                big_os_kit::filesystem_capacity::filesystem_capacity(&crate::config::data_dir())
-            else {
+            let Ok(now) = disk_capacity(&crate::config::data_dir()) else {
                 break;
             };
             if now.available_bytes <= available {
@@ -899,7 +895,7 @@ fn time_bucket(now: i64, saved_at: i64) -> i64 {
 }
 
 /// Why a clone was refused, and what the refusal is about.
-enum Refusal {
+pub(crate) enum Refusal {
     /// Nothing on this device can be cloned.
     Device(Unavailable),
     /// This one file cannot.
@@ -908,12 +904,44 @@ enum Refusal {
     OutOfSpace,
 }
 
+/// Space on the filesystem holding `path`, from `statvfs(2)`.
+struct DiskCapacity {
+    /// What an unprivileged process may still write (`f_bavail`).
+    available_bytes: u64,
+    total_bytes: u64,
+}
+
+fn disk_capacity(path: &Path) -> io::Result<DiskCapacity> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    // SAFETY: `stats` is a correctly sized output buffer and `c_path` a valid
+    // NUL-terminated string for the duration of the call.
+    let stats = unsafe {
+        let mut stats = std::mem::zeroed::<libc::statvfs>();
+        if libc::statvfs(c_path.as_ptr(), &raw mut stats) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        stats
+    };
+    // POSIX counts blocks in fragments; a filesystem reporting none uses f_bsize.
+    let fragment = if stats.f_frsize > 0 {
+        stats.f_frsize
+    } else {
+        stats.f_bsize
+    };
+    Ok(DiskCapacity {
+        available_bytes: stats.f_bavail.saturating_mul(fragment),
+        total_bytes: stats.f_blocks.saturating_mul(fragment),
+    })
+}
+
 /// Clone `source` into `destination`, sharing its blocks.
 ///
 /// The destination is created exclusively and read-only: a version somebody can
 /// save over is not a version. Nothing here ever copies bytes — a refusal is a
 /// refusal.
-fn clone_file(source: &Path, destination: &Path) -> std::result::Result<(), Refusal> {
+pub(crate) fn clone_file(source: &Path, destination: &Path) -> std::result::Result<(), Refusal> {
     let before = std::fs::symlink_metadata(source).map_err(|_| Refusal::File)?;
     // `O_NOFOLLOW`: a link is not a document, and following one would keep a
     // version of whatever it points at, filters and all.

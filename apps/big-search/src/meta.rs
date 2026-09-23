@@ -90,9 +90,19 @@ fn ext_of(path: &Path) -> Option<String> {
 }
 
 fn kind_from_ext(ext: &str) -> Option<Kind> {
-    use big_os_kit::file_kinds::{AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS};
-    // `alac` is not a container, so it never reached this arm; every other
-    // spelling the old table had is in the shared sets.
+    const VIDEO_EXTENSIONS: &[&str] = &[
+        "3gp", "asf", "avi", "divx", "f4v", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg",
+        "mpg", "mts", "ogv", "ts", "vob", "webm", "wmv",
+    ];
+    const AUDIO_EXTENSIONS: &[&str] = &[
+        "aac", "ac3", "aif", "aiff", "ape", "dts", "flac", "m4a", "mka", "mp3", "oga", "ogg",
+        "opus", "wav", "wma", "wv",
+    ];
+    const IMAGE_EXTENSIONS: &[&str] = &[
+        "avif", "bmp", "dib", "exr", "gif", "heic", "heif", "ico", "jpe", "jpeg", "jpg", "pam",
+        "pbm", "pgm", "png", "pnm", "ppm", "qoi", "svg", "tga", "tif", "tiff", "webp",
+    ];
+    // `alac` is not a container, so it never reached this arm.
     Some(if AUDIO_EXTENSIONS.contains(&ext) {
         Kind::Audio
     } else if VIDEO_EXTENSIONS.contains(&ext) {

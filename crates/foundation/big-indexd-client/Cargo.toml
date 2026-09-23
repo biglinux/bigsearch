@@ -1,0 +1,14 @@
+# Generated snapshot manifest; sources and dependency features are preserved.
+
+[package]
+name = "big-indexd-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+description = "Lightweight client and wire types for the big-indexd (big-search) Unix-socket protocol"
+license = "MIT OR Apache-2.0"
+workspace = "../../.."
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150" }
