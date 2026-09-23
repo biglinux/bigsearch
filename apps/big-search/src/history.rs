@@ -167,6 +167,13 @@ pub struct History {
     /// Set when space ran out. The screen says so instead of showing an empty
     /// list, and the next successful eviction clears it.
     paused_for_space: bool,
+    /// A version was written since the budget was last enforced. Enforcing it
+    /// sums the whole `versions` table, so it runs once per housekeeping turn
+    /// rather than per version: per version, a folder of new documents cost a
+    /// full-table pass each, quadratic in the size of the store.
+    budget_unchecked: bool,
+    skip_git_repositories: bool,
+    respect_gitignore: bool,
 }
 
 impl History {
@@ -184,6 +191,9 @@ impl History {
             keep_versions: settings.keep_versions,
             keep_days: settings.keep_days,
             paused_for_space: false,
+            budget_unchecked: false,
+            skip_git_repositories: settings.skip_git_repositories,
+            respect_gitignore: settings.respect_gitignore,
         };
         if !settings.enabled {
             return disabled(Unavailable::Disabled);
@@ -215,6 +225,9 @@ impl History {
             keep_versions: settings.keep_versions,
             keep_days: settings.keep_days,
             paused_for_space: false,
+            budget_unchecked: false,
+            skip_git_repositories: settings.skip_git_repositories,
+            respect_gitignore: settings.respect_gitignore,
         }
     }
 
@@ -355,6 +368,11 @@ impl History {
         let Some(metadata) = eligible_metadata(path) else {
             return Ok(false);
         };
+        // A restore still keeps its undo: the person is putting back a version
+        // this store already holds, whatever the setting says now.
+        if reason != Reason::BeforeRestore && self.left_to_git(path) {
+            return Ok(false);
+        }
         if self.hopeless_devices.contains(&metadata.dev()) {
             return Ok(false);
         }
@@ -392,8 +410,20 @@ impl History {
         }
         self.record_version(file_id, path, &metadata, &name, reason)?;
         self.prune_file(file_id)?;
-        self.enforce_budget()?;
+        self.budget_unchecked = true;
         Ok(true)
+    }
+
+    /// Whether git, not this store, looks after `path`, as far as the settings
+    /// say to leave it there.
+    fn left_to_git(&self, path: &Path) -> bool {
+        if !self.skip_git_repositories && !self.respect_gitignore {
+            return false;
+        }
+        let Some(work_tree) = git_work_tree(path) else {
+            return false;
+        };
+        self.skip_git_repositories || gitignored(work_tree, path)
     }
 
     /// Call the newest kept version what it is about to become: the way back.
@@ -997,6 +1027,54 @@ fn scope() -> &'static crate::scan::Scope {
     SCOPE.get_or_init(crate::scan::Scope::compile)
 }
 
+/// The nearest folder above `path` that holds a `.git` — a directory in an
+/// ordinary clone, a file in a linked worktree or a submodule.
+///
+/// The walk stops at the catalogued folder that owns `path`: a `.git` above it
+/// belongs to something the person did not ask to have searched.
+fn git_work_tree(path: &Path) -> Option<&Path> {
+    let top = crate::settings::sources()
+        .owner(path)
+        .map(|source| source.path.as_path());
+    for dir in path.ancestors().skip(1) {
+        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+            return Some(dir);
+        }
+        if Some(dir) == top {
+            break;
+        }
+    }
+    None
+}
+
+/// Whether git ignores `path` inside `work_tree`.
+///
+/// Git's precedence: the `.gitignore` nearest the file first, up to the top of
+/// the work tree, then `.git/info/exclude`, then the person's global excludes
+/// file. The first file with an opinion decides, `!` re-includes included.
+fn gitignored(work_tree: &Path, path: &Path) -> bool {
+    use ignore::gitignore::{Gitignore, GitignoreBuilder};
+    for dir in path.ancestors().skip(1) {
+        let (rules, _) = Gitignore::new(dir.join(".gitignore"));
+        match rules.matched_path_or_any_parents(path, false) {
+            ignore::Match::Ignore(_) => return true,
+            ignore::Match::Whitelist(_) => return false,
+            ignore::Match::None => {}
+        }
+        if dir == work_tree {
+            break;
+        }
+    }
+    let mut builder = GitignoreBuilder::new(work_tree);
+    if let Some(global) = ignore::gitignore::gitconfig_excludes_path() {
+        builder.add(global);
+    }
+    builder.add(work_tree.join(".git/info/exclude"));
+    builder
+        .build()
+        .is_ok_and(|rules| rules.matched_path_or_any_parents(path, false).is_ignore())
+}
+
 /// Whether this is a live session, where nothing survives the reboot.
 fn is_live_session() -> bool {
     let Ok(mounts) = std::fs::read_to_string("/proc/self/mountinfo") else {
@@ -1282,6 +1360,14 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
             if let Err(error) = store.watch_free_space() {
                 log::warn!("could not check the free space: {error:#}");
             }
+            if store.budget_unchecked {
+                match store.enforce_budget() {
+                    Ok(()) => store.budget_unchecked = false,
+                    Err(error) => {
+                        log::warn!("could not keep versions inside the budget: {error:#}")
+                    }
+                }
+            }
             if std::time::Instant::now() >= next_missing_sweep {
                 next_missing_sweep = std::time::Instant::now() + MISSING_SWEEP;
                 if let Err(error) = store.expire_missing() {
@@ -1295,6 +1381,42 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_work_trees_and_their_ignore_rules_are_found() {
+        let root = std::env::temp_dir().join(format!("bs-history-git-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+        std::fs::create_dir_all(repo.join("docs/drafts")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "build/\n*.txt\n!keep.txt\n").unwrap();
+        std::fs::write(repo.join("docs/.gitignore"), "!notes.txt\n").unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), "private.md\n").unwrap();
+        // A linked worktree or submodule marks itself with a `.git` file.
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+
+        assert_eq!(
+            git_work_tree(&repo.join("docs/drafts/a.md")),
+            Some(repo.as_path())
+        );
+        assert_eq!(
+            git_work_tree(&repo.join("sub/b.md")),
+            Some(repo.join("sub").as_path())
+        );
+        assert_eq!(git_work_tree(&root.join("loose.md")), None);
+
+        let ignored = |relative: &str| gitignored(&repo, &repo.join(relative));
+        assert!(ignored("build/report.md"));
+        assert!(ignored("docs/drafts/log.txt"));
+        assert!(ignored("private.md"));
+        assert!(!ignored("keep.txt"));
+        // The nearest `.gitignore` overrides the one above it.
+        assert!(!ignored("docs/notes.txt"));
+        assert!(!ignored("docs/drafts/a.md"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn unvisited_history_paths_survive_a_partial_batch() {
