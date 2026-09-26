@@ -470,3 +470,26 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 }
+#[cfg(test)]
+mod probe_tmp {
+    #[test]
+    #[ignore]
+    fn probe_tmp() {
+        let list = std::fs::read_to_string(std::env::var("PROBE_LIST").unwrap()).unwrap();
+        let paths: Vec<&str> = list.lines().collect();
+        let t = std::time::Instant::now();
+        let mut out = String::new();
+        for p in &paths {
+            let mime = file_format::FileFormat::from_file(p)
+                .map(|f| f.media_type().to_string())
+                .unwrap_or_default();
+            out.push_str(&format!("{p}\t{mime}\n"));
+        }
+        eprintln!(
+            "PROBE file-format {} files in {:?}",
+            paths.len(),
+            t.elapsed()
+        );
+        std::fs::write(std::env::var("PROBE_OUT").unwrap(), out).unwrap();
+    }
+}

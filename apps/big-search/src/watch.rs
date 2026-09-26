@@ -861,7 +861,9 @@ fn reconcile(
     let mut outcome = scan::ReconcileOutcome::default();
     for path in batch {
         let metadata = std::fs::symlink_metadata(&path).ok();
-        let out_of_scope = scope.excluded(&path, metadata.as_ref().is_some_and(|m| m.is_dir()));
+        let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
+        let out_of_scope = scope.excluded(&path, is_dir)
+            || (!state.contains(&path) && scan::repo_ignored(&path, is_dir));
         if out_of_scope && !state.contains(&path) {
             continue; // out of scope and never catalogued: nothing to do
         }

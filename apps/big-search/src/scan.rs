@@ -141,8 +141,9 @@ pub fn write_effective_ignore() -> Result<()> {
 /// them. One compiled matcher, shared, is what stops the walker and the watcher
 /// from disagreeing again.
 ///
-/// Per-repository `.gitignore` files stay walker-only: honouring them here would
-/// mean re-reading a repo's ignore chain per event, and they were not the leak.
+/// Per-repository `.gitignore` files are not compiled in: they are asked of
+/// [`repo_ignored`] for paths new to the catalogue only, rather than re-read for
+/// every event.
 pub struct Scope {
     ignore: ignore::gitignore::Gitignore,
 }
@@ -177,6 +178,35 @@ impl Scope {
                 .matched_path_or_any_parents(path, is_dir)
                 .is_ignore()
     }
+}
+
+/// Whether a `.gitignore` of the repository holding `path` excludes it, as the
+/// walker would have decided had it come to `path` from the repository's root.
+///
+/// The walker never tests the root it is given, so a directory its repository
+/// ignores, created again after the scan, was walked whole the moment it
+/// appeared: `cargo fuzz` recreating `fuzz/corpus/` put 79 176 files into a
+/// catalogue of 170 000. Asked only for paths the catalogue does not hold yet,
+/// so an event on a known file costs nothing more.
+pub fn repo_ignored(path: &Path, is_dir: bool) -> bool {
+    // Nearest first: a deeper `.gitignore` overrides a shallower one.
+    let mut rules = Vec::new();
+    for dir in path.ancestors().skip(1) {
+        let file = dir.join(".gitignore");
+        if file.is_file() {
+            rules.push(ignore::gitignore::Gitignore::new(&file).0);
+        }
+        // Outside a repository its ignore files do not apply (the walker's
+        // `require_git`).
+        if dir.join(".git").exists() {
+            return rules
+                .iter()
+                .map(|rules| rules.matched_path_or_any_parents(path, is_dir))
+                .find(|matched| !matched.is_none())
+                .is_some_and(|matched| matched.is_ignore());
+        }
+    }
+    false
 }
 
 /// A dotfile or any path under a dot-directory — the churny 90 % the design
@@ -292,7 +322,7 @@ pub fn reconcile_subtree_inline(
     let mut outcome = ReconcileOutcome::default();
     // The walker exempts its own root from the ignore rules, so an excluded
     // directory would otherwise be indexed whole the moment it is created.
-    if scope.excluded(root, true) {
+    if scope.excluded(root, true) || (!state.contains(root) && repo_ignored(root, true)) {
         return Ok((dirs, outcome));
     }
     for entry in walker(root).flatten() {
@@ -592,6 +622,49 @@ mod tests {
             2
         );
 
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_directory_its_repository_ignores_is_not_walked_when_it_appears() {
+        let base =
+            std::env::temp_dir().join(format!("lsearch-scan-repo-ignore-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("fuzz/corpus/archive_index")).unwrap();
+        std::fs::create_dir_all(repo.join("fuzz/seeds")).unwrap();
+        std::fs::write(repo.join("fuzz/.gitignore"), "corpus/\n!keep\n").unwrap();
+        std::fs::write(repo.join("fuzz/corpus/archive_index/0a1b2c"), b"x").unwrap();
+        std::fs::write(repo.join("fuzz/seeds/seed"), b"x").unwrap();
+        // The same rules outside a repository do not apply.
+        std::fs::create_dir_all(base.join("plain/corpus")).unwrap();
+        std::fs::write(base.join("plain/.gitignore"), "corpus/\n").unwrap();
+
+        assert!(repo_ignored(&repo.join("fuzz/corpus"), true));
+        assert!(repo_ignored(&repo.join("fuzz/corpus/archive_index/0a1b2c"), false));
+        assert!(!repo_ignored(&repo.join("fuzz/seeds/seed"), false));
+        assert!(!repo_ignored(&repo.join("fuzz/keep"), false));
+        assert!(!repo_ignored(&base.join("plain/corpus"), true));
+
+        let index = open_or_create(&base.join("idx")).unwrap();
+        let f = fields(&index).unwrap();
+        let mut state = State::empty(base.join("state.json"));
+        let mut writer = index.writer(15_000_000).unwrap();
+        let (dirs, outcome) = reconcile_subtree_inline(
+            &writer,
+            &f,
+            &mut state,
+            &Scope::compile(),
+            &repo.join("fuzz/corpus"),
+        )
+        .unwrap();
+        assert!(dirs.is_empty() && !outcome.any());
+        writer.commit().unwrap();
+        assert_eq!(
+            crate::index::document_count(&index.reader().unwrap()).unwrap(),
+            0
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
