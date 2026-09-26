@@ -144,9 +144,12 @@ impl Database {
         if metadata.len() == 0 {
             return Some("application/x-zerosize".to_string());
         }
+        // Between equal weights, the database's own order (`max_by_key`
+        // alone keeps the last).
         let heaviest = || {
             candidates
                 .iter()
+                .rev()
                 .max_by_key(|glob| glob.weight)
                 .map(|glob| glob.mime.clone())
         };
@@ -155,7 +158,8 @@ impl Database {
         };
         let content = self.canonical(&content).to_string();
         // The candidate the content is, or descends from most closely; the
-        // name's weight breaks a tie.
+        // name's weight breaks a tie. Content that confirms none is what the
+        // file is: a `.png` that holds a JPEG, or HTML from a failed download.
         candidates
             .iter()
             .filter_map(|glob| {
@@ -179,14 +183,21 @@ fn sniff(path: &Path) -> Option<String> {
         .ok()?;
     let format = file_format::FileFormat::from_bytes(&head);
     let mime = format.media_type();
-    if mime != "application/octet-stream" {
-        return Some(mime.to_string());
-    }
-    // No signature: text, when it is UTF-8 without a NUL. The head may end
-    // inside a character, which is still text.
+    // Text is UTF-8 without a NUL; the head may end inside a character.
     let text = !head.contains(&0)
         && std::str::from_utf8(&head).map_or_else(|e| e.error_len().is_none(), |_| true);
-    text.then(|| "text/plain".to_string())
+    // A media signature inside text is a coincidence — "### freedreno" holds
+    // QuickTime's `free` atom at byte 4 — for 40 KiB of real audio, video or a
+    // raster image always hold a NUL. Other signatures found in text (PGP
+    // armour, HTML, SVG) are what the text is.
+    let media = ["video/", "audio/", "image/"]
+        .iter()
+        .any(|major| mime.starts_with(major))
+        && !mime.ends_with("+xml");
+    if text && (media || mime == "application/octet-stream") {
+        return Some("text/plain".to_string());
+    }
+    (mime != "application/octet-stream").then(|| mime.to_string())
 }
 
 /// Where shared-mime-info lives: the user's data dir, then the system's.
@@ -320,6 +331,16 @@ mod tests {
             db.of(&write("empty", b"")).as_deref(),
             Some("application/x-zerosize")
         );
+        // QuickTime's `free` atom at byte 4 of a text is not a video.
+        assert_eq!(
+            db.of(&write("NOTES", b"### freedreno backend\n"))
+                .as_deref(),
+            Some("text/plain")
+        );
+        // Content that confirms no candidate is what the file is.
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend([0_u8; 64]);
+        assert_eq!(db.of(&write("odd.ts", &png)).as_deref(), Some("image/png"));
         assert_eq!(db.of(&dir).as_deref(), Some("inode/directory"));
         std::fs::remove_dir_all(&dir).ok();
     }
