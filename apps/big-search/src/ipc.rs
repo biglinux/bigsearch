@@ -489,6 +489,10 @@ fn daemon_capabilities() -> Vec<String> {
     // Named so a client can tell a daemon that will answer `sources` from one
     // that refuses it, without spending a round trip to find out.
     capabilities.push("sources".to_string());
+    // The `list` mode narrows by `under` and `ext` inside the index, so it
+    // lists every match rather than filtering a sample of the index. An older
+    // daemon answers the same request with an empty page.
+    capabilities.push("list-filtered".to_string());
     capabilities
 }
 

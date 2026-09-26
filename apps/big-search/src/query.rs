@@ -2,9 +2,10 @@
 use crate::index::{BODY, NGRAM, content_fields, fields};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
+use std::ops::Bound;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, RangeQuery, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::tokenizer::TokenStream;
 use tantivy::{IndexReader, TantivyDocument, Term};
@@ -58,7 +59,7 @@ pub fn run_query(
         // filter rather than by words: "every PDF under my home folder" has
         // no text to search for, and the name search refuses a query shorter
         // than two letters because the ngram index cannot narrow one.
-        "list" => list_all(indexes.name, CANDIDATE_CEILING)?,
+        "list" => list_matching(indexes.name, filter, CANDIDATE_CEILING)?,
         _ => search(indexes.name, q, CANDIDATE_CEILING)?,
     };
 
@@ -266,15 +267,91 @@ pub fn search(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec<Hit>> {
     Ok(hits)
 }
 
+/// The `list` mode: what the name index holds under `filter.under` with one
+/// of `filter.ext`, up to `limit`. Both are answered by the index itself, so
+/// the ceiling counts matches rather than a sample of the whole index: cut
+/// first and filtered after, "every video in ~/Videos" came back empty from
+/// an index of 170 000 files whose first 5 000 held none.
+///
+/// The folder is a range of the path terms (the term dictionary is sorted, so
+/// only that folder's paths are read); each extension is the name grams of
+/// `.ext`. `run_query` still applies both filters exactly afterwards: a
+/// `.mp4` inside a name that ends otherwise is a gram match, not a hit.
+pub fn list_matching(reader: &IndexReader, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
+    let searcher = reader.searcher();
+    let index = searcher.index();
+    let f = fields(index)?;
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+    if let Some(dir) = filter.under.as_deref().map(|d| d.trim_end_matches('/'))
+        && !dir.is_empty()
+    {
+        // `dir/` up to `dir0`: '0' is the byte after '/', so the range is
+        // exactly the paths below `dir`. `dir` itself is a directory, never a
+        // file in this index.
+        clauses.push((
+            Occur::Must,
+            Box::new(RangeQuery::new(
+                Bound::Included(Term::from_field_text(f.path, &format!("{dir}/"))),
+                Bound::Excluded(Term::from_field_text(f.path, &format!("{dir}0"))),
+            )),
+        ));
+    }
+
+    // An extension of one letter has no gram of its own to look up (the floor
+    // is two, and `.c` is one after folding the dot in); then the extension
+    // filter is left to `run_query` alone.
+    let exts: Vec<String> = filter
+        .ext
+        .iter()
+        .map(|e| fold_lower(e.trim_start_matches('.')))
+        .collect();
+    if !exts.is_empty() && exts.iter().all(|e| e.chars().count() >= 2) {
+        let mut analyzer = index.tokenizers().get(NGRAM).context("ngram tokenizer")?;
+        let any_ext: Vec<(Occur, Box<dyn Query>)> = exts
+            .iter()
+            .map(|ext| {
+                let mut grams: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                let dotted = format!(".{ext}");
+                let mut stream = analyzer.token_stream(&dotted);
+                while stream.advance() {
+                    grams.push((
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(f.name, stream.token().text.as_str()),
+                            IndexRecordOption::Basic,
+                        )),
+                    ));
+                }
+                (
+                    Occur::Should,
+                    Box::new(BooleanQuery::new(grams)) as Box<dyn Query>,
+                )
+            })
+            .collect();
+        clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_ext))));
+    }
+
+    if clauses.is_empty() {
+        return list_all(reader, limit);
+    }
+    collect_paths(reader, &BooleanQuery::new(clauses), limit)
+}
+
 /// Everything the name index holds, up to `limit`, in no particular order.
 ///
 /// The order is the caller's business: `run_query` sorts what survives the
 /// filters, and asking tantivy to rank documents against a query that is not
 /// a query would only spend time producing a ranking nobody reads.
 pub fn list_all(reader: &IndexReader, limit: usize) -> Result<Vec<Hit>> {
+    collect_paths(reader, &AllQuery, limit)
+}
+
+/// The paths `query` matches, up to `limit`, as unranked hits.
+fn collect_paths(reader: &IndexReader, query: &dyn Query, limit: usize) -> Result<Vec<Hit>> {
     let searcher = reader.searcher();
     let f = fields(searcher.index())?;
-    let found = searcher.search(&AllQuery, &TopDocs::with_limit(limit).order_by_score())?;
+    let found = searcher.search(query, &TopDocs::with_limit(limit).order_by_score())?;
     let mut hits = Vec::with_capacity(found.len());
     let mut seen_paths = HashSet::with_capacity(found.len());
     for (_, addr) in found {
@@ -662,6 +739,71 @@ mod tests {
         // whole reason the mode exists.
         assert!(run("name").hits.is_empty());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The folder and the extensions narrow the index before the ceiling: a
+    /// sample cut first (the first `limit` documents of all) held none of
+    /// the videos, and the listing came back empty.
+    #[test]
+    fn list_finds_matches_past_a_ceiling_of_other_files() {
+        let mut paths: Vec<String> = (0..40)
+            .map(|i| format!("/home/u/docs/note-{i}.txt"))
+            .collect();
+        paths.extend([
+            "/home/u/Videos/show.mp4".to_string(),
+            "/home/u/Videos/sub/film.MKV".to_string(),
+            "/home/u/Videos/cover.png".to_string(),
+            "/home/u/Videos/almost.mp4.part".to_string(),
+            "/home/u/Videos2/other.mp4".to_string(),
+            "/home/u/Videos-old/old.mp4".to_string(),
+            "/home/u/docs/talk.mp4".to_string(),
+        ]);
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let index = index_with("list-ceiling", &refs);
+        let filter = Filter {
+            under: Some("/home/u/Videos/".into()),
+            ext: vec!["mp4".into(), "mkv".into()],
+            ..Default::default()
+        };
+        // A ceiling smaller than the files before the videos.
+        let mut found: Vec<String> = list_matching(&index, &filter, 5)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        found.sort();
+        // `almost.mp4.part` holds the grams of `.mp4`: the index returns it and
+        // `run_query`'s exact extension filter drops it.
+        assert_eq!(
+            found,
+            [
+                "/home/u/Videos/almost.mp4.part",
+                "/home/u/Videos/show.mp4",
+                "/home/u/Videos/sub/film.MKV",
+            ]
+        );
+        let outcome = run_query(
+            QueryIndexes {
+                name: &index,
+                content: None,
+            },
+            "",
+            "list",
+            &filter,
+            &Page {
+                offset: 0,
+                limit: 50,
+            },
+            false,
+            None,
+        )
+        .unwrap();
+        let mut exact: Vec<&str> = outcome.hits.iter().map(|hit| hit.path.as_str()).collect();
+        exact.sort_unstable();
+        assert!(
+            exact.iter().all(|path| !path.ends_with(".part")),
+            "{exact:?}"
+        );
     }
 
     #[test]
