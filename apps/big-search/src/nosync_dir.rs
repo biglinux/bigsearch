@@ -206,9 +206,14 @@ mod tests {
             20
         );
         assert_eq!(
-            crate::query::search(&index.reader().unwrap(), "nota-7", 10)
-                .unwrap()
-                .len(),
+            crate::query::search(
+                &index.reader().unwrap(),
+                "nota-7",
+                &big_indexd_client::Filter::default(),
+                10
+            )
+            .unwrap()
+            .len(),
             1
         );
 

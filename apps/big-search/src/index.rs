@@ -48,6 +48,12 @@ fn build_name_schema() -> Schema {
     // Source/device display name (stored, untokenised) so a hit can report which
     // device it lives on — kept even when that device is offline.
     sb.add_text_field("source", TextOptions::default().set_stored());
+    // Every folder above the file, one exact term each, and its lowercase
+    // extension: "under ~/Videos" and "videos only" are then one posting list
+    // each, where a range over the paths walked every file below the folder
+    // and the name grams of `.mp4` also matched `x.mp4.part`.
+    sb.add_text_field("dir", raw_identifier_options(false));
+    sb.add_text_field("ext", raw_identifier_options(false));
     sb.build()
 }
 
@@ -112,6 +118,8 @@ pub struct Fields {
     pub path: Field,
     pub name: Field,
     pub source: Field,
+    pub dir: Field,
+    pub ext: Field,
 }
 
 /// Resolved field handles for the content index schema.
@@ -126,6 +134,8 @@ pub fn fields(index: &Index) -> Result<Fields> {
         path: schema.get_field("path").context("field path")?,
         name: schema.get_field("name").context("field name")?,
         source: schema.get_field("source").context("field source")?,
+        dir: schema.get_field("dir").context("field dir")?,
+        ext: schema.get_field("ext").context("field ext")?,
     })
 }
 
@@ -574,7 +584,14 @@ mod tests {
             state.len() as u64
         );
         assert_eq!(
-            crate::query::search(&index.reader().unwrap(), "alpha", 10).unwrap()[0].path,
+            crate::query::search(
+                &index.reader().unwrap(),
+                "alpha",
+                &big_indexd_client::Filter::default(),
+                10
+            )
+            .unwrap()[0]
+                .path,
             "/catalog/keep-alpha.txt"
         );
 

@@ -214,6 +214,17 @@ pub fn add_name_only(writer: &IndexWriter, f: &Fields, path: &Path) -> Result<()
         document.add_text(f.path, path.to_string_lossy());
         document.add_text(f.name, name);
         document.add_text(f.source, crate::settings::source_name(path));
+        // The root holds everything: a term for it would only cost postings.
+        for dir in path
+            .ancestors()
+            .skip(1)
+            .filter(|dir| dir.parent().is_some())
+        {
+            document.add_text(f.dir, dir.to_string_lossy());
+        }
+        if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+            document.add_text(f.ext, ext.to_lowercase());
+        }
         writer.add_document(document)?;
     }
     Ok(())
@@ -491,15 +502,25 @@ mod tests {
 
         assert!(dirs.iter().any(|d| d.ends_with("sub")));
         assert_eq!(
-            crate::query::search(&index.reader().unwrap(), "nested", 10)
-                .unwrap()
-                .len(),
+            crate::query::search(
+                &index.reader().unwrap(),
+                "nested",
+                &big_indexd_client::Filter::default(),
+                10
+            )
+            .unwrap()
+            .len(),
             1
         );
         assert_eq!(
-            crate::query::search(&index.reader().unwrap(), "visible", 10)
-                .unwrap()
-                .len(),
+            crate::query::search(
+                &index.reader().unwrap(),
+                "visible",
+                &big_indexd_client::Filter::default(),
+                10
+            )
+            .unwrap()
+            .len(),
             1
         );
         assert!(
@@ -508,18 +529,28 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            crate::query::search(&index.reader().unwrap(), "hidden", 10)
-                .unwrap()
-                .is_empty()
+            crate::query::search(
+                &index.reader().unwrap(),
+                "hidden",
+                &big_indexd_client::Filter::default(),
+                10
+            )
+            .unwrap()
+            .is_empty()
         );
 
         // delete_path drops the document.
         delete_path(&writer, &f, &tree.join("sub/nested.md"));
         writer.commit().unwrap();
         assert!(
-            crate::query::search(&index.reader().unwrap(), "nested", 10)
-                .unwrap()
-                .is_empty()
+            crate::query::search(
+                &index.reader().unwrap(),
+                "nested",
+                &big_indexd_client::Filter::default(),
+                10
+            )
+            .unwrap()
+            .is_empty()
         );
 
         std::fs::remove_dir_all(&base).ok();

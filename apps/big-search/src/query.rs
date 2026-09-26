@@ -2,10 +2,9 @@
 use crate::index::{BODY, NGRAM, content_fields, fields};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use std::ops::Bound;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, RangeQuery, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::tokenizer::TokenStream;
 use tantivy::{IndexReader, TantivyDocument, Term};
@@ -60,7 +59,7 @@ pub fn run_query(
         // no text to search for, and the name search refuses a query shorter
         // than two letters because the ngram index cannot narrow one.
         "list" => list_matching(indexes.name, filter, CANDIDATE_CEILING)?,
-        _ => search(indexes.name, q, CANDIDATE_CEILING)?,
+        _ => search(indexes.name, q, filter, CANDIDATE_CEILING)?,
     };
 
     // Cheap, path-only filters first — shrink the set before any `stat`.
@@ -184,7 +183,7 @@ use crate::extract::fold_lower;
 
 /// Substring filename search. Returns up to `limit` paths whose file name contains
 /// `q` (case-insensitive). Queries shorter than 2 chars yield nothing (ngram floor).
-pub fn search(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec<Hit>> {
+pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
     // One searcher, taken once: building an `IndexReader` per query re-opens and
     // mmaps every segment and rebuilds the term dictionaries. Tantivy's own docs
     // say a project should create at most one reader per index; the daemon now
@@ -220,6 +219,10 @@ pub fn search(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec<Hit>> {
     if clauses.is_empty() {
         return Ok(Vec::new());
     }
+    // The folder and the extensions narrow the index's own answer: filtered
+    // only afterwards, the candidate ceiling was spent on whatever matched
+    // the words, and `pr` found no video among 5 000 other files.
+    clauses.extend(filter_clauses(&f, filter));
     let query = BooleanQuery::new(clauses);
 
     // Over-fetch for the substring post-filter, but cap the candidate pool so a
@@ -267,71 +270,51 @@ pub fn search(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec<Hit>> {
     Ok(hits)
 }
 
+/// The index clauses for `filter.under` and `filter.ext`, none for a filter
+/// without either: the folder is one term of the `dir` field, the extensions
+/// terms of the `ext` field. `run_query` still checks both exactly.
+fn filter_clauses(f: &crate::index::Fields, filter: &Filter) -> Vec<(Occur, Box<dyn Query>)> {
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    // The root holds everything and has no term of its own.
+    if let Some(dir) = filter.under.as_deref().map(|d| d.trim_end_matches('/'))
+        && !dir.is_empty()
+    {
+        clauses.push((
+            Occur::Must,
+            Box::new(TermQuery::new(
+                Term::from_field_text(f.dir, dir),
+                IndexRecordOption::Basic,
+            )),
+        ));
+    }
+    if !filter.ext.is_empty() {
+        let any_ext: Vec<(Occur, Box<dyn Query>)> = filter
+            .ext
+            .iter()
+            .map(|ext| {
+                let ext = ext.trim_start_matches('.').to_lowercase();
+                (
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(f.ext, &ext),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>,
+                )
+            })
+            .collect();
+        clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_ext))));
+    }
+    clauses
+}
+
 /// The `list` mode: what the name index holds under `filter.under` with one
 /// of `filter.ext`, up to `limit`. Both are answered by the index itself, so
 /// the ceiling counts matches rather than a sample of the whole index: cut
 /// first and filtered after, "every video in ~/Videos" came back empty from
 /// an index of 170 000 files whose first 5 000 held none.
 ///
-/// The folder is a range of the path terms (the term dictionary is sorted, so
-/// only that folder's paths are read); each extension is the name grams of
-/// `.ext`. `run_query` still applies both filters exactly afterwards: a
-/// `.mp4` inside a name that ends otherwise is a gram match, not a hit.
 pub fn list_matching(reader: &IndexReader, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
-    let searcher = reader.searcher();
-    let index = searcher.index();
-    let f = fields(index)?;
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-
-    if let Some(dir) = filter.under.as_deref().map(|d| d.trim_end_matches('/'))
-        && !dir.is_empty()
-    {
-        // `dir/` up to `dir0`: '0' is the byte after '/', so the range is
-        // exactly the paths below `dir`. `dir` itself is a directory, never a
-        // file in this index.
-        clauses.push((
-            Occur::Must,
-            Box::new(RangeQuery::new(
-                Bound::Included(Term::from_field_text(f.path, &format!("{dir}/"))),
-                Bound::Excluded(Term::from_field_text(f.path, &format!("{dir}0"))),
-            )),
-        ));
-    }
-
-    // An extension of one letter has no gram of its own to look up (the floor
-    // is two, and `.c` is one after folding the dot in); then the extension
-    // filter is left to `run_query` alone.
-    let exts: Vec<String> = filter
-        .ext
-        .iter()
-        .map(|e| fold_lower(e.trim_start_matches('.')))
-        .collect();
-    if !exts.is_empty() && exts.iter().all(|e| e.chars().count() >= 2) {
-        let mut analyzer = index.tokenizers().get(NGRAM).context("ngram tokenizer")?;
-        let any_ext: Vec<(Occur, Box<dyn Query>)> = exts
-            .iter()
-            .map(|ext| {
-                let mut grams: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-                let dotted = format!(".{ext}");
-                let mut stream = analyzer.token_stream(&dotted);
-                while stream.advance() {
-                    grams.push((
-                        Occur::Must,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(f.name, stream.token().text.as_str()),
-                            IndexRecordOption::Basic,
-                        )),
-                    ));
-                }
-                (
-                    Occur::Should,
-                    Box::new(BooleanQuery::new(grams)) as Box<dyn Query>,
-                )
-            })
-            .collect();
-        clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_ext))));
-    }
-
+    let clauses = filter_clauses(&fields(reader.searcher().index())?, filter);
     if clauses.is_empty() {
         return list_all(reader, limit);
     }
@@ -516,7 +499,7 @@ pub fn search_both(
 ) -> Result<Vec<Hit>> {
     use std::collections::HashMap;
 
-    let names = search(reader, q, limit)?;
+    let names = search(reader, q, &Filter::default(), limit)?;
     let contents = search_content(content_reader, q, limit)?;
 
     let mut merged: HashMap<String, Candidate> =
@@ -625,10 +608,7 @@ mod tests {
         let f = fields(&index).unwrap();
         let mut writer = index.writer(15_000_000).unwrap();
         for p in paths {
-            let name = Path::new(p).file_name().unwrap().to_str().unwrap();
-            writer
-                .add_document(doc!(f.path => *p, f.name => name))
-                .unwrap();
+            crate::scan::add_name_only(&writer, &f, Path::new(p)).unwrap();
         }
         writer.commit().unwrap();
         index.reader().unwrap()
@@ -670,11 +650,17 @@ mod tests {
             "subs",
             &["/a/Report_2024.md", "/b/hello.txt", "/c/photo.JPG"],
         );
-        let hits = search(&index, "report", 10).unwrap();
+        let hits = search(&index, "report", &Filter::default(), 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].name, "Report_2024.md");
-        assert_eq!(search(&index, "JPG", 10).unwrap().len(), 1);
-        assert_eq!(search(&index, "jpg", 10).unwrap().len(), 1);
+        assert_eq!(
+            search(&index, "JPG", &Filter::default(), 10).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            search(&index, "jpg", &Filter::default(), 10).unwrap().len(),
+            1
+        );
     }
 
     /// "Every PDF in my home folder" has no words to search for.
@@ -745,6 +731,43 @@ mod tests {
     /// sample cut first (the first `limit` documents of all) held none of
     /// the videos, and the listing came back empty.
     #[test]
+    fn a_name_search_finds_videos_past_a_ceiling_of_other_files() {
+        let mut paths: Vec<String> = (0..40)
+            .map(|i| format!("/home/u/src/prompt-{i}.rs"))
+            .collect();
+        paths.extend([
+            "/home/u/Videos/Predator.mkv".to_string(),
+            "/home/u/Videos/prores.mov".to_string(),
+            "/home/u/Music/prelude.mp4".to_string(),
+        ]);
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let index = index_with("name-ceiling", &refs);
+        let filter = Filter {
+            under: Some("/home/u/Videos".into()),
+            ext: vec!["mkv".into(), "mov".into(), "mp4".into()],
+            ..Default::default()
+        };
+        // A ceiling smaller than the other files that match the word.
+        let mut found: Vec<String> = search(&index, "pr", &filter, 5)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            ["/home/u/Videos/Predator.mkv", "/home/u/Videos/prores.mov"]
+        );
+        // No filter, no narrowing: the words alone decide.
+        assert_eq!(
+            search(&index, "prompt", &Filter::default(), 50)
+                .unwrap()
+                .len(),
+            40
+        );
+    }
+
+    #[test]
     fn list_finds_matches_past_a_ceiling_of_other_files() {
         let mut paths: Vec<String> = (0..40)
             .map(|i| format!("/home/u/docs/note-{i}.txt"))
@@ -772,15 +795,11 @@ mod tests {
             .map(|hit| hit.path)
             .collect();
         found.sort();
-        // `almost.mp4.part` holds the grams of `.mp4`: the index returns it and
-        // `run_query`'s exact extension filter drops it.
+        // `almost.mp4.part` is a `.part`, whatever its name holds; `Videos2`
+        // and `Videos-old` only begin like the folder.
         assert_eq!(
             found,
-            [
-                "/home/u/Videos/almost.mp4.part",
-                "/home/u/Videos/show.mp4",
-                "/home/u/Videos/sub/film.MKV",
-            ]
+            ["/home/u/Videos/show.mp4", "/home/u/Videos/sub/film.MKV"]
         );
         let outcome = run_query(
             QueryIndexes {
@@ -816,7 +835,7 @@ mod tests {
                 "/b/wallpaper-other.png",
             ],
         );
-        let hits = search(&index, "wallpaper", 10).unwrap();
+        let hits = search(&index, "wallpaper", &Filter::default(), 10).unwrap();
         let mut paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
         paths.sort_unstable();
         assert_eq!(
@@ -838,7 +857,7 @@ mod tests {
             ],
         );
         let paths = |q: &str| -> Vec<String> {
-            let mut found: Vec<String> = search(&index, q, 10)
+            let mut found: Vec<String> = search(&index, q, &Filter::default(), 10)
                 .unwrap()
                 .into_iter()
                 .map(|hit| hit.path)
@@ -860,15 +879,27 @@ mod tests {
     #[test]
     fn rejects_short_and_misses() {
         let index = index_with("short", &["/a/hello.txt"]);
-        assert!(search(&index, "h", 10).unwrap().is_empty());
-        assert!(search(&index, "zzzz", 10).unwrap().is_empty());
+        assert!(
+            search(&index, "h", &Filter::default(), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            search(&index, "zzzz", &Filter::default(), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn no_false_positive_from_ngram_recall() {
         // "ab" + "cd" grams both present but "abcd" is not a substring of either name.
         let index = index_with("fp", &["/x/ab_xx.txt", "/y/cd_yy.txt"]);
-        assert!(search(&index, "abcd", 10).unwrap().is_empty());
+        assert!(
+            search(&index, "abcd", &Filter::default(), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -893,7 +924,11 @@ mod tests {
                 .is_empty()
         );
         // content word is not a filename match
-        assert!(search(&index, "quick", 10).unwrap().is_empty());
+        assert!(
+            search(&index, "quick", &Filter::default(), 10)
+                .unwrap()
+                .is_empty()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -992,7 +1027,7 @@ mod tests {
         // them all, and a tie is decided by whatever order the merge happened to
         // hand the sort — so this agreement was luck, not ranking. Derived from
         // `search` rather than hardcoded, so the test follows BM25 if it changes.
-        let name_only_order: Vec<String> = search(&index, "alpha", 10)
+        let name_only_order: Vec<String> = search(&index, "alpha", &Filter::default(), 10)
             .unwrap()
             .into_iter()
             .map(|hit| hit.path)
@@ -1016,7 +1051,7 @@ mod tests {
         // what the real spread is, so the test asserts the merge reproduces it
         // rather than hardcoding BM25 output.
         let name_relevance = |path: &str| {
-            search(&index, "alpha", 10)
+            search(&index, "alpha", &Filter::default(), 10)
                 .unwrap()
                 .into_iter()
                 .find(|hit| hit.path == path)
@@ -1062,7 +1097,7 @@ mod tests {
         );
         // Both report their FILENAME score, never a blend: that is what makes the
         // number comparable with the rest of the name band.
-        let name_score = search(&index, "omega", 10).unwrap()[0].score;
+        let name_score = search(&index, "omega", &Filter::default(), 10).unwrap()[0].score;
         assert!(
             hits.iter().all(|hit| hit.score == name_score),
             "a Both hit reported something other than its filename relevance: {hits:?}"
@@ -1402,8 +1437,18 @@ mod tests {
             1
         );
         // name (ngram) folds too
-        assert_eq!(search(&index, "relatorio", 10).unwrap().len(), 1);
-        assert_eq!(search(&index, "goncalves", 10).unwrap().len(), 1);
+        assert_eq!(
+            search(&index, "relatorio", &Filter::default(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            search(&index, "goncalves", &Filter::default(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

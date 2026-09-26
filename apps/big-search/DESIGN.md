@@ -95,7 +95,8 @@ One Tantivy index. Schema:
 |---|---|---|---|
 | `path` | STRING stored | raw | identity, delete-by-term, display |
 | `name` | TEXT indexed | **ngram(2,3)** | filename substring/prefix |
-| `ext`  | STRING indexed | raw | type filter |
+| `ext`  | STRING indexed | raw, lowercase | type filter: one term per extension |
+| `dir`  | STRING indexed | raw, one per ancestor folder | folder filter: `under` is one term |
 | `mtime`,`size` | u64 FAST | — | sort/filter |
 | `body` | TEXT indexed | default+lowercase | content full-text (no store) |
 
