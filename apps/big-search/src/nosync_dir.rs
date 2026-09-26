@@ -195,7 +195,7 @@ mod tests {
         let mut writer = crate::index::background_writer(&index).unwrap();
 
         for n in 0..20 {
-            crate::scan::add_name_only(&writer, &f, Path::new(&format!("/docs/nota-{n}.md")))
+            crate::scan::add_name_only(&writer, &f, Path::new(&format!("/docs/nota-{n}.md")), None)
                 .unwrap();
             writer.commit().unwrap();
         }

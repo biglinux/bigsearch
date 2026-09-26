@@ -1295,7 +1295,7 @@ mod tests {
             crate::index::open_content_or_create(&base.join("content-idx")).unwrap();
         let f = fields(&index).unwrap();
         let mut writer = crate::index::bulk_writer(&index).unwrap();
-        crate::scan::add_name_only(&writer, &f, &path).unwrap();
+        crate::scan::add_name_only(&writer, &f, &path, None).unwrap();
         writer.commit().unwrap();
         drop(writer);
         assert_eq!(crate::query::count(&index.reader().unwrap()).unwrap(), 1);

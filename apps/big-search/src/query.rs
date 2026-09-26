@@ -670,7 +670,7 @@ mod tests {
         let f = fields(&index).unwrap();
         let mut writer = index.writer(15_000_000).unwrap();
         for p in paths {
-            crate::scan::add_name_only(&writer, &f, Path::new(p)).unwrap();
+            crate::scan::add_name_only(&writer, &f, Path::new(p), None).unwrap();
         }
         writer.commit().unwrap();
         index.reader().unwrap()

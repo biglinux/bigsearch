@@ -879,7 +879,7 @@ fn reconcile(
                 // New path → index its name. A known path that merely grew or
                 // was rewritten keeps its identical name doc (content work is
                 // scheduled through the state change below).
-                scan::upsert_path(writer, f, &path)?;
+                scan::upsert_path(writer, f, &path, Some(&metadata))?;
                 outcome.index_changed = true;
             }
             state.set(&path, mtime, size);

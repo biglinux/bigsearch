@@ -26,6 +26,9 @@ struct Glob {
 struct Database {
     /// `*.suffix` patterns, lowercase suffix → the types it names.
     suffixes: HashMap<String, Vec<Glob>>,
+    /// The case-sensitive ones (`cs` flag), matched first: `*.c` is C,
+    /// `*.C` C++, where case-folded they are one ambiguous suffix.
+    cased_suffixes: HashMap<String, Vec<Glob>>,
     /// Whole names (`Makefile`), matched exactly.
     literals: HashMap<String, Vec<Glob>>,
     parents: HashMap<String, Vec<String>>,
@@ -68,6 +71,9 @@ impl Database {
             else {
                 continue;
             };
+            let cased = fields
+                .next()
+                .is_some_and(|flags| flags.split(',').any(|flag| flag == "cs"));
             let Ok(weight) = weight.parse() else {
                 continue;
             };
@@ -82,7 +88,11 @@ impl Database {
             if let Some(suffix) = pattern.strip_prefix("*.")
                 && !wild(suffix)
             {
-                let globs = self.suffixes.entry(suffix.to_lowercase()).or_default();
+                let globs = if cased {
+                    self.cased_suffixes.entry(suffix.to_string()).or_default()
+                } else {
+                    self.suffixes.entry(suffix.to_lowercase()).or_default()
+                };
                 if !globs.iter().any(|known| known.mime == glob.mime) {
                     globs.push(glob);
                 }
@@ -95,9 +105,16 @@ impl Database {
         }
     }
 
-    /// The types `name` may be: a whole-name match, else its longest suffix's.
+    /// The types `name` may be: a whole-name match, else its longest suffix's,
+    /// the case-sensitive patterns first.
     fn candidates(&self, name: &str) -> &[Glob] {
         if let Some(globs) = self.literals.get(name) {
+            return globs;
+        }
+        if let Some(globs) = name
+            .match_indices('.')
+            .find_map(|(dot, _)| self.cased_suffixes.get(&name[dot + 1..]))
+        {
             return globs;
         }
         let lower = name.to_lowercase();
@@ -128,13 +145,36 @@ impl Database {
         None
     }
 
-    fn of(&self, path: &Path) -> Option<String> {
+    fn of(&self, path: &Path, known: Option<&std::fs::Metadata>) -> Option<String> {
+        // A link is typed as what it points to.
+        let followed;
+        let known = match known {
+            Some(metadata) if metadata.is_symlink() => {
+                followed = std::fs::metadata(path).ok()?;
+                Some(&followed)
+            }
+            known => known,
+        };
+        // `conf.d` is a directory, not D source, and an empty `.mp4` no video.
+        if known.is_some_and(std::fs::Metadata::is_dir) {
+            return Some("inode/directory".to_string());
+        }
+        if known.is_some_and(|metadata| metadata.is_file() && metadata.len() == 0) {
+            return Some("application/x-zerosize".to_string());
+        }
         let name = path.file_name()?.to_str()?;
         let candidates = self.candidates(name);
         if let [only] = candidates {
             return Some(only.mime.clone());
         }
-        let metadata = std::fs::metadata(path).ok()?;
+        let stat;
+        let metadata = match known {
+            Some(metadata) => metadata,
+            None => {
+                stat = std::fs::metadata(path).ok()?;
+                &stat
+            }
+        };
         if metadata.is_dir() {
             return Some("inode/directory".to_string());
         }
@@ -220,10 +260,12 @@ fn database() -> &'static Database {
 }
 
 /// The media type of `path`, or `None` when it has none to tell (a FIFO, a
-/// device, a path that is gone).
+/// device, a path that is gone). `metadata`, when the caller has it (the
+/// scan's walk does), saves a `stat` and tells a directory with a dotted name
+/// from a file.
 #[must_use]
-pub fn of(path: &Path) -> Option<String> {
-    database().of(path)
+pub fn of(path: &Path, metadata: Option<&std::fs::Metadata>) -> Option<String> {
+    database().of(path, metadata)
 }
 
 /// Whether `mime` is what `wanted` asks for: the same type, or `major/*`.
@@ -250,6 +292,11 @@ mod tests {
             "50:application/x-compressed-tar:*.tar.gz\n",
             "50:application/gzip:*.gz\n",
             "50:text/x-makefile:Makefile\n",
+            "50:text/x-dsrc:*.d\n",
+            "50:text/x-c++src:*.C:cs\n",
+            "50:text/x-c++src:*.C\n",
+            "50:text/x-csrc:*.c:cs\n",
+            "50:text/x-csrc:*.c\n",
             "10:text/x-readme:README*\n",
         ));
         for (child, parent) in [
@@ -272,16 +319,24 @@ mod tests {
         let db = database();
         // The path does not exist: a read would fail and give no type.
         let missing = Path::new("/nowhere/Film.MP4");
-        assert_eq!(db.of(missing).as_deref(), Some("video/mp4"));
+        assert_eq!(db.of(missing, None).as_deref(), Some("video/mp4"));
         assert_eq!(
-            db.of(Path::new("/nowhere/a.tar.gz")).as_deref(),
+            db.of(Path::new("/nowhere/a.tar.gz"), None).as_deref(),
             Some("application/x-compressed-tar")
         );
         assert_eq!(
-            db.of(Path::new("/nowhere/Makefile")).as_deref(),
+            db.of(Path::new("/nowhere/Makefile"), None).as_deref(),
             Some("text/x-makefile")
         );
-        assert_eq!(db.of(Path::new("/nowhere/unknown")), None);
+        assert_eq!(db.of(Path::new("/nowhere/unknown"), None), None);
+        assert_eq!(
+            db.of(Path::new("/nowhere/noop.c"), None).as_deref(),
+            Some("text/x-csrc")
+        );
+        assert_eq!(
+            db.of(Path::new("/nowhere/Widget.C"), None).as_deref(),
+            Some("text/x-c++src")
+        );
     }
 
     #[test]
@@ -298,50 +353,73 @@ mod tests {
         let mut stream = vec![0_u8; 188 * 4];
         stream.iter_mut().step_by(188).for_each(|byte| *byte = 0x47);
         assert_eq!(
-            db.of(&write("clip.ts", &stream)).as_deref(),
+            db.of(&write("clip.ts", &stream), None).as_deref(),
             Some("video/mp2t")
         );
         assert_eq!(
-            db.of(&write("app.ts", b"export const answer: number = 42;\n"))
-                .as_deref(),
+            db.of(
+                &write("app.ts", b"export const answer: number = 42;\n"),
+                None
+            )
+            .as_deref(),
             Some("application/typescript")
         );
         assert_eq!(
-            db.of(&write(
-                "pt_BR.ts",
-                b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<TS version=\"2.1\"></TS>\n"
-            ))
+            db.of(
+                &write(
+                    "pt_BR.ts",
+                    b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<TS version=\"2.1\"></TS>\n"
+                ),
+                None
+            )
             .as_deref(),
             Some("text/vnd.trolltech.linguist")
         );
         // No extension at all: the content alone.
         assert_eq!(
-            db.of(&write("clip", &stream)).as_deref(),
+            db.of(&write("clip", &stream), None).as_deref(),
             Some("video/mp2t")
         );
         assert_eq!(
-            db.of(&write("notes", "olá, mundo\n".as_bytes())).as_deref(),
+            db.of(&write("notes", "olá, mundo\n".as_bytes()), None)
+                .as_deref(),
             Some("text/plain")
         );
         assert_eq!(
-            db.of(&write("blob", &[0, 1, 2, 3, 0xff])).as_deref(),
+            db.of(&write("blob", &[0, 1, 2, 3, 0xff]), None).as_deref(),
             Some("application/octet-stream")
         );
         assert_eq!(
-            db.of(&write("empty", b"")).as_deref(),
+            db.of(&write("empty", b""), None).as_deref(),
             Some("application/x-zerosize")
         );
         // QuickTime's `free` atom at byte 4 of a text is not a video.
         assert_eq!(
-            db.of(&write("NOTES", b"### freedreno backend\n"))
+            db.of(&write("NOTES", b"### freedreno backend\n"), None)
                 .as_deref(),
             Some("text/plain")
         );
         // Content that confirms no candidate is what the file is.
         let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
         png.extend([0_u8; 64]);
-        assert_eq!(db.of(&write("odd.ts", &png)).as_deref(), Some("image/png"));
-        assert_eq!(db.of(&dir).as_deref(), Some("inode/directory"));
+        assert_eq!(
+            db.of(&write("odd.ts", &png), None).as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(db.of(&dir, None).as_deref(), Some("inode/directory"));
+        let dotted = dir.join("conf.d");
+        std::fs::create_dir_all(&dotted).unwrap();
+        let metadata = std::fs::symlink_metadata(&dotted).unwrap();
+        assert_eq!(
+            db.of(&dotted, Some(&metadata)).as_deref(),
+            Some("inode/directory")
+        );
+        let hollow = write("hollow.mp4", b"");
+        let metadata = std::fs::metadata(&hollow).unwrap();
+        assert_eq!(
+            db.of(&hollow, Some(&metadata)).as_deref(),
+            Some("application/x-zerosize")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

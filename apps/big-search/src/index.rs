@@ -432,7 +432,7 @@ pub fn repair_deflated_against_state(index: &Index, state: &mut State) -> Result
             .last()
             .map(|path| path.to_string_lossy().into_owned());
         for path in missing {
-            crate::scan::add_name_only(&writer, &f, &path)?;
+            crate::scan::add_name_only(&writer, &f, &path, None)?;
             repaired = repaired.saturating_add(1);
         }
     }
@@ -569,7 +569,8 @@ mod tests {
         let index = open_or_create(&dir.join("idx")).unwrap();
         let f = fields(&index).unwrap();
         let mut writer = bulk_writer(&index).unwrap();
-        crate::scan::add_name_only(&writer, &f, Path::new("/catalog/keep-alpha.txt")).unwrap();
+        crate::scan::add_name_only(&writer, &f, Path::new("/catalog/keep-alpha.txt"), None)
+            .unwrap();
         writer.commit().unwrap();
         drop(writer);
 

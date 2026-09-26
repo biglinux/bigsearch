@@ -238,7 +238,12 @@ fn walker(root: &Path) -> ignore::Walk {
 }
 
 /// Index one entry by name only (no content extraction) — the fast scan path.
-pub fn add_name_only(writer: &IndexWriter, f: &Fields, path: &Path) -> Result<()> {
+pub fn add_name_only(
+    writer: &IndexWriter,
+    f: &Fields,
+    path: &Path,
+    metadata: Option<&std::fs::Metadata>,
+) -> Result<()> {
     if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
         let mut document = TantivyDocument::default();
         document.add_text(f.path, path.to_string_lossy());
@@ -255,7 +260,7 @@ pub fn add_name_only(writer: &IndexWriter, f: &Fields, path: &Path) -> Result<()
         if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
             document.add_text(f.ext, ext.to_lowercase());
         }
-        if let Some(mime) = crate::mime::of(path) {
+        if let Some(mime) = crate::mime::of(path, metadata) {
             // The exact type first: it is the stored value a hit reads.
             document.add_text(f.mime, &mime);
             if let Some((major, _)) = mime.split_once('/') {
@@ -275,9 +280,14 @@ pub fn delete_path(writer: &IndexWriter, f: &Fields, path: &Path) {
 /// Replace the document for `path` by name only. Content/metadata extraction is
 /// intentionally deferred to the throttled background backfill; doing it here
 /// would make inotify bursts read large files synchronously.
-pub fn upsert_path(writer: &IndexWriter, f: &Fields, path: &Path) -> Result<()> {
+pub fn upsert_path(
+    writer: &IndexWriter,
+    f: &Fields,
+    path: &Path,
+    metadata: Option<&std::fs::Metadata>,
+) -> Result<()> {
     delete_path(writer, f, path);
-    add_name_only(writer, f, path)
+    add_name_only(writer, f, path, metadata)
 }
 
 pub fn path_term(f: &Fields, path: &Path) -> Term {
@@ -346,7 +356,7 @@ pub fn reconcile_subtree_inline(
             continue;
         }
         if !state.contains(path) {
-            upsert_path(writer, f, path)?;
+            upsert_path(writer, f, path, Some(&md))?;
             outcome.index_changed = true;
         }
         state.set(path, mtime, size);
@@ -398,7 +408,7 @@ pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncO
                 // New path → index its name. A known path with new mtime/size
                 // keeps its identical name doc; only content work is scheduled.
                 delete_path(&writer, &f, path);
-                add_name_only(&writer, &f, path)?;
+                add_name_only(&writer, &f, path, Some(&md))?;
             }
             state.set(path, mtime, size);
             let (do_content, do_metadata) = crate::settings::policy_for(path);
@@ -464,7 +474,7 @@ pub fn reconcile_inline(
                 continue;
             }
             if !state.contains(path) {
-                upsert_path(writer, f, path)?;
+                upsert_path(writer, f, path, Some(&md))?;
                 outcome.index_changed = true;
             }
             state.set(path, mtime, size);
