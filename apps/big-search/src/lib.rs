@@ -12,6 +12,7 @@ pub mod history;
 pub mod index;
 pub mod ipc;
 pub mod meta;
+pub mod mime;
 mod mounts;
 mod nosync_dir;
 pub mod origin;

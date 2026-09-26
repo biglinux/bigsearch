@@ -255,6 +255,13 @@ pub fn add_name_only(writer: &IndexWriter, f: &Fields, path: &Path) -> Result<()
         if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
             document.add_text(f.ext, ext.to_lowercase());
         }
+        if let Some(mime) = crate::mime::of(path) {
+            // The exact type first: it is the stored value a hit reads.
+            document.add_text(f.mime, &mime);
+            if let Some((major, _)) = mime.split_once('/') {
+                document.add_text(f.mime, format!("{major}/*"));
+            }
+        }
         writer.add_document(document)?;
     }
     Ok(())
@@ -642,7 +649,10 @@ mod tests {
         std::fs::write(base.join("plain/.gitignore"), "corpus/\n").unwrap();
 
         assert!(repo_ignored(&repo.join("fuzz/corpus"), true));
-        assert!(repo_ignored(&repo.join("fuzz/corpus/archive_index/0a1b2c"), false));
+        assert!(repo_ignored(
+            &repo.join("fuzz/corpus/archive_index/0a1b2c"),
+            false
+        ));
         assert!(!repo_ignored(&repo.join("fuzz/seeds/seed"), false));
         assert!(!repo_ignored(&repo.join("fuzz/keep"), false));
         assert!(!repo_ignored(&base.join("plain/corpus"), true));

@@ -54,6 +54,9 @@ fn build_name_schema() -> Schema {
     // and the name grams of `.mp4` also matched `x.mp4.part`.
     sb.add_text_field("dir", raw_identifier_options(false));
     sb.add_text_field("ext", raw_identifier_options(false));
+    // The media type (see `mime`), then its `major/*` group: "every video" is
+    // one term, extension or not. Stored for the hits to carry.
+    sb.add_text_field("mime", raw_identifier_options(true));
     sb.build()
 }
 
@@ -120,6 +123,7 @@ pub struct Fields {
     pub source: Field,
     pub dir: Field,
     pub ext: Field,
+    pub mime: Field,
 }
 
 /// Resolved field handles for the content index schema.
@@ -136,6 +140,7 @@ pub fn fields(index: &Index) -> Result<Fields> {
         source: schema.get_field("source").context("field source")?,
         dir: schema.get_field("dir").context("field dir")?,
         ext: schema.get_field("ext").context("field ext")?,
+        mime: schema.get_field("mime").context("field mime")?,
     })
 }
 

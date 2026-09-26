@@ -132,6 +132,10 @@ pub struct Hit {
     /// Lowercase extension without the dot; empty for none.
     #[serde(default)]
     pub ext: String,
+    /// Media type (`video/mp4`), from the name or, when the name cannot tell,
+    /// the first bytes; empty when unknown or from an older daemon.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mime: String,
     /// Display name of the source/device the hit lives on (empty if none).
     #[serde(default)]
     pub source: String,
@@ -144,14 +148,17 @@ pub struct Hit {
     pub origin: Option<OriginSummary>,
 }
 
-/// Server-side result filter. `under`/`ext` are path-only; `mtime`/`size` are
-/// inclusive `[min, max]` ranges.
+/// Server-side result filter. `under`/`ext` are path-only; `mime` takes exact
+/// types or `major/*` groups (daemons with the `mime-filter` capability);
+/// `mtime`/`size` are inclusive `[min, max]` ranges.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Filter {
     #[serde(default)]
     pub under: Option<String>,
     #[serde(default)]
     pub ext: Vec<String>,
+    #[serde(default)]
+    pub mime: Vec<String>,
     #[serde(default)]
     pub mtime: Option<[i64; 2]>,
     #[serde(default)]

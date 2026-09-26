@@ -86,6 +86,21 @@ pub fn run_query(
         })
         .collect();
 
+    // A content hit carries no type of its own: the name index has it.
+    let names = indexes.name.searcher();
+    let name_fields = fields(names.index())?;
+    if !filter.mime.is_empty() {
+        kept.retain_mut(|h| {
+            if h.mime.is_empty() {
+                h.mime = indexed_mime(&names, &name_fields, &h.path);
+            }
+            filter
+                .mime
+                .iter()
+                .any(|wanted| crate::mime::matches(&h.mime, wanted))
+        });
+    }
+
     // Expensive filters (date/size) need metadata: stat each survivor once.
     if filter.mtime.is_some() || filter.size.is_some() {
         kept.retain(|h| {
@@ -116,6 +131,9 @@ pub fn run_query(
     let mut offline_sources = OfflineSources::default();
     hits.retain_mut(|h| {
         h.ext = ext_of(&h.path);
+        if h.mime.is_empty() {
+            h.mime = indexed_mime(&names, &name_fields, &h.path);
+        }
         if let Some((mt, sz)) = crate::state::meta(Path::new(&h.path)) {
             h.mtime = mt;
             h.size = sz;
@@ -260,6 +278,7 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
                 name,
                 score,
                 source,
+                mime: stored_mime(&doc, &f),
                 ..Default::default()
             });
             if hits.len() >= limit {
@@ -270,9 +289,10 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
     Ok(hits)
 }
 
-/// The index clauses for `filter.under` and `filter.ext`, none for a filter
-/// without either: the folder is one term of the `dir` field, the extensions
-/// terms of the `ext` field. `run_query` still checks both exactly.
+/// The index clauses for `filter.under`, `filter.ext` and `filter.mime`, none
+/// for a filter without them: the folder is one term of the `dir` field, the
+/// extensions and types terms of their own fields. `run_query` still checks
+/// them afterwards, for the content modes that do not narrow by them.
 fn filter_clauses(f: &crate::index::Fields, filter: &Filter) -> Vec<(Occur, Box<dyn Query>)> {
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     // The root holds everything and has no term of its own.
@@ -303,6 +323,23 @@ fn filter_clauses(f: &crate::index::Fields, filter: &Filter) -> Vec<(Occur, Box<
             })
             .collect();
         clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_ext))));
+    }
+    // A type or a `major/*` group: the document holds both as terms.
+    if !filter.mime.is_empty() {
+        let any_mime: Vec<(Occur, Box<dyn Query>)> = filter
+            .mime
+            .iter()
+            .map(|mime| {
+                (
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(f.mime, mime),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>,
+                )
+            })
+            .collect();
+        clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_mime))));
     }
     clauses
 }
@@ -356,10 +393,35 @@ fn collect_paths(reader: &IndexReader, query: &dyn Query, limit: usize) -> Resul
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            mime: stored_mime(&doc, &f),
             ..Default::default()
         });
     }
     Ok(hits)
+}
+
+/// The exact media type a name document stores; empty for none.
+fn stored_mime(doc: &TantivyDocument, f: &crate::index::Fields) -> String {
+    doc.get_first(f.mime)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The media type the name index holds for `path`, for a hit that came
+/// through the content index; empty when it has none.
+fn indexed_mime(searcher: &tantivy::Searcher, f: &crate::index::Fields, path: &str) -> String {
+    let query = TermQuery::new(
+        Term::from_field_text(f.path, path),
+        IndexRecordOption::Basic,
+    );
+    searcher
+        .search(&query, &TopDocs::with_limit(1).order_by_score())
+        .ok()
+        .and_then(|top| top.first().map(|(_, addr)| *addr))
+        .and_then(|addr| searcher.doc::<TantivyDocument>(addr).ok())
+        .map(|doc| stored_mime(&doc, f))
+        .unwrap_or_default()
 }
 
 /// Full-text content search over the `body` field (word match, ranked by BM25).
@@ -730,6 +792,66 @@ mod tests {
     /// The folder and the extensions narrow the index before the ceiling: a
     /// sample cut first (the first `limit` documents of all) held none of
     /// the videos, and the listing came back empty.
+    #[test]
+    fn a_type_filter_finds_videos_by_what_they_are() {
+        let dir = std::env::temp_dir().join(format!("lsearch-mime-query-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut stream = vec![0_u8; 188 * 4];
+        stream.iter_mut().step_by(188).for_each(|byte| *byte = 0x47);
+        let files: [(&str, &[u8]); 4] = [
+            ("clip.ts", &stream),
+            ("recording", &stream),
+            ("app.ts", b"export const clip = 1;\n"),
+            ("film.mp4", b"not read: the name tells"),
+        ];
+        let paths: Vec<String> = files
+            .iter()
+            .map(|(name, bytes)| {
+                let path = dir.join(name);
+                std::fs::write(&path, bytes).unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let index = index_with("mime-filter", &refs);
+        let filter = Filter {
+            mime: vec!["video/*".into()],
+            ..Default::default()
+        };
+        let outcome = run_query(
+            QueryIndexes {
+                name: &index,
+                content: None,
+            },
+            "",
+            "list",
+            &filter,
+            &Page {
+                offset: 0,
+                limit: 50,
+            },
+            false,
+            None,
+        )
+        .unwrap();
+        let mut found: Vec<(String, String)> = outcome
+            .hits
+            .iter()
+            .map(|hit| (hit.name.clone(), hit.mime.clone()))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                ("clip.ts".to_string(), "video/mp2t".to_string()),
+                ("film.mp4".to_string(), "video/mp4".to_string()),
+                ("recording".to_string(), "video/mp2t".to_string()),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_name_search_finds_videos_past_a_ceiling_of_other_files() {
         let mut paths: Vec<String> = (0..40)

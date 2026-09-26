@@ -493,6 +493,8 @@ fn daemon_capabilities() -> Vec<String> {
     // lists every match rather than filtering a sample of the index. An older
     // daemon answers the same request with an empty page.
     capabilities.push("list-filtered".to_string());
+    // `filter.mime` (a type or `major/*`) is answered, and hits carry `mime`.
+    capabilities.push("mime-filter".to_string());
     capabilities
 }
 

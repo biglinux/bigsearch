@@ -97,6 +97,7 @@ One Tantivy index. Schema:
 | `name` | TEXT indexed | **ngram(2,3)** | filename substring/prefix |
 | `ext`  | STRING indexed | raw, lowercase | type filter: one term per extension |
 | `dir`  | STRING indexed | raw, one per ancestor folder | folder filter: `under` is one term |
+| `mime` | STRING indexed + stored | raw: the type, then `major/*` | type filter; from the shared-mime-info globs, the first 40 KiB read only when the name has no type or several |
 | `mtime`,`size` | u64 FAST | — | sort/filter |
 | `body` | TEXT indexed | default+lowercase | content full-text (no store) |
 
