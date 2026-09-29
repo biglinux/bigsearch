@@ -344,7 +344,7 @@ mod tests {
     fn a_plugged_in_disk_is_recognised() {
         assert!(is_removable(Path::new("/run/media/bruno/BACKUP")));
         assert!(is_removable(Path::new("/media/usb0")));
-        assert!(!is_removable(Path::new("/home/bruno/Documentos")));
-        assert!(!is_network(Path::new("/home/bruno")));
+        assert!(!is_removable(Path::new("/home/ana/Documentos")));
+        assert!(!is_network(Path::new("/home/ana")));
     }
 }
