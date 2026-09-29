@@ -61,7 +61,11 @@ fn await_content_result(
     query: &str,
     needle: &str,
 ) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // The daemon paces its backfill by the machine's load and rests 30 s between
+    // batches when the machine is busy (`throttle::pause_after`, `Load::Heavy`) —
+    // a parallel build is enough. The wait covers one such rest; a calm machine
+    // answers in about a second.
+    let deadline = Instant::now() + Duration::from_secs(45);
     while Instant::now() < deadline {
         let output = env_cmd(&["content", "--", query], home, xdg_storage_home, run)
             .output()
