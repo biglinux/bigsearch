@@ -215,7 +215,9 @@ impl Database {
 /// What the first bytes say, or `None` when they say nothing (unknown binary,
 /// or unreadable).
 fn sniff(path: &Path) -> Option<String> {
-    let mut head = Vec::new();
+    // Room for the whole head up front: an empty Vec makes `read_to_end` probe
+    // with a tiny read and then grow, several syscalls for every file sniffed.
+    let mut head = Vec::with_capacity(HEAD_BYTES as usize);
     std::fs::File::open(path)
         .ok()?
         .take(HEAD_BYTES)
