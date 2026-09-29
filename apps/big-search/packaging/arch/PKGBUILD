@@ -5,7 +5,7 @@ pkgrel=1
 pkgdesc="Lean unprivileged filename + content search daemon for the Linux desktop"
 arch=('x86_64')
 url="https://github.com/biglinux/bigsearch"
-license=('MIT OR Apache-2.0')
+license=('MIT')
 depends=('poppler' 'sqlite' 'gcc-libs')
 makedepends=('cargo' 'pkgconf')
 source=()
@@ -64,5 +64,6 @@ package() {
         > "$pkgdir/usr/lib/systemd/user/big-search.service"
 
     install -Dm644 ../../README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 ../../LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 DESIGN.md "$pkgdir/usr/share/doc/$pkgname/DESIGN.md"
 }

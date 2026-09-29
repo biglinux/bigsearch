@@ -113,5 +113,4 @@ Veja o [CONTRIBUTING.md](CONTRIBUTING.md). Problemas de segurança seguem o
 
 ## Licença
 
-O daemon e os dois crates de base declaram `MIT OR Apache-2.0`; a página de
-configurações declara MIT. Veja o [LICENSE](LICENSE).
+MIT. Veja o [LICENSE](LICENSE).

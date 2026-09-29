@@ -109,5 +109,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues as described in
 
 ## License
 
-The daemon and the two foundation crates declare `MIT OR Apache-2.0`; the
-settings page declares MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

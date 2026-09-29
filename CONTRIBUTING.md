@@ -42,5 +42,4 @@ the watcher.
 - Commit subjects are short and say what changed (`watch: pace the content
   backfill by the machine's load`); the body says why.
 
-By submitting a change you agree to license it under the terms of the crate it
-touches.
+By submitting a change you agree to license it under the MIT license.
