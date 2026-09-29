@@ -74,7 +74,12 @@ fn a_version_survives_the_save_that_replaced_it() {
 
     if let Support::Unavailable(reason) = history.support() {
         assert!(
-            matches!(reason, Unavailable::NoReflink | Unavailable::OldKernel),
+            // A container's root is an overlay, which is also how a live
+            // session looks; the service keeps no versions in either.
+            matches!(
+                reason,
+                Unavailable::NoReflink | Unavailable::OldKernel | Unavailable::LiveSession
+            ),
             "unexpected reason: {}",
             reason.as_str()
         );
