@@ -119,8 +119,9 @@ impl ContentSignatures {
         let temporary_file = self.file.with_extension("json.tmp");
         let bytes = serde_json::to_vec(&self.map)?;
         let mut file = std::fs::File::create(&temporary_file).context("create signatures tmp")?;
+        // No fsync: the signatures are a cache the next pass rebuilds, and the
+        // rename alone already keeps a reader from seeing half a file.
         file.write_all(&bytes).context("write signatures")?;
-        file.sync_all().context("fsync signatures")?;
         std::fs::rename(&temporary_file, &self.file).context("rename signatures")?;
         self.dirty = false;
         Ok(())
