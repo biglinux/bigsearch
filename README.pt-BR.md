@@ -113,4 +113,6 @@ Veja o [CONTRIBUTING.md](CONTRIBUTING.md). Problemas de segurança seguem o
 
 ## Licença
 
-MIT. Veja o [LICENSE](LICENSE).
+MIT. Veja o [LICENSE](LICENSE). O `scripts/third-party-notices.py` gera as
+licenças dos crates compilados no binário, para quem for redistribuí-lo; o
+pacote do Arch as instala junto do LICENSE.

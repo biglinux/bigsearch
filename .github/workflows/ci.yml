@@ -23,7 +23,7 @@ jobs:
     steps:
       - name: Install system packages
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rustup sqlite poppler gtk4 libadwaita
+          pacman -Syu --noconfirm --needed base-devel git rustup sqlite poppler gtk4 libadwaita python
           # The daemon never runs as root; neither do its tests.
           useradd --create-home builder
 
@@ -45,3 +45,7 @@ jobs:
 
       - name: Test
         run: su builder -c 'cargo test --locked --workspace --all-features'
+
+      - name: Third-party notices
+        # Fails when a crate compiled into the daemon publishes no license text.
+        run: su builder -c 'python scripts/third-party-notices.py > /dev/null'

@@ -1,13 +1,13 @@
 # Maintainer: Bruno Gonçalves <www.biglinux.com.br>
 pkgname=big-search
-pkgver=r1824.3522ef5d
+pkgver=r27.4e90567
 pkgrel=1
 pkgdesc="Lean unprivileged filename + content search daemon for the Linux desktop"
 arch=('x86_64')
 url="https://github.com/biglinux/bigsearch"
 license=('MIT')
 depends=('poppler' 'sqlite' 'gcc-libs')
-makedepends=('cargo' 'pkgconf')
+makedepends=('cargo' 'pkgconf' 'python')
 source=()
 sha256sums=()
 
@@ -65,5 +65,8 @@ package() {
 
     install -Dm644 ../../README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 ../../LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    CARGO_NET_OFFLINE=true python ../../scripts/third-party-notices.py \
+        --target "$(rustc -vV | sed -n 's/host: //p')" \
+        > "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY-NOTICES"
     install -Dm644 DESIGN.md "$pkgdir/usr/share/doc/$pkgname/DESIGN.md"
 }

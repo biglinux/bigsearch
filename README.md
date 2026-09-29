@@ -109,4 +109,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues as described in
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). `scripts/third-party-notices.py` writes the
+licenses of the crates compiled into the binary, for anyone redistributing it;
+the Arch package installs them next to LICENSE.
