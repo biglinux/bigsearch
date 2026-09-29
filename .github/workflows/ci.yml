@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # GTK 4.22 and libadwaita 1.9, which the settings page needs, are only in
+    # rolling distributions; Arch is also what the package is built on.
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 45
+    steps:
+      - name: Install system packages
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rustup sqlite poppler gtk4 libadwaita
+          # The daemon never runs as root; neither do its tests.
+          useradd --create-home builder
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Hand the checkout to the build user
+        run: chown -R builder: "$GITHUB_WORKSPACE"
+
+      - name: Install the toolchain from rust-toolchain.toml
+        run: su builder -c 'rustup toolchain install'
+
+      - name: Format
+        run: su builder -c 'cargo fmt --all -- --check'
+
+      - name: Clippy
+        run: su builder -c 'cargo clippy --locked --workspace --all-targets --all-features -- -D warnings'
+
+      - name: Test
+        run: su builder -c 'cargo test --locked --workspace --all-features'

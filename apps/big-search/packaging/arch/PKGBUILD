@@ -63,6 +63,6 @@ package() {
     sed 's|%h/.local/bin/big-search|/usr/bin/big-search|' packaging/big-search.service \
         > "$pkgdir/usr/lib/systemd/user/big-search.service"
 
-    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 ../../README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 DESIGN.md "$pkgdir/usr/share/doc/$pkgname/DESIGN.md"
 }

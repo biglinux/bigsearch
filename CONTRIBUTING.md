@@ -1,67 +1,46 @@
-# Contributing to Big
+# Contributing
 
-Help build the first stable release through a small, reproducible improvement.
-Code, tests, translations, accessibility reviews, documentation and hardware
-reports are all useful contributions. English and Brazilian Portuguese reports
-are welcome; keep code identifiers and public API documentation consistent with
-the surrounding source.
+Bug reports, fixes and measurements from real machines are all welcome, in
+English or Portuguese.
 
-## Start with a real workflow
+## Reporting a problem
 
-Describe the problem, expected result and steps to reproduce. Search existing
-reports first. Use disposable files for destructive, remote, recording or recovery
-tests. Include the product, commit, distribution, toolkit/driver versions and
-whether the window ran standalone, dynamically hosted or in `builtin-session`.
-Redact personal paths, contents, credentials and recordings. Sensitive issues
-follow [SECURITY.md](SECURITY.md), not a public reproducer with private data.
+Say what you ran, what you expected and what happened, plus the commit or
+version, the distribution and the filesystem the indexed files live on. For
+indexing problems, `big-search status` and the service log
+(`journalctl --user -u big-search`) usually tell most of the story. Leave out
+file names and contents you would not want public.
 
-Good first changes include an incorrect label, a broken documentation example,
-a small keyboard regression or a test for one boundary. For architecture/API,
-dependencies, storage formats or package changes, explain the approach and affected
-consumers before broadening the patch. Do not promise a release date or response SLA.
+## Building and testing
 
-## Find the owner, then build only what you need
+You need Rust 1.98.1 (rustup picks it up from `rust-toolchain.toml`), SQLite 3
+and poppler. The settings page also needs GTK 4.22 and libadwaita 1.9.
 
-Read [architecture](docs/handbook/architecture.md), the package README and nearby
-tests. A product change belongs in that product; a shared API in the framework;
-a cross-product assertion in integration. Do not copy the SDK into an application.
-The [development workflow](docs/handbook/development.md) distinguishes the
-integration checkout from an independently exported Git.
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
 
-Prepare the [development environment](docs/handbook/getting-started.md), reproduce
-the failure and add a focused regression test. Prefer existing dependencies and
-plain functions over new layers. Keep formatting-only edits separate from behavior.
-In a disposable test session, verify both standalone and hosted behavior whenever
-the change affects activation, UI lifetime, resources or integration.
+The integration tests start real daemons in temporary directories; they need
+no running session and touch nothing under your home.
 
-## Submit evidence, not just a green command
+`apps/big-search/dev/` has a long-running leak probe (`stress.sh`) and an
+adversarial-input probe (`security-probe.sh`); `apps/big-search/fuzz/` has the
+fuzz targets for the document parsers. Run them when you change extraction or
+the watcher.
 
-Use the [validation matrix](docs/handbook/validation.md). A successful check does
-not prove linking, test execution, hardware behavior or stable readiness. Record
-failures and skips honestly, including missing native services. Do not silence
-Clippy, disable a sandbox or weaken an assertion to obtain a pass.
+## Changes
 
-Before opening a pull request, review the diff and update the public docs and UI
-translations affected by it. The PR should contain:
+- Keep a pull request to one change. Formatting and refactoring go in their
+  own commits, apart from behavior.
+- Add a test that fails without the fix.
+- A change that claims to be faster or lighter should say how it was measured:
+  the corpus, the machine and the numbers before and after.
+- The daemon must stay usable on a dual-core machine with 2 GB of RAM. New
+  dependencies, threads, timers and caches need a reason.
+- Commit subjects are short and say what changed (`watch: pace the content
+  backfill by the machine's load`); the body says why.
 
-- Problem, scope/owner and the behavior before/after; explain any new dependency,
-  unsafe block, public API, process boundary or persisted data shape.
-- Exact commands and revision, pass/fail/skip counts, screenshots for visible
-  changes, and tests not run with their reason. Never use a mockup as runtime proof.
-- Compatibility/rollback considerations and follow-up work not included in the patch.
-
-Use a focused title such as `bigterminal: release cancelled preview work`.
-AI-assisted changes require the same review and evidence as any other contribution;
-the submitter is responsible for the result. Coding agents also read [AGENTS.md](AGENTS.md).
-
-## Help without writing Rust
-
-Reproduce an issue with a small dataset, review natural translations, test keyboard
-navigation and screen readers, or measure a repeatable workload on older hardware.
-A performance report needs revisions, build settings, renderer, corpus and repeated
-measurements. Never compare debug/software-rendered numbers to release/GPU numbers.
-
-This is still pre-release. A contributor's successful run is evidence for its
-specified scope, not approval to replace everyone's desktop. The
-[maintenance guide](docs/handbook/maintenance.md) covers release review and the
-multirepository transition.
+By submitting a change you agree to license it under the terms of the crate it
+touches.

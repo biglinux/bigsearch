@@ -1,25 +1,27 @@
 name: Bug report
-description: Report one reproducible problem in a Big product.
+description: Something BigSearch does wrong or fails to do.
+labels: [bug]
 body:
-  - type: markdown
+  - type: textarea
+    id: what
     attributes:
-      value: "Pre-release software: use disposable data. For sensitive issues use private Security reporting when enabled; otherwise ask a maintainer for a private channel without exploit details."
+      label: What happened
+      description: What you ran or did, what you expected, and what happened instead.
+    validations:
+      required: true
   - type: textarea
     id: environment
     attributes:
-      label: Product and environment
-      description: Product, commit, distribution, GTK/driver versions, renderer, standalone/dynamic/builtin-session, and relevant hardware.
+      label: Environment
+      description: BigSearch version or commit, distribution, filesystem of the indexed folders, and RAM.
+      placeholder: |
+        big-search 0.1.0 (commit abc1234)
+        BigLinux 2026-09, Btrfs, 4 GB RAM
     validations:
       required: true
   - type: textarea
-    id: reproduce
+    id: logs
     attributes:
-      label: Steps, expected result and actual result
-      description: Provide minimal steps and non-sensitive test data. State how often it occurs.
-    validations:
-      required: true
-  - type: textarea
-    id: evidence
-    attributes:
-      label: Evidence and scope
-      description: Sanitized logs/screenshots, exact commands, pass/fail/skip counts and tests not run. Remove credentials, private paths and contents.
+      label: Status and logs
+      description: Output of `big-search status` and relevant lines from `journalctl --user -u big-search`. Remove private file names.
+      render: text
