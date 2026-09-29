@@ -107,9 +107,16 @@ fn tokenize(text: &str) -> Vec<Token> {
 /// The whole point is what is *not* here: no vector of every character in the
 /// document, and no `String` per token. A 32 MiB body used to need about 925 MiB
 /// of memory to be tokenized, on a service whose whole budget is 63 MiB.
+///
+/// The cursor is a byte offset rather than a character iterator because most
+/// bodies are mostly ASCII: a separator or a letter below 0x80 is decided from
+/// its byte, and a word is copied into the token as one slice. Decoding and
+/// pushing every character one by one made this the hottest function of a
+/// content pass.
 pub struct CjkTokenStream<'a> {
     text: &'a str,
-    chars: std::iter::Peekable<std::str::CharIndices<'a>>,
+    /// Byte offset of the next character to read; always a character boundary.
+    cursor: usize,
     /// The last character of the space-less run being read, and whether that run
     /// has already produced a bigram. A run of one character owes a unigram; a
     /// longer one must not get a trailing unigram, which would add a clause no
@@ -126,20 +133,48 @@ impl CjkTokenStream<'_> {
         self.token.position = self.position;
         self.position += 1;
     }
+
+    fn char_at(&self, offset: usize) -> Option<char> {
+        self.text[offset..].chars().next()
+    }
+
+    /// Where the word whose remaining characters start at `from` ends: the next
+    /// space-less or non-alphanumeric character, or the end of the text.
+    fn word_end(&self, from: usize) -> usize {
+        let bytes = self.text.as_bytes();
+        let mut end = from;
+        while let Some(&byte) = bytes.get(end) {
+            if byte.is_ascii() {
+                if !byte.is_ascii_alphanumeric() {
+                    break;
+                }
+                end += 1;
+                continue;
+            }
+            match self.char_at(end) {
+                Some(next) if !is_unspaced(next) && next.is_alphanumeric() => {
+                    end += next.len_utf8();
+                }
+                _ => break,
+            }
+        }
+        end
+    }
 }
 
 impl TokenStream for CjkTokenStream<'_> {
     fn advance(&mut self) -> bool {
         loop {
             if let Some((offset, current, emitted)) = self.run {
-                match self.chars.peek().copied() {
-                    Some((next_offset, next)) if is_unspaced(next) => {
-                        self.chars.next();
+                match self.char_at(self.cursor) {
+                    Some(next) if is_unspaced(next) => {
+                        let next_offset = self.cursor;
+                        self.cursor += next.len_utf8();
                         self.run = Some((next_offset, next, true));
                         self.token.text.clear();
                         self.token.text.push(current);
                         self.token.text.push(next);
-                        self.emit(offset, next_offset + next.len_utf8());
+                        self.emit(offset, self.cursor);
                         return true;
                     }
                     _ => {
@@ -154,9 +189,18 @@ impl TokenStream for CjkTokenStream<'_> {
                     }
                 }
             }
-            let Some((offset, current)) = self.chars.next() else {
+            let offset = self.cursor;
+            let Some(&byte) = self.text.as_bytes().get(offset) else {
                 return false;
             };
+            if byte.is_ascii() && !byte.is_ascii_alphanumeric() {
+                self.cursor += 1;
+                continue; // separator
+            }
+            let Some(current) = self.char_at(offset) else {
+                return false;
+            };
+            self.cursor += current.len_utf8();
             if is_unspaced(current) {
                 self.run = Some((offset, current, false));
                 continue;
@@ -164,21 +208,12 @@ impl TokenStream for CjkTokenStream<'_> {
             if !current.is_alphanumeric() {
                 continue; // separator
             }
-            self.token.text.clear();
-            self.token.text.push(current);
-            while let Some(&(_, next)) = self.chars.peek() {
-                if is_unspaced(next) || !next.is_alphanumeric() {
-                    break;
-                }
-                self.token.text.push(next);
-                self.chars.next();
-            }
             // Where the word ends is where the next character begins, or the end
             // of the text — the same byte offset the old tokenizer reported.
-            let end = self
-                .chars
-                .peek()
-                .map_or(self.text.len(), |&(offset, _)| offset);
+            let end = self.word_end(self.cursor);
+            self.cursor = end;
+            self.token.text.clear();
+            self.token.text.push_str(&self.text[offset..end]);
             self.emit(offset, end);
             return true;
         }
@@ -203,7 +238,7 @@ impl Tokenizer for CjkFriendlyTokenizer {
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
         CjkTokenStream {
             text,
-            chars: text.char_indices().peekable(),
+            cursor: 0,
             run: None,
             position: 0,
             token: Token {
