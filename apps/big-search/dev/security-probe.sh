@@ -5,7 +5,7 @@
 # 1 MiB extraction caps held. Run standalone; isolated index.
 set -uo pipefail
 
-BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release/big-search"
+BIN="$(cd "$(dirname "$0")/../../.." && pwd)/target/release/big-search"
 T=$(mktemp -d)
 HOME_D="$T/home"; DATA_D="$T/data"; CFG_D="$T/cfg"; RUN_D="$T/run"
 mkdir -p "$HOME_D/docs" "$RUN_D"

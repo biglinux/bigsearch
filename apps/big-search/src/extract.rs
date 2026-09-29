@@ -1,7 +1,7 @@
 //! Content extraction. Plain text in-process; PDF via a `pdftotext` subprocess
 //! (argv array, hard wall-clock timeout, capped output) — chosen over in-process
-//! Rust PDF libs after the P3.1 benchmark (4× faster, 12× less memory, robust).
-//! bigagents: app-local-subprocess - PDF streaming needs capped pipe reads and a process group.
+//! Rust PDF libraries after benchmarking both on a real home directory: 4× faster
+//! and 12× less memory (DESIGN.md, "Extraction").
 pub(crate) use crate::extract_pdf::read_pdf;
 use std::io::Read;
 use std::path::Path;

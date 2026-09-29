@@ -1,11 +1,9 @@
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    reason = "PDF text extraction spawns pdftotext under a per-process pidfd watchdog \
-              with RLIMIT_AS via pre_exec and a hard-capped streaming stdout read \
-              (see pdftotext_capped); the big-os-kit subprocess wrapper does not express \
-              this pidfd/streaming-cap hardening, so raw Command is used deliberately here \
-              on the highest-risk (arbitrary-PDF) path, mirroring ptyd.rs's scoped allow."
+    reason = "PDF text extraction is the one place the daemon runs another program: \
+              pdftotext under a wall-clock timeout, with RLIMIT_AS set in pre_exec and \
+              its stdout read through a hard cap (see pdftotext_capped)"
 )]
 
 use std::io::Read;

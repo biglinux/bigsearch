@@ -1,5 +1,3 @@
-# Generated snapshot manifest; sources and dependency features are preserved.
-
 [package]
 name = "big-search-settings"
 version = "0.1.0"
@@ -8,9 +6,9 @@ edition = "2024"
 rust-version = "1.98.1"
 license = "MIT"
 description = "The window every BigLinux program opens to configure the system search"
-repository = "https://github.com/biglinux/big"
-homepage = "https://github.com/biglinux/big"
-authors = ["BigLinux contributors"]
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 metadata = { cargo-machete = { ignored = ["gettext-rs"] } }
 workspace = "../../../.."
 

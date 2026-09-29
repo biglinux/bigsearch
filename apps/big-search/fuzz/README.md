@@ -19,8 +19,8 @@ cargo +nightly fuzz run text_bytes   -- -max_total_time=300
 | `office_zip` | `extract::office_text_from_reader` — zip parsing + entry selection + XML walk on arbitrary bytes as the archive (the primary hostile-document path) |
 | `text_bytes` | `extract::text_from_bytes` — NUL/binary rejection + lossy-UTF-8 decode |
 
-Each asserts the parser never panics, hangs, or over-allocates. Per-call output is
-already capped at 1 MiB in `extract.rs`; the harness confirms that holds for any input.
+Each asserts the parser never panics, hangs, or over-allocates. `extract.rs` caps
+the text taken from one file; the harness checks the cap holds for any input.
 
 Seed `office_zip` with real `.docx`/`.odt`/`.pptx` files in
 `corpus/office_zip/` to reach deep into the XML walk faster (random bytes rarely

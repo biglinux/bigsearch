@@ -4,7 +4,7 @@
 # open-fd count over time. Flat curves => no leak; monotonic growth => leak.
 set -euo pipefail
 
-BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release/big-search"
+BIN="$(cd "$(dirname "$0")/../../.." && pwd)/target/release/big-search"
 T=$(mktemp -d)
 export HOME="$T/home" XDG_DATA_HOME="$T/data" XDG_CONFIG_HOME="$T/cfg" \
        XDG_RUNTIME_DIR="$T/run" RUST_LOG=off

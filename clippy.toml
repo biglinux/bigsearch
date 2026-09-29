@@ -15,27 +15,17 @@ struct-field-name-threshold = 3
 trivial-copy-size-limit = 16
 large-error-threshold = 256
 
-# ── Dependency duplicates (cargo-deny covers this too) ────────────
+# ── Dependency duplicates ─────────────────────────────────────────
 allowed-duplicate-crates = []
 
-# Raw process and stdin primitives bypass the workspace's argv, cancellation,
-# timeout, and worker boundaries. Filesystem calls are reviewed at their actual
-# call sites because this global list cannot distinguish UI work from workers,
-# caches, tests, or the storage owner itself.
+# Spawning a process is allowed only where the argv, the deadline and the
+# size of what is read back have been reviewed: today that is the PDF
+# extractor alone, which opts out with a scoped `allow` and says why.
 disallowed-methods = [
-    { path = "std::process::Command::new", reason = "TASK-1: use big-os-kit subprocess specs/wrappers instead of raw Command" },
-    { path = "std::io::stdin", reason = "TASK-1: stdin is a blocking stream; keep it in workers/engines, not UI/app code" },
-    # A message to a component whose runtime already finished is nothing to do,
-    # not a crash. `input()` panics there, and a panic raised inside a GLib
-    # callback cannot unwind: it aborts the process, which for us is the whole
-    # desktop. Send through the raw channel and ignore a closed receiver:
-    # `let _ = sender.input_sender().send(msg);`
-    { path = "relm4::channel::component::ComponentSender::input", reason = "panics once the component has shut down; use `let _ = sender.input_sender().send(msg)`" },
-    { path = "relm4::channel::component::AsyncComponentSender::input", reason = "panics once the component has shut down; use `let _ = sender.input_sender().send(msg)`" },
-    { path = "relm4::channel::component::FactorySender::input", reason = "panics once the component has shut down; use `let _ = sender.input_sender().send(msg)`" },
-    { path = "relm4::channel::component::AsyncFactorySender::input", reason = "panics once the component has shut down; use `let _ = sender.input_sender().send(msg)`" },
+    { path = "std::process::Command::new", reason = "spawn only behind a reviewed argv, deadline and output cap (see extract_pdf.rs)" },
+    { path = "std::io::stdin", reason = "stdin blocks; the daemon has no interactive input" },
 ]
 
 disallowed-types = [
-    { path = "std::process::Command", reason = "TASK-1: use big-os-kit subprocess specs/wrappers instead of raw Command" },
+    { path = "std::process::Command", reason = "spawn only behind a reviewed argv, deadline and output cap (see extract_pdf.rs)" },
 ]

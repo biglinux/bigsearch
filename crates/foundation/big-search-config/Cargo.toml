@@ -1,5 +1,3 @@
-# Generated snapshot manifest; sources and dependency features are preserved.
-
 [package]
 name = "big-search-config"
 version = "0.1.0"
@@ -7,6 +5,7 @@ edition = "2024"
 rust-version = "1.98.1"
 description = "Reader and writer for the big-search configuration file, shared by the daemon and the desktop"
 license = "MIT OR Apache-2.0"
+repository.workspace = true
 workspace = "../../.."
 
 [dependencies]

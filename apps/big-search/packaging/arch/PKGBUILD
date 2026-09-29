@@ -1,22 +1,20 @@
-# Maintainer: Bruno Gonçalves <miguelantonio01@tty12.org>
+# Maintainer: Bruno Gonçalves <www.biglinux.com.br>
 pkgname=big-search
 pkgver=r1824.3522ef5d
 pkgrel=1
 pkgdesc="Lean unprivileged filename + content search daemon for the Linux desktop"
 arch=('x86_64')
-url="https://github.com/Lord-Deepankar/big-search"
-license=('Apache-2.0')
+url="https://github.com/biglinux/bigsearch"
+license=('MIT OR Apache-2.0')
 depends=('poppler' 'sqlite' 'gcc-libs')
 makedepends=('cargo' 'pkgconf')
 source=()
 sha256sums=()
 
-# The cargo target every recipe in this workspace shares, so the second package
-# onward compiles only what differs instead of rebuilding the whole dependency
-# graph. Defined once here because build(), check() and package() must all agree
-# on it — package() installs from it, so a single missed reference is a recipe
-# that builds and then cannot find its own binary.
-_target="${BIG_CARGO_TARGET_DIR:-${HOME}/.cache/big-cargo-target}"
+# Where cargo builds. build(), check() and package() must agree on it:
+# package() installs from it. Point BIG_CARGO_TARGET_DIR at a shared cache to
+# reuse a previous build.
+_target="${BIG_CARGO_TARGET_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd -P)/target}"
 
 _package_dir() {
     cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -44,9 +42,6 @@ prepare() {
 
 build() {
     cd "$(_project_dir)"
-    # The same shared target the other recipes symlink to. This one builds in
-    # place rather than into a copy, so it only needs the directory pointed
-    # somewhere the next package can reuse.
     cargo build --frozen --release --target-dir "$_target"
 }
 

@@ -1,6 +1,3 @@
-# Generated snapshot manifest; sources and dependency features are preserved.
-bin = [{ name = "big-search", path = "src/main.rs" }]
-
 [package]
 name = "big-search"
 version = "0.1.0"
@@ -8,7 +5,12 @@ edition = "2024"
 rust-version = "1.98.1"
 description = "Lean unprivileged filename + content search for the Linux desktop"
 license = "MIT OR Apache-2.0"
+repository.workspace = true
 workspace = "../.."
+
+[[bin]]
+name = "big-search"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = { version = "1.0.103" }
