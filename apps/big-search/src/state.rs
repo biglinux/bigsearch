@@ -73,13 +73,19 @@ impl State {
 
     /// Whether `path` is recorded with this exact mtime+size (→ unchanged).
     pub fn unchanged(&self, path: &Path, mtime: i64, size: u64) -> bool {
+        self.recorded(path) == Some((mtime, size))
+    }
+
+    /// The mtime and size `path` is catalogued with, or `None` when it is not
+    /// catalogued. One lookup answers both of the scanner's questions — is it
+    /// unchanged, is it known at all — which it used to ask SQLite separately
+    /// for every new or changed file.
+    pub fn recorded(&self, path: &Path) -> Option<(i64, u64)> {
         let path_key = key(path);
         match self.pending.get(&path_key).copied() {
-            Some(PendingChange::Set(pending_mtime, pending_size)) => {
-                pending_mtime == mtime && pending_size == size
-            }
-            Some(PendingChange::Remove) => false,
-            None if self.clear_before_persist => false,
+            Some(PendingChange::Set(mtime, size)) => Some((mtime, size)),
+            Some(PendingChange::Remove) => None,
+            None if self.clear_before_persist => None,
             None => self
                 .conn
                 .prepare_cached(
@@ -90,7 +96,7 @@ impl State {
                         Ok((row.get::<_, i64>(0)?, db_size_to_u64(row.get::<_, i64>(1)?)))
                     })
                 })
-                .is_ok_and(|recorded| recorded == (mtime, size)),
+                .ok(),
         }
     }
 

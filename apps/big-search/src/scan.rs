@@ -352,10 +352,11 @@ pub fn reconcile_subtree_inline(
         if entry.file_type().is_some_and(|t| t.is_dir()) {
             dirs.push(path.to_path_buf());
         }
-        if state.unchanged(path, mtime, size) {
+        let recorded = state.recorded(path);
+        if recorded == Some((mtime, size)) {
             continue;
         }
-        if !state.contains(path) {
+        if recorded.is_none() {
             upsert_path(writer, f, path, Some(&md))?;
             outcome.index_changed = true;
         }
@@ -401,10 +402,11 @@ pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncO
             let Ok(md) = entry.metadata() else { continue };
             state.mark_seen(path)?;
             let (mtime, size) = state::meta_pair(&md);
-            if state.unchanged(path, mtime, size) {
+            let recorded = state.recorded(path);
+            if recorded == Some((mtime, size)) {
                 continue; // doc (and body) already current
             }
-            if !state.contains(path) {
+            if recorded.is_none() {
                 // New path → index its name. A known path with new mtime/size
                 // keeps its identical name doc; only content work is scheduled.
                 delete_path(&writer, &f, path);
@@ -470,10 +472,11 @@ pub fn reconcile_inline(
             let Ok(md) = entry.metadata() else { continue };
             state.mark_seen(path)?;
             let (mtime, size) = state::meta_pair(&md);
-            if state.unchanged(path, mtime, size) {
+            let recorded = state.recorded(path);
+            if recorded == Some((mtime, size)) {
                 continue;
             }
-            if !state.contains(path) {
+            if recorded.is_none() {
                 upsert_path(writer, f, path, Some(&md))?;
                 outcome.index_changed = true;
             }

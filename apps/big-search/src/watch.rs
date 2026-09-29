@@ -862,9 +862,10 @@ fn reconcile(
     for path in batch {
         let metadata = std::fs::symlink_metadata(&path).ok();
         let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
+        let recorded = state.recorded(&path);
         let out_of_scope = scope.excluded(&path, is_dir)
-            || (!state.contains(&path) && scan::repo_ignored(&path, is_dir));
-        if out_of_scope && !state.contains(&path) {
+            || (recorded.is_none() && scan::repo_ignored(&path, is_dir));
+        if out_of_scope && recorded.is_none() {
             continue; // out of scope and never catalogued: nothing to do
         }
         // Below this line an excluded path is treated exactly like a vanished
@@ -872,10 +873,10 @@ fn reconcile(
         // they covered it. Skipping it instead would strand those documents.
         if let Some(metadata) = metadata.filter(|_| !out_of_scope) {
             let (mtime, size) = state::meta_pair(&metadata);
-            if state.unchanged(&path, mtime, size) {
+            if recorded == Some((mtime, size)) {
                 continue; // metadata-only event (e.g. ATTRIB) → nothing to reindex
             }
-            if !state.contains(&path) {
+            if recorded.is_none() {
                 // New path → index its name. A known path that merely grew or
                 // was rewritten keeps its identical name doc (content work is
                 // scheduled through the state change below).
