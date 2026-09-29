@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
 
       - name: Hand the checkout to the build user
-        run: chown -R builder: "$GITHUB_WORKSPACE"
+        run: chown -R builder:builder "$GITHUB_WORKSPACE"
 
       - name: Install the toolchain from rust-toolchain.toml
         run: su builder -c 'rustup toolchain install'
