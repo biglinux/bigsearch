@@ -100,7 +100,7 @@ The name index holds one document per visible file:
 | `source` | stored | the device a hit lives on, kept while it is offline |
 | `dir` | raw, one term per ancestor folder | "under this folder" is one posting list |
 | `ext` | raw, lowercase | "only this extension" is one posting list |
-| `mime` | raw, stored: the type, then `major/*` | type filter; from the shared-mime-info globs, reading the first bytes only when the name has no type or several |
+| `mime` | raw, stored: the type, then `major/*` | type filter; from the shared-mime-info globs, reading the first bytes only when no glob matches the name or the heaviest ones name different types |
 | `stem` | raw: the whole folded name without extension | the exact name ranks first |
 | `mtime_day` | u64 fast field | newest first among equal scores |
 

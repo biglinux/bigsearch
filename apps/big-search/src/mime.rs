@@ -1,13 +1,14 @@
 //! A file's media type, as the desktop's own database has it.
 //!
-//! The name decides whenever the shared-mime-info globs give it one type: that
+//! The name decides whenever one type holds the heaviest matching glob: that
 //! costs a map lookup and no read, which is the case for nearly every file.
-//! Only a name with no type, or with several (`.ts` is a video, TypeScript or a
-//! Qt translation), has its first bytes read (`file-format`, pure Rust like
-//! every parser here), and among the name's candidates the one the content is,
-//! or descends from most closely, wins: text makes a `.ts` TypeScript, a
-//! transport stream makes it a video. Directories, empty files and anything not
-//! a regular file are never opened (a FIFO would block the scan).
+//! Only a name with no type, or with several tied at the top (`.ts` is a video
+//! or a Qt translation), has its first bytes read (`file-format`, pure Rust
+//! like every parser here), and among the name's candidates the one the
+//! content is, or descends from most closely, wins: text makes a `.ts`
+//! TypeScript, a transport stream makes it a video. Directories, empty files
+//! and anything not a regular file are never opened (a FIFO would block the
+//! scan).
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -164,8 +165,15 @@ impl Database {
         }
         let name = path.file_name()?.to_str()?;
         let candidates = self.candidates(name);
-        if let [only] = candidates {
-            return Some(only.mime.clone());
+        // shared-mime-info's checking order: the heaviest glob decides when
+        // one type holds it. `*.html` is also XHTML and `*.png` also APNG, at
+        // lower weights; only a tie at the top is worth reading the file for.
+        let top = candidates.iter().map(|glob| glob.weight).max();
+        let mut leaders = candidates.iter().filter(|glob| Some(glob.weight) == top);
+        if let Some(first) = leaders.next()
+            && leaders.all(|glob| self.canonical(&glob.mime) == self.canonical(&first.mime))
+        {
+            return Some(first.mime.clone());
         }
         let stat;
         let metadata = match known {
@@ -305,6 +313,12 @@ mod tests {
             "50:text/x-csrc:*.c:cs\n",
             "50:text/x-csrc:*.c\n",
             "10:text/x-readme:README*\n",
+            "80:text/html:*.html\n",
+            "50:application/xhtml+xml:*.html\n",
+            "50:image/png:*.png\n",
+            "40:image/apng:*.png\n",
+            "50:text/markdown:*.md\n",
+            "10:application/x-genesis-rom:*.md\n",
         ));
         for (child, parent) in [
             ("text/vnd.trolltech.linguist", "application/xml"),
@@ -343,6 +357,20 @@ mod tests {
         assert_eq!(
             db.of(Path::new("/nowhere/Widget.C"), None).as_deref(),
             Some("text/x-c++src")
+        );
+        // A lighter second type does not make the name ambiguous: these paths
+        // do not exist, so any answer came from the name alone.
+        assert_eq!(
+            db.of(Path::new("/nowhere/page.html"), None).as_deref(),
+            Some("text/html")
+        );
+        assert_eq!(
+            db.of(Path::new("/nowhere/shot.png"), None).as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            db.of(Path::new("/nowhere/README.md"), None).as_deref(),
+            Some("text/markdown")
         );
     }
 
