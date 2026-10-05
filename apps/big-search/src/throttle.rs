@@ -355,6 +355,12 @@ fn pause_after(work: Duration, load: Load) -> Duration {
 
 /// How long the content backfill should rest after a batch that took `work`,
 /// and the load that decided it.
+///
+/// The duty cycle is kept on the CPU time the service used in the batch, not
+/// on the batch's wall time: at idle priority on a busy machine most of that
+/// time is spent waiting for a CPU nobody else wants, which harms nobody, and
+/// resting four times as long as that waiting turned a 250-file batch of 29 s
+/// into a two-minute pause — an index of 88 000 documents into a night.
 pub fn backfill_pace(work: Duration) -> (Load, Duration) {
     let cgroup = own_cgroup_dir();
     let own = |name: &str| {
@@ -366,17 +372,19 @@ pub fn backfill_pace(work: Duration) -> (Load, Duration) {
     let own_io = own("io.pressure");
     let system_io = read_pressure("/proc/pressure/io").map_or(0.0, |p| p.some);
     let (cores, smt) = topology();
+    let (others_cores, own_cpu) = window_usage(cgroup.as_deref());
     let load = classify_load(Signals {
         own_io,
         others_io: (system_io - own_io).max(0.0),
         memory: read_pressure("/proc/pressure/memory"),
-        others_cores: others_cores(cgroup.as_deref()),
+        others_cores,
         cores,
         smt,
         workers: crate::content::default_workers() as f64,
         on_battery: on_battery(),
     });
-    (load, pause_after(work, load))
+    let used = own_cpu.map_or(work, |cpu| cpu.min(work));
+    (load, pause_after(used, load))
 }
 
 /// The last `(when, whole-machine busy CPU seconds, this cgroup's CPU seconds)`,
@@ -398,12 +406,13 @@ pub fn begin_cpu_window() {
     }
 }
 
-/// Cores the rest of the machine kept busy since the previous call. Zero on the
-/// first call, and whenever a counter cannot be read.
-fn others_cores(cgroup: Option<&std::path::Path>) -> f64 {
+/// Over the window since the previous call: the cores the rest of the machine
+/// kept busy, and the CPU time this service used. Zero cores and no time on
+/// the first call, and whenever a counter cannot be read.
+fn window_usage(cgroup: Option<&std::path::Path>) -> (f64, Option<Duration>) {
     let (Some(busy), Some(own)) = (machine_busy_seconds(), cgroup.and_then(cgroup_cpu_seconds))
     else {
-        return 0.0;
+        return (0.0, None);
     };
     let now = Instant::now();
     let mut sample = CPU_SAMPLE
@@ -411,13 +420,17 @@ fn others_cores(cgroup: Option<&std::path::Path>) -> f64 {
         .unwrap_or_else(|poison| poison.into_inner());
     let previous = sample.replace((now, busy, own));
     let Some((then, busy_then, own_then)) = previous else {
-        return 0.0;
+        return (0.0, None);
     };
     let wall = now.duration_since(then).as_secs_f64();
+    let own_used = (own - own_then).max(0.0);
     if wall <= 0.0 {
-        return 0.0;
+        return (0.0, None);
     }
-    (((busy - busy_then) - (own - own_then)) / wall).max(0.0)
+    (
+        (((busy - busy_then) - own_used) / wall).max(0.0),
+        Some(Duration::from_secs_f64(own_used)),
+    )
 }
 
 /// Busy CPU time of the whole machine, in seconds: the first line of
