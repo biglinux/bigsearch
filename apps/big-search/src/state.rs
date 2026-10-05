@@ -631,8 +631,10 @@ fn migrate_legacy_json_if_needed(
 /// files were sent back to extraction. Files of a format it did not read were
 /// recorded as done with no text; forgetting those rows once lets the next pass
 /// read them. It costs one extraction per such file, never data.
-const NEWLY_READ_FORMATS: (&str, &[&str]) =
-    ("content_formats:epub-eml-rtf", &["epub", "eml", "rtf"]);
+const NEWLY_READ_FORMATS: (&str, &[&str]) = (
+    "content_formats:epub-eml-rtf-doc",
+    &["epub", "eml", "rtf", "doc"],
+);
 
 fn forget_newly_read_formats(conn: &Connection) -> Result<()> {
     let (marker, extensions) = NEWLY_READ_FORMATS;
@@ -699,14 +701,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("content-state.json");
-        let (book, mail, text) = (
+        let (book, mail, text, docx) = (
             Path::new("/x/Livro.EPUB"),
             Path::new("/x/a.eml"),
             Path::new("/x/a.txt"),
+            Path::new("/x/a.docx"),
         );
         // An index from before: written without the migration's marker.
         let mut s = State::empty(file.clone());
-        for p in [book, mail, text] {
+        for p in [book, mail, text, docx] {
             s.set(p, 100, 5);
         }
         s.persist().unwrap();
@@ -720,7 +723,7 @@ mod tests {
 
         let mut s = State::load(file.clone());
         assert!(!s.unchanged(book, 100, 5) && !s.unchanged(mail, 100, 5));
-        assert!(s.unchanged(text, 100, 5));
+        assert!(s.unchanged(text, 100, 5) && s.unchanged(docx, 100, 5));
         // Read now and recorded again: a later start does not forget it.
         s.set(book, 100, 5);
         s.persist().unwrap();

@@ -41,7 +41,7 @@ over the user's *visible* home subtree:
 
 1. **Filename search** — substring/prefix, interactive latency (target < 10 ms warm).
 2. **Content search** — full-text over a small set of common document types
-   (`txt md pdf docx odt ods pptx epub eml rtf`), keyword, ranked.
+   (`txt md pdf docx odt ods pptx epub eml rtf doc`), keyword, ranked.
 
 Stays fresh in real time. Lean code: only what these two jobs need.
 
@@ -139,7 +139,7 @@ Per format, lightest tool, **argv arrays only — never a shell**:
 | epub | container → package → spine chapters, read as HTML (`zip`+`quick-xml`) | — | done |
 | eml | headers + plain/HTML body; MIME parts, base64, quoted-printable, RFC 2047 (`extract_mail.rs`) | — | done |
 | rtf | control words, `\'hh` / `\u` escapes, skipped destinations (`extract_rtf.rs`) | — | done |
-| doc (legacy, OLE2) | `litchi` (native OLE2) **or** `antiword` iff present, else skip | optional | later |
+| doc (legacy, OLE2) | `antiword` subprocess, same deadline/cap as `pdftotext`; RTF saved as `.doc` goes to the RTF reader | antiword (runtime) | done |
 
 **Extraction — PDF via `pdftotext` subprocess, bounded parallelism (P3.1 head-to-head).**
 The P3.1 spike compared the in-process pure-Rust path (`pdf_oxide`) against the
@@ -205,11 +205,15 @@ Pure pdftotext is 10.8 s. The "never fork-per-file" rule does not apply at this 
   in-process office path: 14 ms vs 1.5 ms per file — a subprocess per file costs
   more than parsing the XML. Files of these formats indexed before they were read
   are sent back to extraction once (`state.rs`, `forget_newly_read_formats`).
-- **doc (OLE2)** → NOT zip+XML (compound binary). Only here does a
-  crate earn its place: **`litchi`** (Apache-2.0, native OLE2+ODF+OOXML+RTF, active
-  but young — 32★, full-CRUD weight) is the **watch item**: if it matures it could
-  later consolidate the whole office family + `.doc` + `.rtf` into one crate. For now
-  `.doc` is rare (corpus: 9 docx, 0 .doc) → deferred, `antiword` subprocess fallback.
+- **doc (OLE2)** → NOT zip+XML (compound binary): `antiword -m UTF-8.txt -w 0`
+  through the same runner as `pdftotext` (deadline, `RLIMIT_AS`, capped stdout). The
+  file is told by its first bytes: OLE2 goes to `antiword`, RTF (which Word also saves
+  as `.doc`) to the RTF reader. Measured against `catdoc` on 19 real Word files and
+  31 LibreOffice-saved ones (LibreOffice's text as reference): `antiword` recall
+  0.99 / 1.00, accented words 243/246 and 10842/10858; `catdoc` 0.88 / 0.00 (empty
+  on every LibreOffice-saved file), 188/246 accents, and it needs `-s cp1252` or reads
+  the text as Cyrillic. Both about 1–2 ms a file. `litchi` (native OLE2) stays the
+  watch item if a crate should one day replace the subprocess.
 - **Cross-cutting**: extract cache keyed `(path,mtime,size)` — never re-extract
   unchanged; OCR off by default (opt-in, hard-throttled); raw-text mode (no layout);
   page/byte cap + streaming; header-sniff to skip encrypted/corrupt/image-only;

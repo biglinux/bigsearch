@@ -1,7 +1,8 @@
 //! Content extraction. Plain text in-process; PDF via a `pdftotext` subprocess
 //! (argv array, hard wall-clock timeout, capped output) — chosen over in-process
 //! Rust PDF libraries after benchmarking both on a real home directory: 4× faster
-//! and 12× less memory (DESIGN.md, "Extraction").
+//! and 12× less memory (DESIGN.md, "Extraction"). Word 97-2003 `.doc` the same
+//! way through `antiword`.
 pub(crate) use crate::extract_pdf::read_pdf;
 use std::io::Read;
 use std::path::Path;
@@ -46,18 +47,40 @@ pub fn is_content_path(path: &Path) -> bool {
 }
 
 /// Formats read whole by their own reader, which also gives the title the file
-/// declares: EPUB books, saved e-mail, RTF documents.
+/// declares when it has one: EPUB books, saved e-mail, RTF and Word 97-2003.
 fn is_titled_ext(ext: &str) -> bool {
-    matches!(ext, "epub" | "eml" | "rtf")
+    matches!(ext, "epub" | "eml" | "rtf" | "doc")
 }
 
-/// The text of an EPUB, e-mail or RTF file and the title it declares.
+/// The text of an EPUB, e-mail, RTF or `.doc` file and the title it declares.
 fn read_titled(path: &Path, ext: &str) -> Option<(String, Option<String>)> {
     match ext {
         "epub" => read_epub(path),
         "eml" => mail_text(&read_capped_bytes(path)?),
         "rtf" => rtf_text(&read_capped_bytes(path)?),
+        "doc" => read_doc(path),
         _ => None,
+    }
+}
+
+/// A `.doc` by what it holds: a Word 97-2003 file (OLE2) through `antiword`,
+/// RTF, which Word also saves under `.doc` and `antiword` refuses, or plain text
+/// (old README-style `.doc` files).
+fn read_doc(path: &Path) -> Option<(String, Option<String>)> {
+    if exceeds_input_cap(path) {
+        return None;
+    }
+    let mut magic = [0u8; 8];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut magic)
+        .ok()?;
+    if magic == [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1] {
+        crate::extract_pdf::read_word(path).map(|text| (text, None))
+    } else if magic.starts_with(b"{\\rtf") {
+        rtf_text(&read_capped_bytes(path)?)
+    } else {
+        read_text(path).map(|text| (text, None))
     }
 }
 

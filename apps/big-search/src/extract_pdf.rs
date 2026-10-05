@@ -1,10 +1,10 @@
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    reason = "PDF text extraction is the one place the daemon runs another program: \
-              pdftotext (and, for big-docinfo, pdfinfo) under a wall-clock timeout, with \
-              RLIMIT_AS set in pre_exec and its stdout read through a hard cap \
-              (see poppler_capped)"
+    reason = "text extraction is the one place the daemon runs other programs: \
+              pdftotext (and, for big-docinfo, pdfinfo) for PDF, antiword for Word 97-2003, \
+              under a wall-clock timeout, with RLIMIT_AS set in pre_exec and stdout read \
+              through a hard cap (see run_capped)"
 )]
 
 use std::io::Read;
@@ -69,7 +69,7 @@ pub(crate) fn read_pdf_titled(path: &Path) -> Option<(String, Option<String>)> {
 
 /// The number of pages `pdfinfo` reports.
 fn page_count(path: &Path) -> Option<u32> {
-    let info = poppler_capped("pdfinfo", path, 64 * 1024, &[])?;
+    let info = run_capped("pdfinfo", path, 64 * 1024, &[])?;
     String::from_utf8_lossy(&info)
         .lines()
         .find_map(|line| line.strip_prefix("Pages:"))
@@ -118,35 +118,42 @@ fn text_layer(mut text: String, cap: usize) -> Option<String> {
 }
 
 fn pdftotext_capped(path: &Path, max_bytes: usize, options: &[&str]) -> Option<Vec<u8>> {
-    poppler_capped("pdftotext", path, max_bytes, options)
+    if exceeds_pdf_input_cap(path) {
+        return None;
+    }
+    run_capped("pdftotext", path, max_bytes, options)
 }
 
-/// Runs one of the two poppler tools on `path` — `pdftotext` (to stdout) or
-/// `pdfinfo` — with a deadline, an address-space limit and capped output.
-fn poppler_capped(
+/// The text of a Word 97-2003 document: `antiword -m UTF-8.txt -w 0 -- <path>`,
+/// a paragraph per line. Same deadline, memory limit and cap as `pdftotext`.
+pub(crate) fn read_word(path: &Path) -> Option<String> {
+    let cap = crate::extract::max_extract_bytes();
+    let bytes = run_capped("antiword", path, cap, &["-m", "UTF-8.txt", "-w", "0"])?;
+    text_layer(String::from_utf8_lossy(&bytes).into_owned(), cap)
+}
+
+/// Runs `program` — `pdftotext` (to stdout), `pdfinfo` or `antiword` — on
+/// `path` with a deadline, an address-space limit and capped output.
+fn run_capped(
     program: &'static str,
     path: &Path,
     max_bytes: usize,
     options: &[&str],
 ) -> Option<Vec<u8>> {
-    if exceeds_pdf_input_cap(path) {
-        return None;
-    }
-
-    // Prefer one direct pdftotext process guarded by a pidfd. The capability
+    // Prefer one direct extractor process guarded by a pidfd. The capability
     // probe is not sufficient by itself: pidfd_open or watcher-thread creation
     // can still fail for this specific child under fd/thread pressure. In that
     // case, kill and reap the unguarded child before respawning through
     // timeout(1), so every successful spawn has a wall-clock deadline.
     let use_watchdog = pidfd_supported();
-    let mut child = spawn_poppler(program, path, !use_watchdog, options)?;
+    let mut child = spawn_capped(program, path, !use_watchdog, options)?;
     let watchdog = if use_watchdog {
         match SubprocessDeadline::arm(&child, Duration::from_secs(pdf_timeout_secs())) {
             Some(watchdog) => Some(watchdog),
             None => {
                 kill_child_tree(&mut child);
                 let _ = child.wait();
-                child = spawn_poppler(program, path, true, options)?;
+                child = spawn_capped(program, path, true, options)?;
                 None
             }
         }
@@ -156,7 +163,7 @@ fn poppler_capped(
 
     // Returning early here must still reap: `Child`'s drop does not wait, so a
     // bare `?` would leave a zombie (and the watchdog thread alive) until the
-    // daemon exits — one per unreadable PDF.
+    // daemon exits — one per unreadable file.
     let Some(mut stdout) = child.stdout.take() else {
         kill_child_tree(&mut child);
         let _ = child.wait();
@@ -207,7 +214,7 @@ fn poppler_capped(
 
 /// `program` and `options` are fixed strings from this file, never caller input;
 /// `path` follows `--`, so a file named "-f" stays a file.
-fn spawn_poppler(
+fn spawn_capped(
     program: &'static str,
     path: &Path,
     use_timeout_wrapper: bool,
@@ -507,6 +514,65 @@ mod tests {
                 None => std::env::remove_var("BIG_SEARCH_EXTRACT_MAX_MB"),
             }
         }
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&bin).ok();
+    }
+
+    /// A `.doc` is read by what it holds: OLE2 through `antiword` (argv checked by
+    /// a fake one on PATH), RTF saved as `.doc` by the RTF reader, text as text.
+    #[test]
+    fn doc_files_go_to_antiword_or_the_rtf_reader_by_content() {
+        let _env_guard = subprocess_env_guard();
+        let dir = temporary_extract_dir("doc");
+        let bin = temporary_executable_dir("doc");
+        let fake_antiword = bin.join("antiword");
+        std::fs::write(&fake_antiword, "#!/bin/sh\necho \"Relatório $*\"\n").unwrap();
+        let mut permissions = std::fs::metadata(&fake_antiword).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_antiword, permissions).unwrap();
+        let word = dir.join("-word.doc");
+        let mut ole2 = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        ole2.resize(512, 0);
+        std::fs::write(&word, ole2).unwrap();
+        let rtf = dir.join("saved-as.doc");
+        std::fs::write(
+            &rtf,
+            br"{\rtf1\ansi{\info{\title Ata}}Ata da reuni\'e3o\par}",
+        )
+        .unwrap();
+        let other = dir.join("other.doc");
+        std::fs::write(&other, b"PK\x03\x04\0\0 binary").unwrap();
+        let text = dir.join("README.DOC");
+        std::fs::write(&text, b"Keymap notes\n").unwrap();
+
+        let previous_path = std::env::var_os("PATH");
+        let test_path = previous_path
+            .as_ref()
+            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
+            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
+        unsafe {
+            std::env::set_var("PATH", test_path);
+        }
+        let word_text = crate::extract::content(&word);
+        let rtf_described = crate::extract::described(&rtf);
+        let other_text = crate::extract::content(&other);
+        let plain_text = crate::extract::content(&text);
+        unsafe {
+            match previous_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
+        assert_eq!(
+            word_text.as_deref().map(str::trim_end),
+            Some(format!("Relatório -m UTF-8.txt -w 0 -- {}", word.display()).as_str())
+        );
+        let rtf_described = rtf_described.expect("rtf text");
+        assert!(rtf_described.text.contains("Ata da reunião"));
+        assert_eq!(rtf_described.declared_title.as_deref(), Some("Ata"));
+        assert!(other_text.is_none());
+        assert_eq!(plain_text.as_deref(), Some("Keymap notes\n"));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&bin).ok();
     }
