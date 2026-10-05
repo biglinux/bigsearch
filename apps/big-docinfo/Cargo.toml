@@ -1,0 +1,22 @@
+[package]
+name = "big-docinfo-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+description = "Suggests a file name for a document from what it says, and renames it without ever overwriting"
+license.workspace = true
+repository.workspace = true
+workspace = "../.."
+
+[[bin]]
+name = "big-docinfo"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { version = "1.0.103" }
+big-docinfo = { path = "../../crates/foundation/big-docinfo", version = "0.1.0" }
+# Text extraction exactly as the search service does it: same limits, same
+# pdftotext sandbox, same configuration. The daemon itself is not involved.
+big-search = { path = "../big-search", version = "0.1.0" }
+libc = { version = "0.2.186" }
+serde_json = { version = "1.0.150" }

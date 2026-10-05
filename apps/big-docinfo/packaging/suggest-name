@@ -1,0 +1,24 @@
+#!/bin/sh
+# Dolphin "Suggest a name…": shows what big-docinfo found in the file and lets the
+# person edit the suggested name. Nothing is renamed unless they press OK, and
+# big-docinfo refuses to replace an existing file.
+file=$1
+title="Sugerir nome"
+
+if ! details=$(big-docinfo "$file" 2>&1); then
+	kdialog --title "$title" --sorry "$details"
+	exit 1
+fi
+name=$(big-docinfo --name "$file") || exit 1
+
+# The last line repeats the name; the rest comes from the document, so keep the
+# dialog from reading it as rich text.
+details=$(printf '%s\n' "$details" | sed '$d; s/</‹/g; s/>/›/g')
+
+new=$(kdialog --title "$title" --inputbox "$details" "$name") || exit 0
+[ "$new" = "$(basename -- "$file")" ] && exit 0
+
+if ! error=$(big-docinfo rename "$file" "$new" 2>&1 >/dev/null); then
+	kdialog --title "$title" --error "$error"
+	exit 1
+fi

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/big-docinfo",
     "apps/big-search",
     "crates/foundation/big-docinfo",
     "crates/foundation/big-indexd-client",

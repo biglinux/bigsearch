@@ -120,6 +120,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "big-docinfo-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "big-docinfo",
+ "big-search",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "big-indexd-client"
 version = "0.1.0"
 dependencies = [
