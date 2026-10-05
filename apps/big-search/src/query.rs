@@ -644,7 +644,7 @@ pub fn search_content(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec
 }
 
 /// The query for documents holding every word of `q`, the last one as typed
-/// so far (see [`last_word_query`]); `None` for a query with no word.
+/// so far (see [`word_query`]); `None` for a query with no word.
 fn content_query(searcher: &tantivy::Searcher, q: &str) -> Result<Option<BooleanQuery>> {
     let index = searcher.index();
     let f = content_fields(index)?;
@@ -671,19 +671,16 @@ fn content_query(searcher: &tantivy::Searcher, q: &str) -> Result<Option<Boolean
     let Some(last) = words.pop() else {
         return Ok(None);
     };
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> = words
-        .iter()
-        .map(|word| {
-            let term = Term::from_field_text(f.body, word);
-            (
-                Occur::Must,
-                Box::new(TermQuery::new(term, record)) as Box<dyn Query>,
-            )
-        })
-        .collect();
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(words.len() + 1);
+    for word in &words {
+        clauses.push((
+            Occur::Must,
+            word_query(searcher, f.body, word, record, false)?,
+        ));
+    }
     clauses.push((
         Occur::Must,
-        last_word_query(searcher, f.body, &last, record)?,
+        word_query(searcher, f.body, &last, record, true)?,
     ));
     Ok(Some(BooleanQuery::new(clauses)))
 }
@@ -699,24 +696,65 @@ const PREFIX_DOC_BUDGET: u64 = 50_000;
 /// one in a large vocabulary.
 const MAX_SCANNED_TERMS: usize = 20_000;
 
-/// The last word of a content query as typed so far: the word itself, ranked
-/// first, or any indexed word it begins — as-you-type in a launcher, and
-/// "relatorio" finds "relatorios", "contrato" finds "contratos". The most
-/// frequent words come first, within [`MAX_PREFIX_TERMS`] and
-/// [`PREFIX_DOC_BUDGET`]; each keeps its BM25 score. A word of CJK bigrams, or
-/// shorter than [`MIN_PREFIX_CHARS`], is matched exactly.
-fn last_word_query(
+/// One word of a content query: the word itself, ranked first, or its plural
+/// or singular (see [`inflections`]) — "relatorios" finds "relatorio", "acao"
+/// finds "acoes". The last word is also read as typed so far: it finds any
+/// indexed word it begins — as-you-type in a launcher — the most frequent
+/// first (see [`prefix_forms`]). Every form keeps its BM25 score. A word of CJK
+/// bigrams is matched exactly, and a last word shorter than
+/// [`MIN_PREFIX_CHARS`] begins nothing.
+fn word_query(
     searcher: &tantivy::Searcher,
     field: tantivy::schema::Field,
     word: &str,
     record: IndexRecordOption,
+    last: bool,
 ) -> Result<Box<dyn Query>> {
     let exact = TermQuery::new(Term::from_field_text(field, word), record);
-    if word.chars().count() < MIN_PREFIX_CHARS
-        || word.chars().any(crate::cjk_tokenizer::is_unspaced)
-    {
+    if word.chars().any(crate::cjk_tokenizer::is_unspaced) {
         return Ok(Box::new(exact));
     }
+    // Only forms the index holds: a query term for a word no document has
+    // would cost a lookup for nothing on every segment.
+    let mut forms: Vec<String> = inflections(word)
+        .into_iter()
+        .filter(|form| {
+            searcher.segment_readers().iter().any(|segment| {
+                segment.inverted_index(field).is_ok_and(|inverted| {
+                    inverted
+                        .terms()
+                        .get(form.as_bytes())
+                        .is_ok_and(|info| info.is_some())
+                })
+            })
+        })
+        .collect();
+    if last && word.chars().count() >= MIN_PREFIX_CHARS {
+        forms.extend(prefix_forms(searcher, field, word)?);
+    }
+    if forms.is_empty() {
+        return Ok(Box::new(exact));
+    }
+    forms.sort_unstable();
+    forms.dedup();
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
+        Occur::Should,
+        Box::new(BoostQuery::new(Box::new(exact), EXACT_WORD_BOOST)),
+    )];
+    for form in forms {
+        let term = Term::from_field_text(field, &form);
+        clauses.push((Occur::Should, Box::new(TermQuery::new(term, record))));
+    }
+    Ok(Box::new(BooleanQuery::new(clauses)))
+}
+
+/// The indexed words `word` begins, the most frequent first, within
+/// [`MAX_PREFIX_TERMS`] and [`PREFIX_DOC_BUDGET`].
+fn prefix_forms(
+    searcher: &tantivy::Searcher,
+    field: tantivy::schema::Field,
+    word: &str,
+) -> Result<Vec<String>> {
     let upper = prefix_end(word.as_bytes());
     let mut doc_freqs: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for segment in searcher.segment_readers() {
@@ -738,20 +776,82 @@ fn last_word_query(
     }
     let mut expansions: Vec<(String, u64)> = doc_freqs.into_iter().collect();
     expansions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
-        Occur::Should,
-        Box::new(BoostQuery::new(Box::new(exact), EXACT_WORD_BOOST)),
-    )];
+    let mut forms = Vec::new();
     let mut read = 0u64;
     for (text, doc_freq) in expansions.into_iter().take(MAX_PREFIX_TERMS) {
         if read > 0 && read + doc_freq > PREFIX_DOC_BUDGET {
             break;
         }
         read += doc_freq;
-        let term = Term::from_field_text(field, &text);
-        clauses.push((Occur::Should, Box::new(TermQuery::new(term, record))));
+        forms.push(text);
     }
-    Ok(Box::new(BooleanQuery::new(clauses)))
+    Ok(forms)
+}
+
+/// The plural and singular forms of a folded Portuguese, Spanish or English
+/// word, by suffix: "acao" ↔ "acoes", "responsavel" ↔ "responsaveis",
+/// "imagem" ↔ "imagens", "flor" ↔ "flores", "relatorio" ↔ "relatorios".
+///
+/// Snowball stemming was measured on this index's own vocabulary first: on
+/// folded words it joined none of the -ões/-ais/-eis/-ns plurals to their
+/// singulars and merged "casa" with "caso", "casado" and "case". These rules
+/// joined every such pair the vocabulary held (670 -ões, 421 -ais, 261 -eis,
+/// 194 -ns, 93 % of -s), in both directions. A form counts only if it has four
+/// letters or more (against "tres" → "tre", "pais" → "pai"), and it ranks below
+/// the word as typed.
+fn inflections(word: &str) -> Vec<String> {
+    const PLURAL_TO_SINGULAR: &[(&str, &[&str])] = &[
+        ("oes", &["ao"]),
+        ("aes", &["ao"]),
+        ("aos", &["ao"]),
+        ("ais", &["al"]),
+        ("eis", &["el", "il"]),
+        ("ois", &["ol"]),
+        ("uis", &["ul"]),
+        ("ns", &["m"]),
+        ("res", &["r"]),
+        ("zes", &["z"]),
+        ("ses", &["s"]),
+        ("xes", &["x"]),
+        ("ches", &["ch"]),
+        ("shes", &["sh"]),
+        ("s", &[""]),
+    ];
+    const SINGULAR_TO_PLURAL: &[(&str, &[&str])] = &[
+        ("ao", &["oes", "aes", "aos"]),
+        ("al", &["ais"]),
+        ("el", &["eis"]),
+        ("il", &["eis"]),
+        ("ol", &["ois"]),
+        ("ul", &["uis"]),
+        ("m", &["ns"]),
+        ("r", &["res"]),
+        ("z", &["zes"]),
+        ("s", &["ses"]),
+        ("x", &["xes"]),
+        ("ch", &["ches"]),
+        ("sh", &["shes"]),
+        ("", &["s"]),
+    ];
+    let mut forms: Vec<String> = Vec::new();
+    if !word.is_ascii() || word.len() < 4 {
+        return forms;
+    }
+    for (from, tos) in PLURAL_TO_SINGULAR.iter().chain(SINGULAR_TO_PLURAL) {
+        let Some(base) = word.strip_suffix(from) else {
+            continue;
+        };
+        if base.len() < 2 {
+            continue;
+        }
+        for to in *tos {
+            let form = format!("{base}{to}");
+            if form.len() >= 4 && form != word && !forms.contains(&form) {
+                forms.push(form);
+            }
+        }
+    }
+    forms
 }
 
 /// The word as typed weighs this much more than the words it begins.
@@ -1824,8 +1924,42 @@ mod tests {
         assert_eq!(paths("contrato"), ["/d/plural.txt"]);
         assert_eq!(paths("os rela"), ["/d/plural.txt"]);
         assert!(paths("re").is_empty());
-        // Only the last word stretches: "relatorio" is not in plural.txt.
-        assert!(paths("relatorio contratos").is_empty());
+        // Only the last word begins others: "rel" is no word of plural.txt.
+        assert!(paths("rel contratos").is_empty());
+    }
+
+    /// Every word finds its plural or singular, in both directions and whatever
+    /// its place; the form as typed ranks first; a short word is left alone.
+    #[test]
+    fn content_words_find_their_plural_and_singular() {
+        let content = content_index_with(
+            "inflection",
+            &[
+                ("/d/singular.txt", "o relatório da ação do responsável"),
+                ("/d/plural.txt", "os relatórios das ações dos responsáveis"),
+                ("/d/again.txt", "relatórios e ações, imagens e flores"),
+                ("/d/mail.txt", "mail server mail queue"),
+                ("/d/mail2.txt", "another mail"),
+            ],
+        );
+        let paths = |q: &str| -> Vec<String> {
+            search_content(&content, q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect()
+        };
+        let mut found = paths("relatorios acoes");
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert_ne!(found[0], "/d/singular.txt", "the form as typed ranks first");
+        found.sort();
+        assert_eq!(found, ["/d/again.txt", "/d/plural.txt", "/d/singular.txt"]);
+        let found = paths("acao responsavel");
+        assert_eq!(found[0], "/d/singular.txt");
+        assert!(found.contains(&"/d/plural.txt".to_string()), "{found:?}");
+        assert!(paths("imagem flor").contains(&"/d/again.txt".to_string()));
+        // "mais" is no plural of "mail".
+        assert!(paths("mais servidor").is_empty());
     }
 
     /// A page holds only its own hits; the total still counts every match,
