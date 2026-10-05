@@ -9,7 +9,8 @@ use tantivy::schema::{
     Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
 };
 use tantivy::tokenizer::{
-    AsciiFoldingFilter, LowerCaser, NgramTokenizer, RemoveLongFilter, TextAnalyzer,
+    AsciiFoldingFilter, LowerCaser, NgramTokenizer, RemoveLongFilter, TextAnalyzer, Token,
+    TokenFilter, TokenStream, Tokenizer,
 };
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
@@ -18,9 +19,10 @@ use tantivy::{Index, IndexWriter, TantivyDocument};
 /// grams), so the on-disk schema differs and the name index rebuilds.
 pub const NGRAM: &str = "name_grams";
 /// Registered analyzer for the `body` field: CJK-bigram aware, word-splitting
-/// otherwise, accent-folded. Bumped from `body_text` (SimpleTokenizer) so the
-/// on-disk schema differs → the index auto-rebuilds with the new analyzer.
-pub const BODY: &str = "body_cjk";
+/// otherwise, folded like names ([`ScriptFold`] then ASCII folding). Bumped
+/// from `body_cjk` (folding Latin accents only) so the on-disk schema differs
+/// and the content index rebuilds with the new analyzer.
+pub const BODY: &str = "body_folded";
 const DEFAULT_BACKGROUND_WRITER_MEMORY_MB: usize = 15;
 const DEFAULT_BULK_WRITER_MEMORY_MB: usize = 32;
 const MIN_WRITER_MEMORY_MB: usize = 15;
@@ -186,9 +188,86 @@ fn register_body_tokenizer(index: &Index) {
         TextAnalyzer::builder(CjkFriendlyTokenizer)
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
+            .filter(ScriptFold)
             .filter(AsciiFoldingFilter)
             .build(),
     );
+}
+
+/// The folding of [`crate::extract::fold_script_into`] for content words, so a
+/// word is indexed and queried the way names are compared: "отчет" finds
+/// "Отчёт", "αναφορα" "Αναφορά", "احمد" "أحمد", a decomposed accent its
+/// precomposed twin. An Arabic word also loses its article (ال, وال, بال,
+/// كال, فال, لل) when three letters or more remain, so "مبيعات" and
+/// "المبيعات" are one word.
+#[derive(Clone)]
+pub struct ScriptFold;
+
+impl TokenFilter for ScriptFold {
+    type Tokenizer<T: Tokenizer> = ScriptFoldFilter<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        ScriptFoldFilter {
+            tokenizer,
+            buffer: String::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ScriptFoldFilter<T> {
+    tokenizer: T,
+    buffer: String,
+}
+
+impl<T: Tokenizer> Tokenizer for ScriptFoldFilter<T> {
+    type TokenStream<'a> = ScriptFoldStream<'a, T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        ScriptFoldStream {
+            tail: self.tokenizer.token_stream(text),
+            buffer: &mut self.buffer,
+        }
+    }
+}
+
+pub struct ScriptFoldStream<'a, T> {
+    buffer: &'a mut String,
+    tail: T,
+}
+
+impl<T: TokenStream> TokenStream for ScriptFoldStream<'_, T> {
+    fn advance(&mut self) -> bool {
+        if !self.tail.advance() {
+            return false;
+        }
+        let text = &self.tail.token().text;
+        if text.is_ascii() {
+            return true;
+        }
+        self.buffer.clear();
+        crate::extract::fold_script_into(text, self.buffer);
+        if self
+            .buffer
+            .starts_with(|c: char| ('\u{0600}'..='\u{06FF}').contains(&c))
+            && let Some(rest) = ["وال", "بال", "كال", "فال", "ال", "لل"]
+                .iter()
+                .find_map(|article| self.buffer.strip_prefix(article))
+                .filter(|rest| rest.chars().count() >= 3)
+        {
+            *self.buffer = rest.to_owned();
+        }
+        std::mem::swap(&mut self.tail.token_mut().text, self.buffer);
+        true
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
 }
 
 /// Resolved field handles for the name index schema.

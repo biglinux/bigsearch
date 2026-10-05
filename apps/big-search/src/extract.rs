@@ -613,18 +613,18 @@ fn office_text_with<R: std::io::Read + std::io::Seek>(
     }
 }
 
-/// Lowercase and fold `s` the way every comparison of names and pages does,
-/// so a person types a word the way they would write it by hand:
+/// Lowercase and fold `s` the way every comparison of names, pages and
+/// content words does, so a person types a word the way they would write it
+/// by hand:
 ///
 /// - accents and other marks go, whether the text carries them precomposed
 ///   ("relatório") or decomposed, as names unpacked from macOS archives do
 ///   ("relato\u{301}rio"); so does the dot that "İ" lowercases with;
 /// - Latin letters fold through tantivy's `AsciiFoldingFilter`, the table the
 ///   content analyzer uses: "ß" is "ss", "Ł" is "l", "Æ" is "ae";
-/// - "ё" is "е", as Russian is mostly typed; Greek loses its tonos and writes
-///   final "ς" as "σ".
+/// - the other scripts fold as [`fold_script_into`] says.
 ///
-/// Each other script is left as it is. ASCII text is only lowercased.
+/// ASCII text is only lowercased.
 #[must_use]
 pub fn fold_lower(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -639,29 +639,40 @@ pub fn fold_lower_into(s: &str, out: &mut String) {
         out.extend(s.chars().map(|c| c.to_ascii_lowercase()));
         return;
     }
-    let mut lowered = String::with_capacity(s.len());
-    for c in s.chars().flat_map(char::to_lowercase) {
-        match c {
-            '\u{0300}'..='\u{036F}' => {}
-            'ё' => lowered.push('е'),
-            'ς' => lowered.push('σ'),
-            'ά' => lowered.push('α'),
-            'έ' => lowered.push('ε'),
-            'ή' => lowered.push('η'),
-            'ί' | 'ϊ' | 'ΐ' => lowered.push('ι'),
-            'ό' => lowered.push('ο'),
-            'ύ' | 'ϋ' | 'ΰ' => lowered.push('υ'),
-            'ώ' => lowered.push('ω'),
-            c => lowered.push(c),
-        }
-    }
+    let lowered: String = s.chars().flat_map(char::to_lowercase).collect();
+    let mut folded = String::with_capacity(lowered.len());
+    fold_script_into(&lowered, &mut folded);
     ASCII_FOLDING.with(|analyzer| {
         let mut analyzer = analyzer.borrow_mut();
-        let mut stream = analyzer.token_stream(&lowered);
+        let mut stream = analyzer.token_stream(&folded);
         if stream.advance() {
             out.push_str(&stream.token().text);
         }
     });
+}
+
+/// The folding of lowercase text that `AsciiFoldingFilter` leaves to others:
+/// combining marks dropped; Russian "ё" written "е", as it mostly is; Greek
+/// without its accents and with final "ς" as "σ"; Arabic alef without hamza,
+/// "ى" as "ي", and no vowel signs or tatweel.
+pub(crate) fn fold_script_into(lowered: &str, out: &mut String) {
+    for c in lowered.chars() {
+        match c {
+            '\u{0300}'..='\u{036F}' | '\u{064B}'..='\u{065F}' | '\u{0670}' | '\u{0640}' => {}
+            'ё' => out.push('е'),
+            'ς' => out.push('σ'),
+            'ά' => out.push('α'),
+            'έ' => out.push('ε'),
+            'ή' => out.push('η'),
+            'ί' | 'ϊ' | 'ΐ' => out.push('ι'),
+            'ό' => out.push('ο'),
+            'ύ' | 'ϋ' | 'ΰ' => out.push('υ'),
+            'ώ' => out.push('ω'),
+            'أ' | 'إ' | 'آ' | 'ٱ' => out.push('ا'),
+            'ى' => out.push('ي'),
+            c => out.push(c),
+        }
+    }
 }
 
 thread_local! {
@@ -1023,6 +1034,7 @@ mod tests {
             ("İstanbul ılık", "istanbul ilik"),
             ("Отчёт ЁЛКА", "отчет елка"),
             ("Αναφορά ΟΔΟΣ οδός", "αναφορα οδοσ οδοσ"),
+            ("أحمد مُحَمَّد مستشفى", "احمد محمد مستشفي"),
             ("中文内容 ABC", "中文内容 abc"),
             ("🙂 EMOJI", "🙂 emoji"),
             ("", ""),

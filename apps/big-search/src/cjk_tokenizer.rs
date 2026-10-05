@@ -29,6 +29,14 @@ pub(crate) fn is_unspaced(c: char) -> bool {
     )
 }
 
+/// A combining mark: part of the word it follows, so a decomposed accent
+/// ("relato\u{301}rio", as text copied from macOS carries it) does not cut the
+/// word in two before the analyzer folds it away. It never starts a word.
+fn is_combining_mark(c: char) -> bool {
+    matches!(c as u32,
+        0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)
+}
+
 #[cfg(test)]
 fn mk(text: String, from: usize, to: usize, position: usize) -> Token {
     Token {
@@ -86,7 +94,7 @@ fn tokenize(text: &str) -> Vec<Token> {
             let mut word = String::new();
             while i < chars.len() {
                 let (_, cj) = chars[i];
-                if is_unspaced(cj) || !cj.is_alphanumeric() {
+                if is_unspaced(cj) || !(cj.is_alphanumeric() || is_combining_mark(cj)) {
                     break;
                 }
                 word.push(cj);
@@ -152,7 +160,10 @@ impl CjkTokenStream<'_> {
                 continue;
             }
             match self.char_at(end) {
-                Some(next) if !is_unspaced(next) && next.is_alphanumeric() => {
+                Some(next)
+                    if !is_unspaced(next)
+                        && (next.is_alphanumeric() || is_combining_mark(next)) =>
+                {
                     end += next.len_utf8();
                 }
                 _ => break,
@@ -299,6 +310,7 @@ mod tests {
             "a\tb\nc\r\nd",
             "中a文b内c容",
             "  中文  english  中文  ",
+            "relato\u{301}rio \u{301}solto ca\u{327}a\u{303}o",
         ];
         for text in corpus {
             let expected = tokenize(text);

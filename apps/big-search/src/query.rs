@@ -773,7 +773,6 @@ fn word_query(
     // would cost a lookup for nothing on every segment.
     let mut forms: Vec<String> = inflections(word)
         .into_iter()
-        .chain(script_variants(word))
         .filter(|form| {
             searcher.segment_readers().iter().any(|segment| {
                 segment.inverted_index(field).is_ok_and(|inverted| {
@@ -812,92 +811,6 @@ fn with_forms(
         clauses.push((Occur::Should, Box::new(TermQuery::new(term, record))));
     }
     Box::new(BooleanQuery::new(clauses))
-}
-
-/// Spellings of a content word that the analyzer keeps apart and people treat
-/// as one: Russian е and ё, Greek with or without its accent and final ς, and
-/// Arabic alef with or without hamza, with or without the article. The content
-/// index stores words as written, so the query asks for each spelling the
-/// index holds instead of every document being re-read to fold them: of 5.5
-/// million indexed words, these were the cases found (702 with ё, 18 133 with
-/// a Greek accent, 1 443 with a hamza alef, 1 932 with the article), while
-/// decomposed accents, which only re-reading would fix, were 387, all of them
-/// the dot of a Turkish İ.
-fn script_variants(word: &str) -> Vec<String> {
-    let mut variants: Vec<String> = Vec::new();
-    let chars: Vec<char> = word.chars().collect();
-    let mut push = |variant: String| {
-        if variant != word && !variants.contains(&variant) {
-            variants.push(variant);
-        }
-    };
-    // Russian: ё typed as е, or written as е.
-    if word.contains('ё') {
-        push(word.replace('ё', "е"));
-    }
-    for (i, &c) in chars.iter().enumerate() {
-        if c == 'е' {
-            let mut with_yo = chars.clone();
-            with_yo[i] = 'ё';
-            push(with_yo.into_iter().collect());
-        }
-    }
-    // Greek: the accent typed or left out, on whichever vowel carries it.
-    const TONOS: [(char, char); 7] = [
-        ('α', 'ά'),
-        ('ε', 'έ'),
-        ('η', 'ή'),
-        ('ι', 'ί'),
-        ('ο', 'ό'),
-        ('υ', 'ύ'),
-        ('ω', 'ώ'),
-    ];
-    let plain = |c: char| TONOS.iter().find(|(_, a)| *a == c).map_or(c, |(p, _)| *p);
-    if chars.iter().any(|c| TONOS.iter().any(|(_, a)| a == c)) {
-        push(chars.iter().map(|&c| plain(c)).collect());
-    } else {
-        for (i, &c) in chars.iter().enumerate() {
-            if let Some((_, accented)) = TONOS.iter().find(|(p, _)| *p == c) {
-                let mut with_tonos = chars.clone();
-                with_tonos[i] = *accented;
-                push(with_tonos.into_iter().collect());
-            }
-        }
-    }
-    if let Some(stem) = word.strip_suffix('σ') {
-        push(format!("{stem}ς"));
-    }
-    if let Some(stem) = word.strip_suffix('ς') {
-        push(format!("{stem}σ"));
-    }
-    // Arabic: alef with or without hamza, and the article in front or not.
-    let arabic = chars.iter().any(|c| ('\u{0600}'..='\u{06FF}').contains(c));
-    if arabic && chars.len() >= 3 {
-        let bare: String = chars
-            .iter()
-            .map(|&c| if "أإآٱ".contains(c) { 'ا' } else { c })
-            .collect();
-        let without_article = ["وال", "بال", "كال", "فال", "ال", "لل"]
-            .iter()
-            .find_map(|article| {
-                bare.strip_prefix(article)
-                    .filter(|rest| rest.chars().count() >= 3)
-            })
-            .unwrap_or(&bare)
-            .to_owned();
-        let mut stems = vec![without_article.clone()];
-        if let Some(rest) = without_article.strip_prefix('ا') {
-            for hamza in ['أ', 'إ', 'آ'] {
-                stems.push(format!("{hamza}{rest}"));
-            }
-        }
-        for stem in stems {
-            for article in ["", "ال", "وال", "بال"] {
-                push(format!("{article}{stem}"));
-            }
-        }
-    }
-    variants
 }
 
 /// The indexed words `word` begins, the most frequent first, within
@@ -2080,9 +1993,11 @@ mod tests {
         assert!(paths("rel contratos").is_empty());
     }
 
-    /// The spellings people treat as one find each other: Russian е/ё, Greek
-    /// with or without its accent, Arabic alef with or without hamza and with
-    /// or without the article; one CJK character finds the words it opens.
+    /// The spellings people treat as one find each other, because content words
+    /// are folded like names: Russian е/ё, Greek with or without its accent,
+    /// Arabic alef with or without hamza and with or without the article, a
+    /// decomposed accent, the Turkish İ; one CJK character finds the words it
+    /// opens.
     #[test]
     fn content_spellings_find_each_other() {
         let content = content_index_with(
@@ -2093,6 +2008,8 @@ mod tests {
                 ("/d/el.txt", "Οι πωλήσεις αυξήθηκαν κατά είκοσι"),
                 ("/d/ar.txt", "ارتفعت المبيعات وقال أحمد"),
                 ("/d/zh.txt", "本季度的销售额增长了"),
+                ("/d/nfd.txt", "relato\u{301}rio decomposto"),
+                ("/d/tr.txt", "İstanbul'da satışlar arttı"),
             ],
         );
         let paths = |q: &str| -> Vec<String> {
@@ -2112,6 +2029,8 @@ mod tests {
         assert_eq!(paths("مبيعات"), ["/d/ar.txt"]);
         assert_eq!(paths("احمد"), ["/d/ar.txt"]);
         assert_eq!(paths("销"), ["/d/zh.txt"]);
+        assert_eq!(paths("relatorio"), ["/d/nfd.txt"]);
+        assert_eq!(paths("istanbul"), ["/d/tr.txt"]);
     }
 
     /// One CJK character finds the names it stands in, wherever it stands.
