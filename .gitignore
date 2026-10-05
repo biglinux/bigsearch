@@ -5,4 +5,7 @@ mutants.out*/
 apps/big-search/packaging/arch/pkg/
 apps/big-search/packaging/arch/src/
 apps/big-search/packaging/arch/test-tmp/
+apps/big-docinfo/packaging/arch/pkg/
+apps/big-docinfo/packaging/arch/src/
+apps/big-docinfo/packaging/arch/test-tmp/
 *.pkg.tar.*
