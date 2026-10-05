@@ -263,6 +263,26 @@ thread policies still apply. No policy helps against the SMT sibling — the two
 share one core — which is what the backfill's pacing (`backfill_pace`) is still
 for.
 
+The pacing is relative to the hardware it reads (`throttle::topology`: physical
+cores and SMT over the CPUs the process may use). The scheduler gives each busy
+program a core of its own while it can, so the free cores are the cores minus
+the CPUs the others keep busy during the batch. Measured on machines simulated
+with `taskset` on P-core pairs (a CPU loop in the program's place, two workers
+flat out in an idle cgroup):
+
+| Machine | Program loses |
+|---|---|
+| no SMT (2 and 4 cores), program on 1 thread or every core | ~0 % (±10 % noise) |
+| SMT, free cores ≥ workers | -1–8 % |
+| SMT, one free core short | 23–28 % |
+| SMT, no free core | 42–49 % at 100 % duty, 17–24 % at 50 %, 2–12 % at 20 % |
+
+So without SMT the CPU never makes the backfill wait; with SMT it runs at a 20 %
+duty cycle when the free cores are fewer than its workers and rests 30 s when
+none is free. Memory pressure, disk stall (most disk schedulers ignore I/O
+priority) and battery still slow it on any machine. Its own CPU stall is no
+longer a signal: at idle priority it only says that others are busy.
+
 The clamp holds the clock below turbo where the frequency driver follows the
 scheduler: a CPU loop ran at 4.1 GHz unclamped, 2.3 GHz at 512 (base 2.5) on a
 P-core; 3.3 and 1.7 GHz (base 1.8) on an E-core. Drivers that choose frequencies
