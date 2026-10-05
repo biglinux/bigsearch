@@ -536,6 +536,10 @@ fn cmd_daemon() -> Result<()> {
 
     // All indexing runs in the watcher thread at background priority; the main
     // thread stays at normal priority so queries are never slowed.
+    match throttle::prepare_idle_cgroup() {
+        Some(how) => log::info!("indexing runs in its own cgroup ({how})"),
+        None => log::info!("indexing shares the service's cgroup (no cgroup delegated)"),
+    }
     let watch_index = index.clone();
     let watch_content_index = content_index.clone();
     std::thread::Builder::new()

@@ -230,10 +230,10 @@ runs for content-eligible extensions; everything else is name-only.
 
 ### 3.5 Throttle — `throttle.rs`
 
-Scan, extract and history threads take `SCHED_IDLE` with a utilization clamp
-of 512/1024, nice 19 as the fallback, and `IOPRIO_CLASS_IDLE`; the programs they
-start inherit all of it. The unit sets `CPUWeight=idle` (cgroup `cpu.idle`). Pool
-width small (2). Goal: never the cause of a perceptible slowdown — the explicit
+Scan, extract and history threads move to a cgroup of their own with `cpu.idle`
+and take `SCHED_IDLE` with a utilization clamp of 512/1024, nice 19 as the
+fallback, and `IOPRIO_CLASS_IDLE`; the programs they start inherit all of it. The
+query thread stays at a normal program's weight. Pool width small (2). Goal: never the cause of a perceptible slowdown — the explicit
 lesson from the 16-core pdftotext spike.
 
 Measured on an i5-13400 (6P+4E cores, SMT, `intel_cpufreq` + `schedutil`), a CPU
@@ -243,16 +243,25 @@ loop in the program's place against the indexer's:
 |---|---|
 | nice 19, unit `CPUWeight=20` | 27 % |
 | `SCHED_IDLE`, unit `CPUWeight=20` | 32 % |
-| unit `CPUWeight=idle` | ~0 % |
+| unit `CPUWeight=idle`, or the indexer's own `cpu.idle` group | ~0–1 % |
 | on the core's SMT sibling, any policy | 42–50 % |
 
 A thread's policy only counts inside its cgroup, so the unit's weight decides
-against other programs; `cpu.idle` makes the whole service run on time nobody
-else wants, and `SCHED_IDLE` inside keeps the query thread ahead of the
-indexer. The cost is query latency when every CPU is busy: 16 saturated CPUs
-took a typical query from 2–22 ms to 6–57 ms, a 5000-hit one from 109–162 ms to
-412–831 ms. No policy helps against the SMT sibling — the two share one core —
-which is what the backfill's pacing (`backfill_pace`) is still for.
+against other programs. Making the whole unit idle cost the searches: with 16
+saturated CPUs a 5000-hit query took 412–831 ms instead of 109–162 ms. So the
+indexer gets a group of its own instead, in cgroup v2's threaded mode, which
+lets the threads of one process sit in different groups: the unit delegates the
+cpu controller (`Delegate=cpu`, `DelegateSubgroup=main`, and
+`ProtectControlGroups=private` so the daemon writes only inside its own
+namespace), the process and query thread stay in `main`, and
+`throttle::prepare_idle_cgroup` makes `main/index` threaded with `cpu.idle` (the
+lowest `cpu.weight` before Linux 5.15). Measured with it: with 16 saturated
+CPUs the same queries take what they take on an idle machine (77–83 ms by name,
+14–15 ms by content), and `pdftotext` starts in `main/index`. Without
+delegation (started from a terminal) the daemon leaves cgroups alone and the
+thread policies still apply. No policy helps against the SMT sibling — the two
+share one core — which is what the backfill's pacing (`backfill_pace`) is still
+for.
 
 The clamp holds the clock below turbo where the frequency driver follows the
 scheduler: a CPU loop ran at 4.1 GHz unclamped, 2.3 GHz at 512 (base 2.5) on a

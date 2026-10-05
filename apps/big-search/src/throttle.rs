@@ -28,12 +28,14 @@ pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
 /// priority. Best-effort: each step stands alone, so a kernel that refuses one
 /// still gets the others.
 ///
+/// - The indexer's cgroup ([`prepare_idle_cgroup`]), when the daemon has one:
+///   it runs on CPU time nobody else wants, against every other program, while
+///   the query thread keeps a normal program's share.
 /// - `SCHED_IDLE`: the thread runs on CPU time nobody else wants, and a normal
 ///   task that wakes preempts it at once. A thread's policy only counts inside
-///   its cgroup: here it puts the indexer behind the query thread, and the
-///   unit's `CPUWeight=idle` does the same for the whole service against every
-///   other program (measured: a program sharing a core with the indexer lost
-///   32 % under a weight-20 unit, none under `CPUWeight=idle`).
+///   its cgroup, though: without the indexer's cgroup it only puts the indexer
+///   behind the query thread (measured: a program sharing a core with the
+///   indexer lost 32 % under a weight-20 unit, ~1 % with the idle cgroup).
 /// - The utilization clamp ([`INDEXER_UTIL_MAX`]) holds the clock down where
 ///   the frequency driver follows the scheduler (`schedutil`); drivers that pick
 ///   frequencies in hardware (`intel_pstate`/`amd-pstate` active) ignore it.
@@ -64,6 +66,91 @@ pub fn lower_priority() {
         // ioprio_set(IOPRIO_WHO_PROCESS = 1, who = 0, IOPRIO_CLASS_IDLE = 3 << 13)
         libc::syscall(libc::SYS_ioprio_set, 1, 0, 3i64 << 13);
     }
+    if let Some(index) = IDLE_CGROUP.get() {
+        // SAFETY: gettid has no preconditions.
+        let tid = unsafe { libc::gettid() };
+        if let Err(e) = std::fs::write(index.join("cgroup.threads"), tid.to_string()) {
+            log::warn!("indexer thread stays in the service's cgroup: {e}");
+        }
+    }
+}
+
+/// The cgroup indexing threads join, once [`prepare_idle_cgroup`] made it.
+static IDLE_CGROUP: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Make the indexer a cgroup of its own that runs only on CPU time nobody else
+/// wants, so searching keeps a normal program's share while indexing takes
+/// what is left. Returns how, for the log; `None` leaves every thread where
+/// it is.
+///
+/// Only under systemd delegation: the unit's `Delegate=cpu` and
+/// `DelegateSubgroup=main` put the daemon in `<unit>.service/main`, a group
+/// systemd creates for nothing else, and hand it that subtree; with
+/// `ProtectControlGroups=private` the unit's group is the root of the daemon's
+/// own cgroup namespace and the path reads `/main`. Started any other way —
+/// from a terminal, a session scope — the daemon's cgroup belongs to someone
+/// else and is left alone.
+///
+/// The layout is cgroup v2's threaded mode, which lets the threads of one
+/// process sit in different groups: `main` keeps the process and the query
+/// thread at normal weight; `main/index`, threaded, gets `cpu.idle` (Linux
+/// 5.15), or the lowest weight on older kernels.
+pub fn prepare_idle_cgroup() -> Option<&'static str> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let own = std::path::Path::new("/sys/fs/cgroup").join(
+        own.lines()
+            .find_map(|line| line.strip_prefix("0::"))?
+            .trim_start_matches('/'),
+    );
+    let unit = own.parent()?;
+    let delegated = own.file_name()? == "main"
+        && (unit == std::path::Path::new("/sys/fs/cgroup")
+            || unit
+                .file_name()?
+                .to_str()
+                .is_some_and(|name| name.ends_with(".service")));
+    if !delegated {
+        return None;
+    }
+    let index = own.join("index");
+    let step = |result: std::io::Result<()>, what: &str| {
+        result
+            .map_err(|e| log::warn!("indexer cgroup not set up ({what}): {e}"))
+            .ok()
+    };
+    // systemd delegates the unit's group without enabling its controllers below.
+    step(
+        std::fs::write(unit.join("cgroup.subtree_control"), "+cpu"),
+        "enable cpu",
+    )?;
+    if !index.is_dir() {
+        step(std::fs::create_dir(&index), "create")?;
+    }
+    if std::fs::read_to_string(index.join("cgroup.type"))
+        .ok()?
+        .trim()
+        != "threaded"
+    {
+        step(
+            std::fs::write(index.join("cgroup.type"), "threaded"),
+            "make threaded",
+        )?;
+    }
+    step(
+        std::fs::write(own.join("cgroup.subtree_control"), "+cpu"),
+        "enable cpu below main",
+    )?;
+    let how = if std::fs::write(index.join("cpu.idle"), "1").is_ok() {
+        "idle"
+    } else {
+        step(
+            std::fs::write(index.join("cpu.weight"), "1"),
+            "lowest weight",
+        )?;
+        "lowest weight"
+    };
+    IDLE_CGROUP.set(index).ok()?;
+    Some(how)
 }
 
 /// Return freed heap pages to the kernel. glibc retains them by default, so a

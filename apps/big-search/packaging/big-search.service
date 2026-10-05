@@ -1,9 +1,9 @@
 # systemd *user* unit — install to ~/.config/systemd/user/big-search.service
 # then: systemctl --user enable --now big-search.service
 #
-# Runs unprivileged. Indexing threads lower themselves (SCHED_IDLE, clock
-# clamp, idle I/O; throttle.rs), so the unit does NOT set Nice or
-# CPUSchedulingPolicy — the query thread keeps normal priority inside the unit.
+# Runs unprivileged. Indexing threads lower themselves (idle cgroup, SCHED_IDLE,
+# clock clamp, idle I/O; throttle.rs), so the unit does NOT set Nice,
+# CPUSchedulingPolicy or a low CPUWeight — searching runs like a normal program.
 [Unit]
 Description=big-search file index daemon
 Documentation=https://github.com/Lord-Deepankar/big-search
@@ -25,12 +25,13 @@ Environment=BIG_SEARCH_ORIGIN_QUERY=1
 # would silently win over the user's config and make that setting a no-op.
 # Bound total memory: soft-throttle reclaims page cache, hard cap is a safety net
 # (the extraction worker pool uses a bounded queue so anonymous RSS stays low).
-# The whole service only gets CPU time nobody else wants (cgroup cpu.idle). A
-# thread's SCHED_IDLE counts only inside its cgroup, so without this the unit's
-# weight decides: a program sharing a core with the indexer lost 32 % at
-# CPUWeight=20, none at idle. Queries pay only when every CPU is busy: on 16
-# saturated CPUs a typical query took 6-57 ms instead of 2-22 ms.
-CPUWeight=idle
+# The cpu controller is handed to the daemon, which runs in <unit>/main and puts
+# its indexing threads in a threaded child group with cpu.idle: indexing takes
+# only CPU time nobody else wants, searching keeps a normal program's share. A
+# thread's SCHED_IDLE alone counts only inside its cgroup (a program sharing a
+# core with the indexer lost 32 % at CPUWeight=20, ~1 % with the idle group).
+Delegate=cpu
+DelegateSubgroup=main
 IOAccounting=yes
 IOWeight=20
 MemoryHigh=512M
@@ -49,7 +50,9 @@ ReadWritePaths=%h/.local/share %t
 # (SQLITE_IOERR_GETTEMPPATH) and aborted the startup reconcile. The daemon also
 # sets SQLITE_TMPDIR to its data dir; this covers any other temp user (poppler).
 PrivateTmp=yes
-ProtectControlGroups=yes
+# A cgroup namespace of its own: the daemon sees only its unit's subtree, and may
+# write there to give its indexing threads their idle group (see Delegate=).
+ProtectControlGroups=private
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
