@@ -704,9 +704,10 @@ const MAX_SCANNED_TERMS: usize = 20_000;
 /// or singular (see [`inflections`]) — "relatorios" finds "relatorio", "acao"
 /// finds "acoes". The last word is also read as typed so far: it finds any
 /// indexed word it begins — as-you-type in a launcher — the most frequent
-/// first (see [`prefix_forms`]). Every form keeps its BM25 score. A CJK bigram
-/// or character is matched exactly, and a last word shorter than
-/// [`MIN_PREFIX_CHARS`] begins nothing.
+/// first (see [`words_beginning`]). A Russian or Ukrainian word also matches
+/// its other case endings (see [`slavic_stem`]). Every form keeps its BM25
+/// score. A CJK bigram or character is matched exactly, and a last word
+/// shorter than [`MIN_PREFIX_CHARS`] begins nothing.
 fn word_query(
     searcher: &tantivy::Searcher,
     field: tantivy::schema::Field,
@@ -733,8 +734,15 @@ fn word_query(
             })
         })
         .collect();
+    if let Some(stem) = slavic_stem(word) {
+        forms.extend(words_beginning(searcher, field, stem, |rest| {
+            rest.is_empty() || SLAVIC_ENDINGS.contains(&rest)
+        })?);
+    }
     if last && word.chars().count() >= MIN_PREFIX_CHARS {
-        forms.extend(prefix_forms(searcher, field, word)?);
+        forms.extend(words_beginning(searcher, field, word, |rest| {
+            !rest.is_empty()
+        })?);
     }
     Ok(with_forms(exact, forms, field, record))
 }
@@ -762,18 +770,20 @@ fn with_forms(
     Box::new(BooleanQuery::new(clauses))
 }
 
-/// The indexed words `word` begins, the most frequent first, within
-/// [`MAX_PREFIX_TERMS`] and [`PREFIX_DOC_BUDGET`].
-fn prefix_forms(
+/// The indexed words that begin with `prefix` and go on with a rest `keep`
+/// accepts, the most frequent first, within [`MAX_PREFIX_TERMS`] and
+/// [`PREFIX_DOC_BUDGET`].
+fn words_beginning(
     searcher: &tantivy::Searcher,
     field: tantivy::schema::Field,
-    word: &str,
+    prefix: &str,
+    keep: impl Fn(&str) -> bool,
 ) -> Result<Vec<String>> {
-    let upper = prefix_end(word.as_bytes());
+    let upper = prefix_end(prefix.as_bytes());
     let mut doc_freqs: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for segment in searcher.segment_readers() {
         let inverted = segment.inverted_index(field)?;
-        let mut range = inverted.terms().range().ge(word.as_bytes());
+        let mut range = inverted.terms().range().ge(prefix.as_bytes());
         if let Some(upper) = &upper {
             range = range.lt(upper);
         }
@@ -782,7 +792,7 @@ fn prefix_forms(
         while scanned < MAX_SCANNED_TERMS && terms.advance() {
             scanned += 1;
             if let Ok(text) = std::str::from_utf8(terms.key())
-                && text != word
+                && text.strip_prefix(prefix).is_some_and(&keep)
             {
                 *doc_freqs.entry(text.to_owned()).or_default() += u64::from(terms.value().doc_freq);
             }
@@ -866,6 +876,36 @@ fn inflections(word: &str) -> Vec<String> {
         }
     }
     forms
+}
+
+/// Russian and Ukrainian noun, adjective and participle endings, folded ("ё"
+/// is "е"): "квартал", "квартала", "квартале", "кварталами" are one word.
+const SLAVIC_ENDINGS: &[&str] = &[
+    "а", "я", "о", "е", "ы", "и", "у", "ю", "ь", "і", "ї", "є", "ом", "ем", "ой", "ей", "ою", "ею",
+    "ам", "ям", "ах", "ях", "ов", "ев", "ів", "їв", "ий", "ій", "ия", "ие", "ии", "ию", "ью", "ья",
+    "ье", "ьи", "ый", "ая", "яя", "ое", "ее", "ые", "ым", "им", "ім", "ую", "юю", "ых", "их", "іх",
+    "ої", "ові", "еві", "ами", "ями", "ого", "его", "ього", "ому", "ему", "ьому", "ыми", "ими",
+    "іми", "ием", "иям", "иях", "ьям", "ьях", "ьев", "иями", "ьями",
+];
+
+/// The stem of a folded Russian or Ukrainian word: the word without the
+/// longest of [`SLAVIC_ENDINGS`] that leaves four letters or more, or the word
+/// itself ("квартал"). A shorter stem joins unrelated words: "сто" (a
+/// hundred) would find "стой" (stop) and "стою" (I stand).
+fn slavic_stem(word: &str) -> Option<&str> {
+    if !word
+        .chars()
+        .all(|c| matches!(c, 'а'..='я' | 'і' | 'ї' | 'є' | 'ґ'))
+    {
+        return None;
+    }
+    let stem = SLAVIC_ENDINGS
+        .iter()
+        .filter_map(|ending| word.strip_suffix(ending))
+        .filter(|stem| stem.chars().count() >= 4)
+        .min_by_key(|stem| stem.len())
+        .unwrap_or(word);
+    (stem.chars().count() >= 4).then_some(stem)
 }
 
 /// The word as typed weighs this much more than the words it begins.
@@ -2038,6 +2078,36 @@ mod tests {
             got.sort();
             assert_eq!(got, expected, "query {query:?}");
         }
+    }
+
+    /// A Russian or Ukrainian word finds its other case endings, wherever it
+    /// stands in the query, and not words that only begin like it.
+    #[test]
+    fn slavic_words_find_their_other_endings() {
+        let content = content_index_with(
+            "slavic",
+            &[
+                ("/h/a.txt", "Продажи выросли в этом квартале."),
+                ("/h/b.txt", "Отчёт по кварталам и продажам."),
+                ("/h/c.txt", "Квартальный отчёт."),
+                ("/h/d.txt", "Звіт про продажі за квартал."),
+            ],
+        );
+        for (query, expected) in [
+            ("квартал отчет", vec!["/h/b.txt"]),
+            ("квартала", vec!["/h/a.txt", "/h/b.txt", "/h/d.txt"]),
+            ("продажа квартал", vec!["/h/a.txt", "/h/b.txt", "/h/d.txt"]),
+        ] {
+            let mut got: Vec<String> = search_content(&content, query, 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect();
+            got.sort();
+            assert_eq!(got, expected, "query {query:?}");
+        }
+        assert_eq!(slavic_stem("сто"), None);
+        assert_eq!(slavic_stem("кварталами"), Some("квартал"));
     }
 
     /// Every word finds its plural or singular, in both directions and whatever

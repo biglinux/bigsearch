@@ -155,8 +155,14 @@ first: on folded words it joined none of 670 -ões, 421 -ais, 261 -eis and 194
 and in Russian did not even join "квартал" to "квартале"; the rules joined every
 such pair, in both directions. Totals went from 363 to the ceiling for
 "relatorios", 898 to 1509 for "acoes", 367 to 764 for "responsaveis", with no
-change in latency. Russian inflection beyond the last-word prefix ("кварталы" →
-"квартале") is not covered. Content words are folded at index time like names
+change in latency. Russian and Ukrainian words match their other case endings
+(`query::slavic_stem`: the word without its longest noun, adjective or
+participle ending that leaves four letters, then the indexed words that are
+that stem plus an ending — "кварталы" finds "квартале"). On hunspell lemma
+groups from 120 Russian catalogs, documents holding a form of the typed word's
+lemma went from 50 % to 94 % found, with 0.33 other documents per query
+instead of 0.15, mostly kin ("фотограф" finding "фотографии"). Stems that
+change inside ("щелчок", "щелчком") stay apart. Content words are folded at index time like names
 (`index::ScriptFold` over `extract::fold_script_into`, then ASCII folding:
 combining marks, ё, Greek accents and ς, Arabic hamza alef, alef maqsura, vowel
 signs, tatweel and article), and the tokenizer keeps combining marks inside a
