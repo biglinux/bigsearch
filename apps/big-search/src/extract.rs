@@ -670,7 +670,8 @@ pub(crate) fn compose(text: &str) -> std::borrow::Cow<'_, str> {
 /// The folding of lowercase text that `AsciiFoldingFilter` leaves to others:
 /// combining marks dropped; Russian "ё" written "е", as it mostly is; Greek
 /// without its accents and with final "ς" as "σ"; Arabic alef without hamza,
-/// "ى" as "ي", and no vowel signs or tatweel.
+/// "ى" as "ي", and no vowel signs or tatweel; traditional Chinese characters
+/// as their simplified forms ("會議" is "会议").
 pub(crate) fn fold_script_into(lowered: &str, out: &mut String) {
     for c in lowered.chars() {
         match c {
@@ -686,7 +687,7 @@ pub(crate) fn fold_script_into(lowered: &str, out: &mut String) {
             'ώ' => out.push('ω'),
             'أ' | 'إ' | 'آ' | 'ٱ' => out.push('ا'),
             'ى' => out.push('ي'),
-            c => out.push(c),
+            c => out.push(crate::simplified_chinese::simplified(c)),
         }
     }
 }
@@ -1052,10 +1053,11 @@ mod tests {
             ("Αναφορά ΟΔΟΣ οδός", "αναφορα οδοσ οδοσ"),
             ("أحمد مُحَمَّد مستشفى", "احمد محمد مستشفي"),
             ("中文内容 ABC", "中文内容 abc"),
+            ("會議記錄 资料庫", "会议记录 资料库"),
             ("\u{1112}\u{1161}\u{11AB}\u{1100}\u{116E}\u{11A8}", "한국"),
             ("テ\u{3099}ータ ﾃﾞｰﾀ", "データ データ"),
             ("ＡＢＣ１２ ﬁle", "abc12 file"),
-            ("ﻣﺮﺣﺒﺎ \u{F900}", "مرحبا \u{8C48}"),
+            ("ﻣﺮﺣﺒﺎ \u{F900}", "مرحبا 岂"),
             ("🙂 EMOJI", "🙂 emoji"),
             ("", ""),
         ] {

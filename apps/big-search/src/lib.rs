@@ -23,6 +23,7 @@ pub mod query;
 pub mod scan;
 pub mod scan_roots;
 pub mod settings;
+mod simplified_chinese;
 pub mod state;
 #[cfg(test)]
 mod test_env;

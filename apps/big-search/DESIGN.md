@@ -164,8 +164,8 @@ word so a decomposed accent no longer splits it. A query-time variant scheme was
 first to spare installed machines a re-index; the program is not installed
 anywhere yet, so the one-time re-index won (88 055 documents in about 13 minutes
 here, part of it under heavy load). The 42-query test in 12 languages went from
-23 to 39 hits; left are simplified/traditional Chinese (needs a dictionary) and
-German "oe" for "ö".
+23 to 39 hits, and to 41 with the table below; left is German "oe" for "ö", a
+transliteration that would make every "oe" in Portuguese or Dutch match "ö".
 
 **Unicode composition (2026-10).** Every text is put in NFKC before anything
 else reads it (`extract::compose`, used by `fold_lower` and by the content
@@ -188,6 +188,16 @@ typed character used to be expanded to the indexed bigrams it begins, capped at
 began none: documents holding a sampled character were all found for 30-55 %
 of queries; now for all of them, with the content index of the 13-language test
 3 % larger.
+
+**Traditional and simplified Chinese (2026-10).** Folding writes traditional
+characters in their simplified forms (`simplified_chinese`, 3079 pairs taken
+from ICU's `Traditional-Simplified` transform one character at a time, under
+the Unicode License v3 notice the file carries), so "会议记录" finds "會議記錄"
+and back, in names and content. A character table needs no dictionary: of the
+zh_CN/zh_TW message pairs that differ only in characters, 0 % were found
+across scripts before and 100 % after. Pairs whose words differ by region
+(文档/文件, 打印/列印, 音频/音訊) went from 9 % to 24 %; joining those needs a
+phrase list, which this does not attempt. Japanese results did not change.
 
 The backfill's duty cycle follows the CPU time the service used in a batch, not
 the batch's wall time: at idle priority on a busy machine a 250-file batch took
