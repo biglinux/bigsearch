@@ -407,8 +407,10 @@ fn low_impact_writer(index: &Index, memory_budget: usize) -> Result<IndexWriter<
 }
 
 /// Whether merging every segment into one is worth what it costs, given each
-/// segment's `(documents, deleted)`: when the documents outside the largest
-/// segment plus everything deleted make up a tenth of the index or more.
+/// segment's `(documents, deleted)`: when a tenth of the index has changed.
+/// A new file lands outside the largest segment, a removed one is a deletion,
+/// and an edit is both — so the larger of the two counts the changed files,
+/// each once.
 ///
 /// One segment answers a cold query with a fraction of the disk reads: on a
 /// 5400 rpm notebook disk, the first query on its own 11-segment index took
@@ -421,10 +423,15 @@ fn low_impact_writer(index: &Index, memory_budget: usize) -> Result<IndexWriter<
 /// to what the edits themselves wrote.
 pub fn worth_compacting(segments: &[(u32, u32)]) -> bool {
     let total: u64 = segments.iter().map(|&(docs, _)| u64::from(docs)).sum();
-    let Some(&(largest, largest_deleted)) = segments.iter().max_by_key(|&&(docs, _)| docs) else {
+    let Some(&(largest, _)) = segments.iter().max_by_key(|&&(docs, _)| docs) else {
         return false;
     };
-    let changed = total - u64::from(largest) + u64::from(largest_deleted);
+    let outside = total - u64::from(largest);
+    let deleted: u64 = segments
+        .iter()
+        .map(|&(_, deleted)| u64::from(deleted))
+        .sum();
+    let changed = outside.max(deleted);
     changed > 0 && changed * 10 >= total
 }
 
@@ -515,6 +522,9 @@ mod tests {
         assert!(!worth_compacting(&[]));
         assert!(!worth_compacting(&[(1000, 0)]));
         assert!(!worth_compacting(&[(1000, 50), (40, 0)]));
+        // 60 files edited: 60 deleted and 60 new versions, 6 % of 1060.
+        assert!(!worth_compacting(&[(1000, 60), (60, 0)]));
+        assert!(worth_compacting(&[(1000, 120), (120, 0)]));
         assert!(worth_compacting(&[(1000, 100)]));
         assert!(worth_compacting(&[(1000, 0), (70, 0), (50, 0)]));
         // The daemon's own name index before the change: 1 of 3 documents dead.
