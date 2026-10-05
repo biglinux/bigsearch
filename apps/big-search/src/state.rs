@@ -31,42 +31,34 @@ enum PendingChange {
 }
 
 impl State {
-    /// Load from disk, or start empty if absent/corrupt.
-    pub fn load(legacy_json_path: PathBuf) -> Self {
-        let db_path = sqlite_path(&legacy_json_path);
-        let namespace = state_namespace(&legacy_json_path);
-        match open_state_db(&db_path) {
-            Ok(conn) => {
-                migrate_legacy_json_if_needed(&conn, &namespace, &legacy_json_path).ok();
-                if namespace == CONTENT_NAMESPACE {
-                    forget_newly_read_formats(&conn).ok();
-                }
-                State {
-                    db_path,
-                    namespace,
-                    conn,
-                    pending: HashMap::new(),
-                    clear_before_persist: false,
-                    dirty: false,
-                }
-            }
-            Err(_) => State::in_memory(db_path),
+    /// The `namespace` rows of the state database at `db_path`, or an empty
+    /// in-memory state if the database cannot be opened.
+    pub fn load(db_path: &Path, namespace: &str) -> Self {
+        match open_state_db(db_path) {
+            Ok(conn) => State {
+                db_path: db_path.to_path_buf(),
+                namespace: namespace.to_owned(),
+                conn,
+                pending: HashMap::new(),
+                clear_before_persist: false,
+                dirty: false,
+            },
+            Err(_) => State::in_memory(db_path.to_path_buf(), namespace),
         }
     }
 
-    /// Start empty (used for a forced full rebuild).
-    pub fn empty(legacy_json_path: PathBuf) -> Self {
-        let db_path = sqlite_path(&legacy_json_path);
-        let namespace = state_namespace(&legacy_json_path);
-        let conn = open_state_db(&db_path).unwrap_or_else(|_| {
+    /// Start empty (used for a forced full rebuild): the first persist replaces
+    /// every row of `namespace`.
+    pub fn empty(db_path: &Path, namespace: &str) -> Self {
+        let conn = open_state_db(db_path).unwrap_or_else(|_| {
             let conn = Connection::open_in_memory().expect("in-memory sqlite state opens");
             tune_connection_for_low_memory(&conn);
             init_schema(&conn).expect("in-memory sqlite state schema initializes");
             conn
         });
         State {
-            db_path,
-            namespace,
+            db_path: db_path.to_path_buf(),
+            namespace: namespace.to_owned(),
             conn,
             pending: HashMap::new(),
             clear_before_persist: true,
@@ -490,12 +482,12 @@ impl State {
             .unwrap_or_default()
     }
 
-    fn in_memory(db_path: PathBuf) -> Self {
+    fn in_memory(db_path: PathBuf, namespace: &str) -> Self {
         let conn = Connection::open_in_memory().expect("in-memory sqlite state opens");
         init_schema(&conn).expect("in-memory sqlite state schema initializes");
         State {
             db_path,
-            namespace: "memory".to_string(),
+            namespace: namespace.to_owned(),
             conn,
             pending: HashMap::new(),
             clear_before_persist: false,
@@ -506,23 +498,6 @@ impl State {
 
 fn key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
-}
-
-fn sqlite_path(legacy_json_path: &Path) -> PathBuf {
-    legacy_json_path
-        .parent()
-        .map(|parent| parent.join("state.sqlite"))
-        .unwrap_or_else(|| legacy_json_path.with_extension("sqlite"))
-}
-
-fn state_namespace(legacy_json_path: &Path) -> String {
-    match legacy_json_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-    {
-        Some("content-state") => CONTENT_NAMESPACE.to_string(),
-        _ => NAME_NAMESPACE.to_string(),
-    }
 }
 
 fn open_state_db(db_path: &Path) -> Result<Connection> {
@@ -573,98 +548,6 @@ fn init_schema(conn: &Connection) -> Result<()> {
     .context("initialize state schema")
 }
 
-fn migrate_legacy_json_if_needed(
-    conn: &Connection,
-    namespace: &str,
-    legacy_json_path: &Path,
-) -> Result<()> {
-    let migration_key = format!("legacy_migrated:{namespace}");
-    let has_migrated: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM meta WHERE key = ?1",
-            params![migration_key],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if has_migrated > 0 {
-        return Ok(());
-    }
-    if !legacy_json_path.exists() {
-        return Ok(());
-    }
-    let existing_rows: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM file_state WHERE namespace = ?1",
-            params![namespace],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if existing_rows > 0 {
-        conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, 1)",
-            params![migration_key],
-        )
-        .context("mark legacy state migrated")?;
-        return Ok(());
-    }
-    let bytes = std::fs::read(legacy_json_path).context("read legacy state json")?;
-    let map: HashMap<String, (i64, u64)> =
-        serde_json::from_slice(&bytes).context("parse legacy state json")?;
-    let tx = conn
-        .unchecked_transaction()
-        .context("begin legacy state migration")?;
-    for (path, (mtime, size)) in map {
-        tx.execute(
-            "INSERT OR REPLACE INTO file_state(namespace, path, mtime, size)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![namespace, path, mtime, u64_to_db_size(size)],
-        )?;
-    }
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, 1)",
-        params![migration_key],
-    )?;
-    tx.commit().context("commit legacy state migration")
-}
-
-/// Formats the extractor learned to read, with the marker that records their
-/// files were sent back to extraction. Files of a format it did not read were
-/// recorded as done with no text; forgetting those rows once lets the next pass
-/// read them. It costs one extraction per such file, never data.
-const NEWLY_READ_FORMATS: (&str, &[&str]) = (
-    "content_formats:epub-eml-rtf-doc",
-    &["epub", "eml", "rtf", "doc"],
-);
-
-fn forget_newly_read_formats(conn: &Connection) -> Result<()> {
-    let (marker, extensions) = NEWLY_READ_FORMATS;
-    let done: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM meta WHERE key = ?1",
-            params![marker],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if done > 0 {
-        return Ok(());
-    }
-    let tx = conn
-        .unchecked_transaction()
-        .context("begin format migration")?;
-    for ext in extensions {
-        // LIKE is case-insensitive for ASCII: ".EPUB" goes too.
-        tx.execute(
-            "DELETE FROM file_state WHERE namespace = ?1 AND path LIKE ?2",
-            params![CONTENT_NAMESPACE, format!("%.{ext}")],
-        )?;
-    }
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, 1)",
-        params![marker],
-    )?;
-    tx.commit().context("commit format migration")
-}
-
 fn u64_to_db_size(size: u64) -> i64 {
     i64::try_from(size).unwrap_or(i64::MAX)
 }
@@ -693,54 +576,15 @@ pub fn meta(path: &Path) -> Option<(i64, u64)> {
 mod tests {
     use super::*;
 
-    /// Files of a format the extractor learned to read were recorded as done
-    /// with no text; they go back to extraction once, and only once.
-    #[test]
-    fn newly_read_formats_go_back_to_extraction_once() {
-        let dir = std::env::temp_dir().join(format!("bs-state-formats-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("content-state.json");
-        let (book, mail, text, docx) = (
-            Path::new("/x/Livro.EPUB"),
-            Path::new("/x/a.eml"),
-            Path::new("/x/a.txt"),
-            Path::new("/x/a.docx"),
-        );
-        // An index from before: written without the migration's marker.
-        let mut s = State::empty(file.clone());
-        for p in [book, mail, text, docx] {
-            s.set(p, 100, 5);
-        }
-        s.persist().unwrap();
-        s.conn
-            .execute(
-                "DELETE FROM meta WHERE key = ?1",
-                params![NEWLY_READ_FORMATS.0],
-            )
-            .unwrap();
-        drop(s);
-
-        let mut s = State::load(file.clone());
-        assert!(!s.unchanged(book, 100, 5) && !s.unchanged(mail, 100, 5));
-        assert!(s.unchanged(text, 100, 5) && s.unchanged(docx, 100, 5));
-        // Read now and recorded again: a later start does not forget it.
-        s.set(book, 100, 5);
-        s.persist().unwrap();
-        drop(s);
-        assert!(State::load(file).unchanged(book, 100, 5));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     #[test]
     fn dedup_roundtrip() {
         let dir = std::env::temp_dir().join(format!("bs-state-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("state.json");
+        let file = dir.join("state.sqlite");
         let p = Path::new("/x/y.txt");
 
-        let mut s = State::empty(file.clone());
+        let mut s = State::empty(&file, NAME_NAMESPACE);
         assert!(!s.unchanged(p, 100, 5));
         s.set(p, 100, 5);
         assert!(s.unchanged(p, 100, 5));
@@ -749,10 +593,10 @@ mod tests {
         s.persist().unwrap();
 
         // Survives a reload.
-        assert!(State::load(file.clone()).unchanged(p, 100, 5));
+        assert!(State::load(&file, NAME_NAMESPACE).unchanged(p, 100, 5));
 
         // Removal forgets it.
-        let mut s2 = State::load(file);
+        let mut s2 = State::load(&file, NAME_NAMESPACE);
         s2.remove(p);
         assert!(!s2.unchanged(p, 100, 5));
 
@@ -767,21 +611,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bs-state-clearmem-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("state.json");
+        let file = dir.join("state.sqlite");
         let path = Path::new("/x/persisted.md");
 
-        let mut seeded = State::empty(file.clone());
+        let mut seeded = State::empty(&file, NAME_NAMESPACE);
         seeded.set(path, 100, 5);
         seeded.persist().unwrap();
 
         // contains() must see persisted rows (else sync would re-add duplicate docs)…
-        let reloaded = State::load(file.clone());
+        let reloaded = State::load(&file, NAME_NAMESPACE);
         assert!(reloaded.contains(path));
         assert!(reloaded.unchanged(path, 100, 5));
 
         // …but a cleared (not yet persisted) state must deny both, and report
         // nothing pending for extraction.
-        let mut cleared = State::load(file.clone());
+        let mut cleared = State::load(&file, NAME_NAMESPACE);
         cleared.clear();
         assert!(!cleared.contains(path), "clear() must hide persisted rows");
         assert!(!cleared.unchanged(path, 100, 5));
@@ -794,7 +638,7 @@ mod tests {
         );
 
         // A fresh empty state (clear_before_persist) also denies persisted rows.
-        let empty = State::empty(file);
+        let empty = State::empty(&file, NAME_NAMESPACE);
         assert!(!empty.contains(path));
 
         std::fs::remove_dir_all(&dir).ok();
@@ -805,7 +649,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bs-state-paths-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let mut state = State::empty(dir.join("state.json"));
+        let mut state = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         state.set(Path::new("/a/kept.md"), 1, 1);
         state.set(Path::new("/b/removed.md"), 1, 1);
         state.persist().unwrap();
@@ -832,8 +676,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bs-state-stale-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let mut names = State::empty(dir.join("state.json"));
-        let mut content = State::empty(dir.join("content-state.json"));
+        let mut names = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+        let mut content = State::empty(&dir.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
 
         names.set(Path::new("/a/extracted.md"), 100, 5);
         names.set(Path::new("/b/changed.md"), 200, 9);
@@ -867,61 +711,11 @@ mod tests {
     }
 
     #[test]
-    fn migrates_legacy_json_once() {
-        let dir = std::env::temp_dir().join(format!("bs-state-migrate-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let name_legacy_file = dir.join("state.json");
-        let legacy_file = dir.join("content-state.json");
-        let name_path = Path::new("/legacy/name-only.md");
-        let path = Path::new("/legacy/file.md");
-        let mut name_legacy = HashMap::new();
-        name_legacy.insert(key(name_path), (100, 6));
-        std::fs::write(&name_legacy_file, serde_json::to_vec(&name_legacy).unwrap()).unwrap();
-        let mut legacy = HashMap::new();
-        legacy.insert(key(path), (200, 12));
-        std::fs::write(&legacy_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
-
-        let name_state = State::load(name_legacy_file);
-        let state = State::load(legacy_file.clone());
-        assert!(name_state.unchanged(name_path, 100, 6));
-        assert!(!name_state.unchanged(path, 200, 12));
-        assert!(state.unchanged(path, 200, 12));
-        assert!(dir.join("state.sqlite").exists());
-
-        std::fs::write(&legacy_file, b"not json").unwrap();
-        assert!(State::load(legacy_file).unchanged(path, 200, 12));
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn clear_does_not_reimport_legacy_json() {
-        let dir = std::env::temp_dir().join(format!("bs-state-clear-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let legacy_file = dir.join("content-state.json");
-        let path = Path::new("/legacy/file.md");
-        let mut legacy = HashMap::new();
-        legacy.insert(key(path), (200, 12));
-        std::fs::write(&legacy_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
-
-        let mut state = State::load(legacy_file.clone());
-        assert!(state.unchanged(path, 200, 12));
-        state.clear();
-        state.persist().unwrap();
-
-        assert!(!State::load(legacy_file).unchanged(path, 200, 12));
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn len_tracks_pending_overlaps_and_removals() {
         let dir = std::env::temp_dir().join(format!("bs-state-len-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let mut state = State::empty(dir.join("state.json"));
+        let mut state = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         state.set(Path::new("/p/a.md"), 1, 1);
         state.set(Path::new("/p/b.md"), 1, 1);
         state.persist().unwrap();
@@ -957,55 +751,14 @@ mod tests {
     }
 
     #[test]
-    fn existing_sqlite_rows_win_over_legacy_json() {
-        let dir = std::env::temp_dir().join(format!("bs-state-sqlwins-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let legacy_file = dir.join("state.json");
-        let kept = Path::new("/p/kept.md");
-        let stale = Path::new("/p/stale.md");
-
-        let mut seeded = State::empty(legacy_file.clone());
-        seeded.set(kept, 1, 1);
-        seeded.persist().unwrap();
-        drop(seeded);
-
-        // A legacy JSON appearing after SQLite already has rows must be ignored,
-        // not merged over the newer catalogue.
-        let mut legacy = HashMap::new();
-        legacy.insert(key(stale), (2i64, 2u64));
-        std::fs::write(&legacy_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
-
-        let state = State::load(legacy_file);
-        assert!(state.unchanged(kept, 1, 1));
-        assert!(!state.contains(stale), "legacy import must be skipped");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn on_disk_state_uses_wal_journal() {
         // tune_connection_for_low_memory switches to WAL; the default rollback
         // journal would double write amplification on every persist.
         let dir = std::env::temp_dir().join(format!("bs-state-wal-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let state = State::empty(dir.join("state.json"));
+        let state = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         assert_eq!(state.journal_mode(), "wal");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn corrupt_legacy_json_starts_empty() {
-        let dir = std::env::temp_dir().join(format!("bs-state-corrupt-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let legacy_file = dir.join("state.json");
-        std::fs::write(&legacy_file, b"{").unwrap();
-
-        let state = State::load(legacy_file);
-        assert!(state.is_empty());
-
         std::fs::remove_dir_all(&dir).ok();
     }
 }

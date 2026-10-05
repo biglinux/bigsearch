@@ -567,7 +567,7 @@ mod tests {
         let mut writer = index.writer(15_000_000).unwrap();
         // The production walk, not a parallel one: `reconcile_subtree_inline` is
         // what the watcher calls when a directory appears.
-        let mut state = State::empty(base.join("state.json"));
+        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         let (dirs, _) =
             reconcile_subtree_inline(&writer, &f, &mut state, &Scope::compile(), &tree).unwrap();
         writer.commit().unwrap();
@@ -639,7 +639,7 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(base.join("state.json"));
+        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         let mut writer = index.writer(15_000_000).unwrap();
 
         let (_, outcome) =
@@ -694,7 +694,7 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(base.join("state.json"));
+        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         let mut writer = index.writer(15_000_000).unwrap();
         let (dirs, outcome) = reconcile_subtree_inline(
             &writer,
@@ -725,7 +725,7 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(base.join("state.json"));
+        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         let writer = index.writer(15_000_000).unwrap();
         let (_, first) =
             reconcile_subtree_inline(&writer, &f, &mut state, &Scope::compile(), &tree).unwrap();
@@ -781,7 +781,7 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(base.join("state.json"));
+        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         let writer = index.writer(15_000_000).unwrap();
 
         let (dirs, outcome) =

@@ -805,12 +805,12 @@ mod tests {
         writer.commit().unwrap();
         drop(writer);
 
-        let mut state = State::empty(dir.join("state.json"));
+        let mut state = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         state.set(Path::new("/catalog/keep-alpha.txt"), 10, 1);
         state.set(Path::new("/catalog/missing-beta.txt"), 20, 2);
         state.set(Path::new("/catalog/missing-gamma.txt"), 30, 3);
         state.persist().unwrap();
-        let mut state = State::load(dir.join("state.json"));
+        let mut state = State::load(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
 
         assert_eq!(
             repair_deflated_against_state(&index, &mut state).unwrap(),

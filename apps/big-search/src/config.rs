@@ -53,16 +53,11 @@ pub fn content_index_dir() -> PathBuf {
     data_dir().join("content-index")
 }
 
-/// Dedup/reconcile cache file. New installs store it in `state.sqlite` under the
-/// `name` namespace; the JSON path remains the migration source for older caches.
-pub fn state_path() -> PathBuf {
-    data_dir().join("state.json")
-}
-
-/// Cache of files whose content/metadata extraction was already attempted. New
-/// installs store it in `state.sqlite` under the `content` namespace.
-pub fn content_state_path() -> PathBuf {
-    data_dir().join("content-state.json")
+/// The state database: the `(mtime, size)` each catalogued path was last seen
+/// with (namespace `name`) and the paths whose content was already extracted
+/// or skipped (namespace `content`).
+pub fn state_db_path() -> PathBuf {
+    data_dir().join("state.sqlite")
 }
 
 /// Cache of content fingerprints already extracted or intentionally skipped.
@@ -71,7 +66,7 @@ pub fn content_signature_path() -> PathBuf {
 }
 
 /// Origin/provenance store. This is intentionally separate from Tantivy and
-/// `state.json` so normal search does not depend on it.
+/// the state database so normal search does not depend on it.
 pub fn origin_db_path() -> PathBuf {
     data_dir().join("origin.sqlite")
 }

@@ -52,7 +52,10 @@ pub fn record_skipped_candidates(entries: &[(PathBuf, i64, u64)]) -> Result<()> 
     if entries.is_empty() {
         return Ok(());
     }
-    let mut content_state = state::State::load(crate::config::content_state_path());
+    let mut content_state = state::State::load(
+        &crate::config::state_db_path(),
+        crate::state::CONTENT_NAMESPACE,
+    );
     for (path, mtime, size) in entries {
         content_state.set(path, *mtime, *size);
     }
@@ -79,7 +82,10 @@ pub fn prune_unreferenced_content_docs(index: &Index) -> Result<usize> {
     if crate::index::is_unreferenced_pruned(&index_dir) {
         return Ok(0); // swept, and nothing has cleared content state since
     }
-    let catalog = state::State::load(crate::config::state_path());
+    let catalog = state::State::load(
+        &crate::config::state_db_path(),
+        crate::state::NAME_NAMESPACE,
+    );
     // Fail safe, not deadly. `State::load` degrades to an empty in-memory state
     // when the database will not open (disk full, permissions), and an empty
     // catalogue references nothing — which would make this delete every content
@@ -141,7 +147,10 @@ pub const ORPHAN_PRUNE_STEADY_LIMIT: usize = 8192;
 pub fn prune_orphaned_content(index: &Index, limit: usize) -> Result<(usize, bool)> {
     const FLUSH_EVERY: usize = 16 * ORPHAN_PRUNE_BATCH;
 
-    let mut content_state = state::State::load(crate::config::content_state_path());
+    let mut content_state = state::State::load(
+        &crate::config::state_db_path(),
+        crate::state::CONTENT_NAMESPACE,
+    );
     let f = content_fields(index)?;
     let mut writer: Option<IndexWriter> = None;
     let mut cursor: Option<String> = None;
@@ -288,7 +297,10 @@ pub fn index_content_limited_with_writer(
     if !crate::settings::content_index_enabled() {
         return Ok(0);
     }
-    let mut content_state = state::State::load(crate::config::content_state_path());
+    let mut content_state = state::State::load(
+        &crate::config::state_db_path(),
+        crate::state::CONTENT_NAMESPACE,
+    );
     let files = pending_files(files, &content_state, limit);
     if files.is_empty() {
         return Ok(0);
@@ -440,7 +452,10 @@ pub fn pending_catalog_batch_after(
     if !crate::settings::content_index_enabled() {
         return Ok((PendingContentBatch::empty(), None));
     }
-    let catalog_state = state::State::load(crate::config::state_path());
+    let catalog_state = state::State::load(
+        &crate::config::state_db_path(),
+        crate::state::NAME_NAMESPACE,
+    );
     pending_catalog_batch_with_byte_limit(
         &catalog_state,
         cursor,
@@ -471,7 +486,10 @@ fn catalog_content_batch_limit() -> usize {
 /// forced reindex committed a name-index document with nothing new in it and
 /// the content pass declined the work.
 pub fn forget_content_state(path: &Path) -> Result<()> {
-    let mut content_state = state::State::load(crate::config::content_state_path());
+    let mut content_state = state::State::load(
+        &crate::config::state_db_path(),
+        crate::state::CONTENT_NAMESPACE,
+    );
     content_state.remove(path);
     content_state.persist()
 }
@@ -480,7 +498,10 @@ pub fn clear_content_state() -> Result<()> {
     // These rows are the only thing referencing the content documents, so
     // dropping them is exactly what strands documents. Re-arm the sweep.
     crate::index::clear_unreferenced_pruned(&crate::config::content_index_dir());
-    let mut content_state = state::State::load(crate::config::content_state_path());
+    let mut content_state = state::State::load(
+        &crate::config::state_db_path(),
+        crate::state::CONTENT_NAMESPACE,
+    );
     content_state.clear();
     content_state.persist()?;
     let mut signatures = ContentSignatures::load(crate::config::content_signature_path());
@@ -759,7 +780,8 @@ mod tests {
         std::fs::write(&first, b"first body").unwrap();
         std::fs::write(&second, b"second body").unwrap();
 
-        let content_state = state::State::empty(base.join("content-state.json"));
+        let content_state =
+            state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
         let batch = pending_batch(vec![first.clone(), second.clone()], &content_state, 1);
         assert_eq!(batch.files, vec![first]);
         assert!(batch.has_more);
@@ -785,7 +807,8 @@ mod tests {
         std::fs::write(&note, b"a body").unwrap();
         let (mtime, size) = state::meta(&note).unwrap();
 
-        let mut content_state = state::State::empty(base.join("content-state.json"));
+        let mut content_state =
+            state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
         content_state.set(&note, mtime, size);
         assert!(
             pending_batch(vec![note.clone()], &content_state, 10)
@@ -817,7 +840,8 @@ mod tests {
         std::fs::write(&first, vec![b'a'; 1024 * 1024]).unwrap();
         std::fs::write(&second, vec![b'b'; 1024 * 1024]).unwrap();
 
-        let content_state = state::State::empty(base.join("content-state.json"));
+        let content_state =
+            state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
         let batch = pending_batch_with_byte_limit(
             vec![first.clone(), second],
             &content_state,
@@ -843,7 +867,8 @@ mod tests {
         drop(large);
         std::fs::write(&small_note, b"small personal note").unwrap();
 
-        let content_state = state::State::empty(base.join("content-state.json"));
+        let content_state =
+            state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
         let batch = pending_batch_with_byte_limit(
             vec![large_pdf, small_note.clone()],
             &content_state,
@@ -874,7 +899,8 @@ mod tests {
         std::fs::write(&quiet, b"conteudo").unwrap();
         std::fs::write(&editing, b"conteudo").unwrap();
 
-        let mut catalog = state::State::empty(base.join("state.json"));
+        let mut catalog =
+            state::State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         catalog.set(&quiet, now - 3_600, 10); // untouched for 1h
         catalog.set(&editing, now - 10, 20); // saved 10s ago
         catalog.persist().unwrap();
@@ -917,7 +943,10 @@ mod tests {
         std::fs::write(&kept, b"palavrachave em um arquivo que fica").unwrap();
         std::fs::write(&removed, b"palavrachave em um arquivo que some").unwrap();
 
-        let mut catalog = state::State::load(crate::config::state_path());
+        let mut catalog = state::State::load(
+            &crate::config::state_db_path(),
+            crate::state::NAME_NAMESPACE,
+        );
         for path in [&kept, &removed] {
             let (mtime, size) = state::meta(path).unwrap();
             catalog.set(path, mtime, size);
@@ -936,7 +965,10 @@ mod tests {
         // The file goes, and so does its catalogue row — exactly what the
         // watcher and the scan sweeps do on a delete.
         std::fs::remove_file(&removed).unwrap();
-        let mut catalog = state::State::load(crate::config::state_path());
+        let mut catalog = state::State::load(
+            &crate::config::state_db_path(),
+            crate::state::NAME_NAMESPACE,
+        );
         catalog.remove(&removed);
         catalog.persist().unwrap();
 
@@ -1004,7 +1036,8 @@ mod tests {
         std::fs::write(&note, b"texto").unwrap();
         std::fs::create_dir_all(&folder).unwrap();
 
-        let mut catalog = state::State::empty(base.join("state.json"));
+        let mut catalog =
+            state::State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         catalog.set(&movie, 100, 50); // never an extraction candidate
         catalog.set(&note, 100, 10);
         catalog.set(&vanished, 100, 10);
@@ -1028,7 +1061,8 @@ mod tests {
 
         // Record the tombstones + the extracted file in the content namespace:
         // the next pass must report nothing.
-        let mut content_state = state::State::empty(base.join("content-state.json"));
+        let mut content_state =
+            state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
         for (path, mtime, size) in &batch.non_candidates {
             content_state.set(path, *mtime, *size);
         }
@@ -1171,7 +1205,8 @@ mod tests {
         for path in [&a, &b, &c] {
             std::fs::write(path, b"x").unwrap();
         }
-        let mut catalog = state::State::empty(base.join("state.json"));
+        let mut catalog =
+            state::State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
         catalog.set(&a, 1_000, mib);
         catalog.set(&b, 1_000, mib);
         catalog.set(&c, 1_000, mib);
@@ -1208,7 +1243,8 @@ mod tests {
         for file in [&first, &second, &third] {
             std::fs::write(file, vec![b'x'; mib]).unwrap();
         }
-        let content_state = state::State::empty(base.join("content-state.json"));
+        let content_state =
+            state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
 
         let files = vec![first.clone(), second.clone(), third.clone()];
         let batch =
@@ -1246,7 +1282,10 @@ mod tests {
         let movie = base.join("files").join("movie.bin");
         std::fs::write(&movie, b"not text").unwrap();
 
-        let mut catalog = state::State::load(crate::config::state_path());
+        let mut catalog = state::State::load(
+            &crate::config::state_db_path(),
+            crate::state::NAME_NAMESPACE,
+        );
         for path in notes.iter().chain(std::iter::once(&movie)) {
             let (mtime, size) = state::meta(path).unwrap();
             catalog.set(path, mtime, size);
@@ -1259,7 +1298,10 @@ mod tests {
             3,
             "every batch of the pass is extracted"
         );
-        let content_state = state::State::load(crate::config::content_state_path());
+        let content_state = state::State::load(
+            &crate::config::state_db_path(),
+            crate::state::CONTENT_NAMESPACE,
+        );
         assert!(
             content_state.contains(&movie),
             "policy-skipped entry becomes a tombstone"

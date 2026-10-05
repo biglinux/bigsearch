@@ -310,10 +310,16 @@ fn cmd_reindex(roots: &[String]) -> Result<()> {
         let state = if index_empty {
             content_index = index::recreate_content_on_disk(&config::content_index_dir())?;
             content::clear_content_state()?;
-            state::State::empty(config::state_path())
+            state::State::empty(
+                &crate::config::state_db_path(),
+                crate::state::NAME_NAMESPACE,
+            )
         } else {
             ensure_content_state_matches_index(&content_index)?;
-            state::State::load(config::state_path())
+            state::State::load(
+                &crate::config::state_db_path(),
+                crate::state::NAME_NAMESPACE,
+            )
         };
         (
             available,
@@ -329,7 +335,14 @@ fn cmd_reindex(roots: &[String]) -> Result<()> {
         writer.commit()?;
         content_index = index::recreate_content_on_disk(&config::content_index_dir())?;
         content::clear_content_state()?;
-        (explicit, state::State::empty(config::state_path()), false)
+        (
+            explicit,
+            state::State::empty(
+                &crate::config::state_db_path(),
+                crate::state::NAME_NAMESPACE,
+            ),
+            false,
+        )
     };
 
     let t0 = Instant::now();
@@ -393,7 +406,11 @@ fn ensure_content_state_matches_index(content_index: &tantivy::Index) -> Result<
     if index::is_content_state_synced(&config::content_index_dir()) {
         return Ok(());
     }
-    let cached_content_paths = state::State::load(config::content_state_path()).len();
+    let cached_content_paths = state::State::load(
+        &crate::config::state_db_path(),
+        crate::state::CONTENT_NAMESPACE,
+    )
+    .len();
     if cached_content_paths == 0 {
         return Ok(());
     }
@@ -574,12 +591,12 @@ fn cmd_daemon() -> Result<()> {
                 if let Err(e) = ensure_content_state_matches_index(&watch_content_index) {
                     log::warn!("check content index state: {e:#}");
                 }
-                state::State::empty(config::state_path())
+                state::State::empty(&crate::config::state_db_path(), crate::state::NAME_NAMESPACE)
             } else {
                 if let Err(e) = ensure_content_state_matches_index(&watch_content_index) {
                     log::warn!("check content index state: {e:#}");
                 }
-                state::State::load(config::state_path())
+                state::State::load(&crate::config::state_db_path(), crate::state::NAME_NAMESPACE)
             };
             let initial_watch_dirs = match sync_with_retry(&watch_index, &roots, &mut state) {
                 Ok(sync_outcome) => {
@@ -744,7 +761,10 @@ fn sync_with_retry(
 }
 
 fn recover_inflated_index(index: &mut tantivy::Index) -> Result<()> {
-    let mut cached_state = state::State::load(config::state_path());
+    let mut cached_state = state::State::load(
+        &crate::config::state_db_path(),
+        crate::state::NAME_NAMESPACE,
+    );
     let cached_paths = cached_state.len() as u64;
     let indexed_documents = index::document_count(&index.reader()?)?;
     if !index::is_divergent_document_count(indexed_documents, cached_paths) {
