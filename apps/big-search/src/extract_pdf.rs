@@ -31,12 +31,17 @@ pub(crate) fn read_pdf(path: &Path) -> Option<String> {
     text_layer(text, cap)
 }
 
-/// Like [`read_pdf`], plus the title the PDF declares in its metadata, from the
-/// same `pdftotext` run: `-htmlmeta` puts the metadata in an HTML head (escaped)
-/// and the text, unchanged, in a `<pre>` block.
+/// Pages read to describe a PDF. Its title, kind and date are in its opening:
+/// on the evaluation corpus ten pages give the answers the whole text gives,
+/// and a 738-page book is read in 74 ms instead of 6 s.
+const DESCRIBED_PAGES: &str = "10";
+
+/// The opening pages of a PDF, as [`read_pdf`] reads the whole, plus the title
+/// it declares in its metadata, from the same `pdftotext` run: `-htmlmeta` puts
+/// the metadata in an HTML head (escaped) and the text, unchanged, in a `<pre>`.
 pub(crate) fn read_pdf_titled(path: &Path) -> Option<(String, Option<String>)> {
     let cap = crate::extract::max_extract_bytes();
-    let bytes = pdftotext_capped(path, cap, &["-htmlmeta"])?;
+    let bytes = pdftotext_capped(path, cap, &["-htmlmeta", "-l", DESCRIBED_PAGES])?;
     let html = String::from_utf8_lossy(&bytes);
     let (title, body) = split_html_meta(&html);
     Some((text_layer(body.to_owned(), cap)?, title))

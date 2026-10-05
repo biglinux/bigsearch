@@ -88,7 +88,8 @@ pub struct Described {
     pub prominent: Vec<String>,
 }
 
-/// [`content_with_lines`], with what the file says about its own title.
+/// [`content_with_lines`] (a PDF's opening pages only), with what the file says
+/// about its own title.
 pub fn described(path: &Path) -> Option<Described> {
     let ext = ext_of(path)?;
     let (text, declared_title) = match ext.as_str() {
