@@ -17,6 +17,9 @@ libfuzzer-sys = "0.4"
 [dependencies.big-search]
 path = ".."
 
+[dependencies.big-docinfo]
+path = "../../../crates/foundation/big-docinfo"
+
 [[bin]]
 name = "xml_text"
 path = "fuzz_targets/xml_text.rs"
@@ -34,6 +37,13 @@ bench = false
 [[bin]]
 name = "text_bytes"
 path = "fuzz_targets/text_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "docinfo_text"
+path = "fuzz_targets/docinfo_text.rs"
 test = false
 doc = false
 bench = false

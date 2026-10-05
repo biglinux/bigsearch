@@ -11,6 +11,7 @@ cargo +nightly fuzz build
 cargo +nightly fuzz run xml_text     -- -max_total_time=300
 cargo +nightly fuzz run office_zip   -- -max_total_time=300
 cargo +nightly fuzz run text_bytes   -- -max_total_time=300
+cargo +nightly fuzz run docinfo_text -- -max_total_time=300
 ```
 
 | Target | Exercises |
