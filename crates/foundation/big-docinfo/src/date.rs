@@ -74,6 +74,13 @@ static AGAINST: LazyLock<Regex> = LazyLock::new(|| {
     ))
     .expect("valid")
 });
+/// An article's history line ("Submitted …; accepted for publication …"): its
+/// dates date the article only when nothing better does, whatever "em" or
+/// "publication" says next to them.
+static HISTORY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"submet|submitted|received|recebid|recibid|aceit[oa]|accepted|aceptad[oa]")
+        .expect("valid")
+});
 /// Words before a date that make it the document's date (pt, es, en).
 static FOR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
@@ -94,6 +101,14 @@ static FOR: LazyLock<Regex> = LazyLock::new(|| {
 static STAMP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"eletronicamente|electronicamente|firmado por|firma electronica|digitally signed|signed by")
         .expect("valid")
+});
+/// "Downloaded from … by guest on", "acessado em": the date of a copy, which a
+/// publisher stamps on every page, never the document's.
+static COPY_STAMP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)downloaded|accessed|retrieved|baixado|acess[oa]|descargado|consultado|recuperado",
+    )
+    .expect("valid")
 });
 /// A law, decree or order named by its number just before its date ("Lei nº
 /// 13.844, de", "Decreto Municipal nº 2.812 de", "Reglamento (UE) 2016/679 …
@@ -347,6 +362,26 @@ fn candidates(text: &str) -> Vec<Found> {
     out
 }
 
+/// Whether `line` is little more than a date: "17 de setembro de 2026",
+/// "Setembro de 2026", "October 2026".
+pub fn is_date_line(line: &str) -> bool {
+    let line = line.trim();
+    let words: Vec<&str> = line
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let month_and_year = words.iter().any(|w| month(w).is_some())
+        && words.iter().all(|w| {
+            month(w).is_some()
+                || w.chars().all(|c| c.is_ascii_digit())
+                || matches!(fold_lower(w).as_str(), "de" | "del" | "of" | "the")
+        });
+    month_and_year
+        || candidates(line)
+            .iter()
+            .any(|found| found.len * 10 >= line.len() * 7)
+}
+
 #[derive(Clone, Copy)]
 enum Order {
     DayFirst,
@@ -419,7 +454,17 @@ pub fn document_date(text: &str) -> Option<String> {
             reason = "document lengths are far below 2^52 bytes"
         )]
         let place = found.at as f64 / text.len().max(1) as f64;
-        if STAMP.is_match(&norm(last_chars(before_raw, 160))) {
+        let window = last_chars(before_raw, 160);
+        // The stamp's own date follows it with no other date in between: the
+        // issue header after "…by guest on 29 September 2026" is not the copy's.
+        let copy_stamp = COPY_STAMP
+            .find_iter(window)
+            .last()
+            .is_some_and(|m| candidates(&window[m.end()..]).is_empty());
+        if copy_stamp {
+            continue;
+        }
+        if STAMP.is_match(&norm(window)) {
             if first_stamp.as_ref().is_none_or(|(at, _)| found.at < *at) {
                 first_stamp = Some((found.at, found.iso));
             }
@@ -445,7 +490,7 @@ pub fn document_date(text: &str) -> Option<String> {
                 && CITED_ACT.find(&norm(line)).is_some_and(|m| m.start() == 0);
             score += if own_title { 3 } else { -3 };
         }
-        if FOR.is_match(near) {
+        if FOR.is_match(near) && !HISTORY.is_match(near) {
             score += 2;
         }
         if signature_line(&text[line_start..found.at]) || found.formal {

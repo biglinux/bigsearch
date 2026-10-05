@@ -13,7 +13,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::text::{first_chars, norm};
+use crate::entity::in_passing;
+use crate::text::{content_lines, first_chars, norm};
 
 const HEAD_CHARS: usize = 600;
 
@@ -213,12 +214,33 @@ static COMBINED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&alternation.join("|")).expect("kind patterns are valid")
 });
 
-/// The kind named earliest in the document's head, with the language that named it.
+/// The kind named earliest in the document's head, with the language that named
+/// it. A kind named only in passing, in prose below a heading, is skipped: a
+/// checklist that cites "the annual Network Threat Report" is not a report.
 pub fn by_rules(text: &str) -> Option<(&'static str, &'static str)> {
-    let head = norm(first_chars(text, HEAD_CHARS));
-    let captures = COMBINED.captures(&head)?;
-    let rule = (1..captures.len()).find(|&i| captures.get(i).is_some())?;
-    RULES.get(rule - 1).map(|&(lang, kind, _)| (kind, lang))
+    let lines = content_lines(first_chars(text, HEAD_CHARS));
+    // The normalized head, line by line: `norm` turns a line break into one
+    // space, so joining the normalized lines gives the same string, and the end
+    // of each line in it tells which line a match falls on.
+    let mut head = String::new();
+    let mut ends = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let normalized = norm(line);
+        if !normalized.is_empty() && !head.is_empty() {
+            head.push(' ');
+        }
+        head.push_str(&normalized);
+        ends.push(head.len());
+    }
+    COMBINED.captures_iter(&head).find_map(|captures| {
+        let start = captures.get(0)?.start();
+        let line = ends.partition_point(|&end| end <= start);
+        if in_passing(&lines, line) {
+            return None;
+        }
+        let rule = (1..captures.len()).find(|&i| captures.get(i).is_some())?;
+        RULES.get(rule - 1).map(|&(lang, kind, _)| (kind, lang))
+    })
 }
 
 /// Whether a normalized line names some kind ("Ofício nº 027/2026" does).
