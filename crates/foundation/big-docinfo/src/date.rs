@@ -5,10 +5,13 @@
 //!
 //! A contract mentions its signature, its start, its end and the tenant's birth;
 //! a bill has an issue date and a due date. Every date in the text is a
-//! candidate, and the words just before it decide its role: "vencimento",
-//! "due", "validez", "nascimento" push it down; "emissão", "signed", "fecha", a
-//! signature line ("Porto Alegre, 22 de abril de 2026.") push it up. The best
-//! candidate wins only with a positive score — otherwise no date.
+//! candidate, and the words just before it on its line decide its role:
+//! "vencimento", "due", "validez", "nascimento", a law it cites or a letter it
+//! answers push it down; "emissão", "signed", "fecha", a weekday dateline, a
+//! signature line ("Porto Alegre, 22 de abril de 2026.") or the formal "aos onze
+//! dias do mês de maio…" push it up. The best candidate wins only with a positive
+//! score, the earliest among equals; otherwise the first electronic signature
+//! stamp, if any, dates the document.
 //!
 //! Written dates are read in every alphabetic language BigLinux ships (month
 //! names from glibc, see `months.rs`), plus the `2026年10月4日` / `2026년 10월 4일`
@@ -45,12 +48,29 @@ static YEAR_MONTH_DAY: LazyLock<Regex> =
 static CJK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(\d{4})\s*[年년]\s*(\d{1,2})\s*[月월]\s*(\d{1,2})\s*[日일]").expect("valid")
 });
+/// The formal date of minutes, deeds and declarations: "aos 25 dias de fevereiro
+/// de 2025", "aos onze dias do mês de maio do ano de dois mil e dezoito", "a los
+/// veinte días del mes de marzo de", "this 12th day of March, 2026". The year
+/// after the match is read in code, in digits or in words.
+static DAYS_OF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        // Day words are Latin letters ("vinte e um", "veintidós"); a small class,
+        // bounded, keeps the automaton small and the scan after "this" short.
+        r"(?i:\baos|\ba los|\bthis|\bon the)\s+((?:[a-zA-Z\u{C0}-\u{FF}\d]+[ -]){0,4}?[a-zA-Z\u{C0}-\u{FF}\d]+?)(?i:st|nd|rd|th)?\s+",
+        r"(?i:dias?|días?|day)\s+(?i:do\s+m[eê]s\s+de|del\s+mes\s+de|de|of)\s+(\p{L}+),?\s+",
+        r"(?i:do\s+ano\s+de|del\s+a[ñn]o|de|of)?\s*"
+    ))
+    .expect("valid")
+});
 /// Words before a date that make it NOT the document's date (pt, es, en).
 static AGAINST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"venc|validade|valid[ao] ate|nasc|inicio|termino|prazo|\bate\b|a partir|periodo|referen|leitura|coleta|vigen|proxim|previst|lancamento|entrega",
         r"|validez|valid[oa] hasta|nacim|nacid|plazo|\bhasta\b|\bfin\b",
-        r"|\bdue\b|expir|valid until|valid through|birth|born|\bstart|\bend\b|deadline|\buntil\b|\bthrough\b|effective|renew|\bnext\b|\bperiod\b"
+        r"|\bdue\b|expir|valid until|valid through|birth|born|\bstart|\bend\b|deadline|\buntil\b|\bthrough\b|effective|renew|\bnext\b|\bperiod\b",
+        // Another document the text answers or amends: its date is not this one's.
+        r"|original|de origem|anterior|\bsu[ae]? (carta|oficio|escrito|solicitud|mensagem|e ?mail)|solicitud",
+        r"|\byour\b|previous|\bprior\b|preceding|in response|beginning|commenc|launch"
     ))
     .expect("valid")
 });
@@ -59,7 +79,36 @@ static FOR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"emiss|emitid|\bdata\b|assinad|reuniao|realizad|publicad|enviad|aprovad|sessao|\bem\b$",
         r"|\bfecha\b|emision|firmad|celebrad|\bsesion\b",
-        r"|\bdated?\b|issued|signed|meeting|\bheld\b|published|\bsent\b|approved|session|\bon\b$|\bas of\b|entered into|executed"
+        r"|\bdated?\b|issued|signed|meeting|\bheld\b|published|\bsent\b|approved|session|\bon\b$|\bas of\b|entered into|executed",
+        // A weekday heads the dateline of gazettes, letters and e-mails; after a
+        // preposition ("no sábado", "on Friday") it is an event in the text.
+        r"|(?:^|(?:[a-z]{3,}|\d+) )(?:(?:segunda|terca|quarta|quinta|sexta) feira|sabado|domingo",
+        r"|lunes|martes|miercoles|jueves|viernes",
+        r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$"
+    ))
+    .expect("valid")
+});
+/// An electronic signature stamp ("Documento assinado eletronicamente por …, em",
+/// "Firmado por … el"): repeated on every page and by every signer, so it only
+/// dates a document that offers no other date, and then the first one does.
+static STAMP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"eletronicamente|electronicamente|firmado por|firma electronica|digitally signed|signed by")
+        .expect("valid")
+});
+/// A law, decree or order named by its number just before its date ("Lei nº
+/// 13.844, de", "Decreto Municipal nº 2.812 de", "Reglamento (UE) 2016/679 …
+/// de"): the date of the act, which is the document's own only in its title.
+static CITED_ACT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"\b(?:lei|decreto|portaria|resolucao|instrucao normativa|medida provisoria|emenda|acordao|deliberacao",
+        r"|oficio|despacho|memorando|parecer|nota tecnica|contrato|convenio",
+        r"|ley|orden|reglamento|resolucion|directiva|expediente",
+        r"|act|law|order|regulation|memorandum|contract)\b",
+        // its number, possibly coded ("1asec ri e no 565"), then up to a few words
+        // ("publicada no dou") before the "de" that introduces the date…
+        r"(?:(?: [a-z0-9]+){0,6}? (?:n[o]? )?\d[\d ]*(?:[a-z]+ ){0,6}de",
+        // …or no number at all ("pelo decreto de").
+        r"|(?: [a-z]+)? de)$"
     ))
     .expect("valid")
 });
@@ -90,6 +139,114 @@ struct Found {
     iso: String,
     at: usize,
     len: usize,
+    /// Written out in the formal way ("aos onze dias do mês de…").
+    formal: bool,
+}
+
+/// Value of a number written in Portuguese or Spanish words ("dois mil e dezoito",
+/// "veinticinco"), or in digits; `None` for anything else.
+fn number(words: &[&str]) -> Option<u32> {
+    if let [digits] = words
+        && let Ok(n) = digits.parse()
+    {
+        return Some(n);
+    }
+    let (mut total, mut current, mut any) = (0, 0, false);
+    for word in words {
+        let word = fold_lower(word);
+        let value = match word.as_str() {
+            "e" | "y" => continue,
+            "mil" => {
+                total += current.max(1) * 1000;
+                current = 0;
+                any = true;
+                continue;
+            }
+            "um" | "uma" | "un" | "uno" | "una" | "primeiro" | "primero" => 1,
+            "dois" | "duas" | "dos" => 2,
+            "tres" => 3,
+            "quatro" | "cuatro" => 4,
+            "cinco" => 5,
+            "seis" => 6,
+            "sete" | "siete" => 7,
+            "oito" | "ocho" => 8,
+            "nove" | "nueve" => 9,
+            "dez" | "diez" => 10,
+            "onze" | "once" => 11,
+            "doze" | "doce" => 12,
+            "treze" | "trece" => 13,
+            "catorze" | "quatorze" | "catorce" => 14,
+            "quinze" | "quince" => 15,
+            "dezesseis" | "dezasseis" | "dieciseis" => 16,
+            "dezessete" | "dezassete" | "diecisiete" => 17,
+            "dezoito" | "dieciocho" => 18,
+            "dezenove" | "dezanove" | "diecinueve" => 19,
+            "vinte" | "veinte" => 20,
+            "veintiun" | "veintiuno" => 21,
+            "veintidos" => 22,
+            "veintitres" => 23,
+            "veinticuatro" => 24,
+            "veinticinco" => 25,
+            "veintiseis" => 26,
+            "veintisiete" => 27,
+            "veintiocho" => 28,
+            "veintinueve" => 29,
+            "trinta" | "treinta" => 30,
+            "quarenta" | "cuarenta" => 40,
+            "cinquenta" | "cincuenta" => 50,
+            "sessenta" | "sesenta" => 60,
+            "setenta" => 70,
+            "oitenta" | "ochenta" => 80,
+            "noventa" => 90,
+            "cem" | "cento" | "cien" | "ciento" => 100,
+            "duzentos" | "doscientos" => 200,
+            "trezentos" | "trescientos" => 300,
+            "quatrocentos" | "cuatrocientos" => 400,
+            "quinhentos" | "quinientos" => 500,
+            "seiscentos" | "seiscientos" => 600,
+            "setecentos" | "setecientos" => 700,
+            "oitocentos" | "ochocientos" => 800,
+            "novecentos" | "novecientos" => 900,
+            _ => return None,
+        };
+        current += value;
+        any = true;
+    }
+    any.then_some(total + current)
+}
+
+/// The year that opens `rest`: four digits, or number words up to the first word
+/// that is not one ("dois mil e dezoito, com início às…").
+fn leading_year(rest: &str) -> Option<(u32, usize)> {
+    let mut words = Vec::new();
+    let mut end = 0;
+    for (at, token) in rest.split_inclusive([' ', '\n', '\t']).scan(0, |at, t| {
+        let start = *at;
+        *at += t.len();
+        Some((start, t))
+    }) {
+        let word = token.trim().trim_end_matches([',', '.', ';', ':']);
+        if word.is_empty() {
+            continue;
+        }
+        if words.is_empty() && word.len() == 4 && word.bytes().all(|b| b.is_ascii_digit()) {
+            return word.parse().ok().map(|y| (y, at + token.trim_end().len()));
+        }
+        if number(&[word]).is_none() && !matches!(word, "e" | "y") {
+            break;
+        }
+        words.push(word);
+        end = at + token.trim_end().len();
+        if word.len() < token.trim().len() {
+            break; // punctuation closes the year
+        }
+    }
+    while words.last().is_some_and(|w| matches!(*w, "e" | "y")) {
+        words.pop();
+    }
+    number(&words)
+        .filter(|y| (1000..=2999).contains(y))
+        .map(|y| (y, end))
 }
 
 /// Month number for a written name in any shipped language. Hebrew attaches its
@@ -123,6 +280,7 @@ fn candidates(text: &str) -> Vec<Found> {
                 iso: format!("{y:04}-{month:02}-{d:02}"),
                 at,
                 len,
+                formal: false,
             });
         }
     };
@@ -167,6 +325,23 @@ fn candidates(text: &str) -> Vec<Found> {
     for c in CJK.captures_iter(text) {
         if let Ok(m) = c[2].parse() {
             push(&c[1], m, &c[3], start(&c));
+        }
+    }
+    for c in DAYS_OF.captures_iter(text) {
+        let whole = c.get(0).map_or(0..0, |m| m.range());
+        let day_words: Vec<&str> = c[1].split([' ', '-']).collect();
+        if let (Some(day), Some(m), Some((year, len))) = (
+            (day_words.len() <= 5).then(|| number(&day_words)).flatten(),
+            month(&c[2]),
+            leading_year(&text[whole.end..]),
+        ) && (1..=31).contains(&day)
+        {
+            out.push(Found {
+                iso: format!("{year:04}-{m:02}-{day:02}"),
+                at: whole.start,
+                len: whole.len() + len,
+                formal: true,
+            });
         }
     }
     out
@@ -221,11 +396,22 @@ fn is_english(text: &str) -> bool {
 /// The document's own date, or `None` when no candidate scores above zero.
 pub fn document_date(text: &str) -> Option<String> {
     let mut best: Option<(i32, f64, String)> = None;
+    let mut first_stamp: Option<(usize, String)> = None;
     for found in candidates(text) {
         let before_raw = &text[..found.at];
         let line_start = before_raw.rfind('\n').map_or(0, |i| i + 1);
-        let before = norm(last_chars(before_raw, 60));
-        let near = last_chars(&before, 35);
+        // The words that give the date its role sit on its line ("Data: …",
+        // "Vencimento …") or, when the date opens its line, on the line above.
+        let scope = if text[line_start..found.at].trim().is_empty() {
+            before_raw[..line_start]
+                .trim_end()
+                .rfind('\n')
+                .map_or(0, |i| i + 1)
+        } else {
+            line_start
+        };
+        let near_text = norm(last_chars(&text[scope..found.at], 35));
+        let near = near_text.as_str();
         // Position as a share of the text, in bytes: counting characters from the
         // start for every candidate would be quadratic on a long document.
         #[expect(
@@ -233,14 +419,36 @@ pub fn document_date(text: &str) -> Option<String> {
             reason = "document lengths are far below 2^52 bytes"
         )]
         let place = found.at as f64 / text.len().max(1) as f64;
+        if STAMP.is_match(&norm(last_chars(before_raw, 160))) {
+            if first_stamp.as_ref().is_none_or(|(at, _)| found.at < *at) {
+                first_stamp = Some((found.at, found.iso));
+            }
+            continue;
+        }
         let mut score = 0;
         if AGAINST.is_match(near) {
             score -= 3;
         }
+        if CITED_ACT.is_match(&norm(last_chars(before_raw, 120))) {
+            // Opening one of the first lines, it is the document's own title
+            // ("DECRETO Nº 010, DE 02 DE ABRIL DE 2020"); "(Lei nº 7.115, de …)"
+            // under a title is the law the document rests on.
+            let line = &text[line_start..found.at];
+            // nth(2) stops at the third line instead of counting them all.
+            let own_title = line.len() <= 300
+                && text[..line_start]
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .nth(2)
+                    .is_none()
+                && line.trim_start().starts_with(char::is_alphabetic)
+                && CITED_ACT.find(&norm(line)).is_some_and(|m| m.start() == 0);
+            score += if own_title { 3 } else { -3 };
+        }
         if FOR.is_match(near) {
             score += 2;
         }
-        if signature_line(&text[line_start..found.at]) {
+        if signature_line(&text[line_start..found.at]) || found.formal {
             score += 3;
         }
         let line_end = text[found.at..]
@@ -263,6 +471,7 @@ pub fn document_date(text: &str) -> Option<String> {
     }
     best.filter(|(score, _, _)| *score >= 1)
         .map(|(_, _, iso)| iso)
+        .or(first_stamp.map(|(_, iso)| iso))
 }
 
 /// Tuple order: score, then position, then the ISO string.
@@ -270,7 +479,7 @@ fn greater(a: &(i32, f64, String), b: &(i32, f64, String)) -> bool {
     match a.0.cmp(&b.0) {
         std::cmp::Ordering::Equal => match a.1.partial_cmp(&b.1) {
             Some(std::cmp::Ordering::Equal) | None => a.2 > b.2,
-            Some(order) => order == std::cmp::Ordering::Greater,
+            Some(order) => order == std::cmp::Ordering::Less,
         },
         order => order == std::cmp::Ordering::Greater,
     }
@@ -310,5 +519,48 @@ mod tests {
         assert_eq!(document_date(us), None);
         let unambiguous = "This agreement is made by and between the parties for the lease of the apartment. Signed on 10/24/2026.";
         assert_eq!(document_date(unambiguous).as_deref(), Some("2026-10-24"));
+    }
+
+    #[test]
+    fn formal_dates_in_digits_and_words() {
+        for (text, iso) in [
+            (
+                "Ata da reunião.\nAos onze dias do mês de maio do ano de dois mil e dezoito, com início às oito horas, reuniram-se os membros.",
+                "2018-05-11",
+            ),
+            (
+                "Publique-se. Trindade, aos 25 dias de fevereiro de 2025.",
+                "2025-02-25",
+            ),
+            (
+                "En la ciudad de Lima, a los veinticinco días del mes de febrero de dos mil veinticinco, se reúnen las partes.",
+                "2025-02-25",
+            ),
+            (
+                "IN WITNESS WHEREOF, the parties sign this 12th day of March, 2026.",
+                "2026-03-12",
+            ),
+        ] {
+            assert_eq!(document_date(text).as_deref(), Some(iso), "{text}");
+        }
+    }
+
+    /// A law's date dates the law, unless the document is that law.
+    #[test]
+    fn cited_acts_date_only_their_own_title() {
+        let cites = "Política de privacidade da escola. Coletamos nome, endereço e telefone dos responsáveis para matrícula e comunicação com as famílias durante o ano letivo.\nBase legal: Lei nº 13.709, de 14 de agosto de 2018.";
+        assert_eq!(document_date(cites), None);
+        let own = "DECRETO Nº 010, DE 02 DE ABRIL DE 2020\nDispõe sobre medidas conforme o Decreto nº 006, de 17 de março de 2020.";
+        assert_eq!(document_date(own).as_deref(), Some("2020-04-02"));
+    }
+
+    /// Stamps repeat on every page and for every signer; they date a document
+    /// only when nothing else does, and then the first one does.
+    #[test]
+    fn signature_stamps_are_a_fallback() {
+        let stamps = "Encaminho o relatório.\nDocumento assinado eletronicamente por Ana Souza, Diretora, em 08/03/2024, às 10:00.\nAnexo\nDocumento assinado eletronicamente por Rui Lima, Chefe, em 07/03/2024, às 09:00.";
+        assert_eq!(document_date(stamps).as_deref(), Some("2024-03-08"));
+        let meeting = "Ata da sessão.\nReunião realizada em 23/02/2024.\nDocumento assinado eletronicamente por Ana Souza, Secretária, em 02/04/2024, às 10:00.";
+        assert_eq!(document_date(meeting).as_deref(), Some("2024-02-23"));
     }
 }
