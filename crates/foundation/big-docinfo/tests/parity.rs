@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: 2026 BigLinux contributors
 // SPDX-License-Identifier: MIT
 
-//! Parity with the Python reference that was measured on the evaluation corpus.
+//! Every field of every fixture document, against a recorded answer.
 //!
-//! `fixtures/expected.jsonl` holds the reference's answers for the synthetic
-//! documents in `fixtures/docs`. The public documents of the corpus carry real
-//! names and stay out of this repository; point `BIG_DOCINFO_CORPUS` at the
-//! corpus `docs/` directory and `BIG_DOCINFO_EXPECTED` at the full reference file
-//! to run the same check over all of them (`cargo test -- --ignored`).
+//! `fixtures/expected.jsonl` started as the answers of the Python reference that
+//! was measured on the evaluation corpus; the crate matched it field for field.
+//! Behaviour now changes here first, measured on that corpus, and the answers are
+//! re-recorded on purpose: `BIG_DOCINFO_BLESS=1 cargo test -p big-docinfo`.
+//! The public documents of the corpus carry real names and stay out of this
+//! repository; point `BIG_DOCINFO_CORPUS` at the corpus `docs/` directory and
+//! `BIG_DOCINFO_EXPECTED` at a recorded file to check them (`cargo test -- --ignored`).
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -23,8 +25,30 @@ fn read_doc(path: &Path) -> String {
         .replace('\r', "\n")
 }
 
-/// Every field of every document that differs from the reference, one per line.
+/// Re-records `expected` with the current answers for the same documents.
+fn bless(docs: &Path, expected: &Path) {
+    let lines = std::fs::read_to_string(expected).expect("expected file");
+    let mut out = String::new();
+    for line in lines.lines() {
+        let id = serde_json::from_str::<Value>(line).expect("JSON")["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        let got = analyze(&read_doc(&docs.join(format!("{id}.txt"))), "pdf");
+        let row = serde_json::json!({
+            "id": id, "kind": got.kind, "date": got.date, "entity": got.entity,
+            "title": got.title, "highlights": got.highlights, "name": got.suggested_name,
+        });
+        let _ = writeln!(out, "{row}");
+    }
+    std::fs::write(expected, out).expect("write expected");
+}
+
+/// Every field of every document that differs from the recording, one per line.
 fn mismatches(docs: &Path, expected: &Path) -> (usize, String) {
+    if std::env::var_os("BIG_DOCINFO_BLESS").is_some() {
+        bless(docs, expected);
+    }
     let lines =
         std::fs::read_to_string(expected).unwrap_or_else(|e| panic!("{}: {e}", expected.display()));
     let mut report = String::new();
@@ -47,7 +71,7 @@ fn mismatches(docs: &Path, expected: &Path) -> (usize, String) {
                 count += 1;
                 let _ = writeln!(
                     report,
-                    "{id} {field}: got {value:?}, reference {expected_value:?}"
+                    "{id} {field}: got {value:?}, recorded {expected_value:?}"
                 );
             }
         }
@@ -56,23 +80,23 @@ fn mismatches(docs: &Path, expected: &Path) -> (usize, String) {
 }
 
 #[test]
-fn synthetic_documents_match_the_reference() {
+fn fixture_documents_match_the_recording() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let (count, report) = mismatches(&dir.join("docs"), &dir.join("expected.jsonl"));
     assert_eq!(
         count, 0,
-        "{count} fields differ from the reference:\n{report}"
+        "{count} fields differ from the recording:\n{report}"
     );
 }
 
 #[test]
 #[ignore = "needs the evaluation corpus: BIG_DOCINFO_CORPUS and BIG_DOCINFO_EXPECTED"]
-fn whole_corpus_matches_the_reference() {
+fn whole_corpus_matches_the_recording() {
     let docs = std::env::var("BIG_DOCINFO_CORPUS").expect("BIG_DOCINFO_CORPUS");
     let expected = std::env::var("BIG_DOCINFO_EXPECTED").expect("BIG_DOCINFO_EXPECTED");
     let (count, report) = mismatches(Path::new(&docs), Path::new(&expected));
     assert_eq!(
         count, 0,
-        "{count} fields differ from the reference:\n{report}"
+        "{count} fields differ from the recording:\n{report}"
     );
 }

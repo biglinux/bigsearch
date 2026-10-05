@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::kind::names_a_kind;
-use crate::text::{content_lines, norm};
+use crate::text::{content_lines, norm, word_count};
 
 static COMPANY_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^raz[aã]o social:\s*(.+)").expect("valid"));
@@ -45,6 +45,15 @@ static SUBJECT: LazyLock<Regex> =
 const PARTY_LINES: usize = 40;
 const HEADER_LINES: usize = 15;
 const TITLE_LINES: usize = 12;
+const FALLBACK_TITLE_LINES: usize = 5;
+/// "CPF:179…", "Local de pagamento: …" — up to three words and a colon open a
+/// field, not a title ("Compressão zstd em Btrfs: impacto…" is a title).
+/// "…ao todo. Alguém lembrou…", "…disseram na época." — a sentence ends inside or
+/// at the end of the line: running text ("S.A." at the end is still a name).
+static TWO_SENTENCES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[.!?] [A-ZÀ-Ý]|[a-zà-ÿ]\.$").expect("valid"));
+static FIELD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\S+\s+){0,2}\S+:\s*\S").expect("valid"));
 
 pub fn main_entity(text: &str, kind: Option<&str>) -> Option<String> {
     let lines = content_lines(text);
@@ -84,10 +93,35 @@ pub fn title(text: &str) -> Option<String> {
                 .then(|| c[1].trim().to_owned());
         }
     }
+    if let Some(line) = lines
+        .iter()
+        .find(|line| line.chars().count() <= 140 && names_a_kind(&norm(line)))
+    {
+        return Some((*line).to_owned());
+    }
+    // A text that is not a known kind of document usually opens with its title:
+    // a book chapter, a report, a review.
     lines
         .into_iter()
-        .find(|line| line.chars().count() <= 140 && names_a_kind(&norm(line)))
+        .take(FALLBACK_TITLE_LINES)
+        .find(|line| looks_like_title(line))
         .map(str::to_owned)
+}
+
+/// A short line of words that is not a field, a greeting, a placeholder or an address.
+fn looks_like_title(line: &str) -> bool {
+    let words = word_count(line);
+    let visible: Vec<char> = line.chars().filter(|c| !c.is_whitespace()).collect();
+    let letters = visible.iter().filter(|c| c.is_alphabetic()).count();
+    (2..=15).contains(&words)
+        && line.chars().count() <= 120
+        && letters * 2 >= visible.len()
+        && !line.ends_with([',', ';', ':'])
+        && !line.starts_with(['[', '(', '{', '<', '.', '…'])
+        && !FIELD.is_match(line)
+        && !TWO_SENTENCES.is_match(line)
+        && !line.contains('@')
+        && !line.contains("http")
 }
 
 /// "JOANA D'ARC SILVA" → "Joana D'Arc Silva": capital after every non-letter.

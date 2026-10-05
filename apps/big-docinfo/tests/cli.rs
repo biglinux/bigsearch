@@ -117,3 +117,20 @@ fn a_file_without_text_is_an_error_not_a_guess() {
     assert!(out.stdout.is_empty());
     fs::remove_dir_all(dir).expect("cleanup");
 }
+
+#[test]
+fn a_document_with_nothing_to_go_on_keeps_its_name() {
+    let dir = scratch("kept");
+    let doc = dir.join("Planilha de horas.txt");
+    fs::write(&doc, "12 345 678\n9 10 11\n").expect("write");
+    let out = run(&["--json", arg(&doc)]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(json["kept_name"], true);
+    assert_eq!(json["free_name"], "Planilha de horas.txt");
+    fs::remove_dir_all(dir).expect("cleanup");
+}

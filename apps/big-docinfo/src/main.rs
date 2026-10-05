@@ -56,12 +56,20 @@ enum Output {
 }
 
 fn describe(path: &Path, output: Output) -> Result<()> {
-    let text = big_search::extract::content(path).context(
+    let text = big_search::extract::content_with_lines(path).context(
         "Este arquivo não tem texto legível: o tipo não é suportado ou é um PDF escaneado.",
     )?;
     let ext = extension(path);
     let info = analyze(&text, ext);
-    let free = free_name(path, &info.suggested_name, ext);
+    // With neither a kind nor a title the suggestion would say less than the
+    // current name ("documento.odt"), so the current name stays.
+    let kept = info.kind.is_none() && info.title.is_none();
+    let free = if kept {
+        path.file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+    } else {
+        free_name(path, &info.suggested_name, ext)
+    };
     match output {
         Output::Json => {
             let value = serde_json::json!({
@@ -72,6 +80,7 @@ fn describe(path: &Path, output: Output) -> Result<()> {
                 "highlights": info.highlights,
                 "suggested_name": info.suggested_name,
                 "free_name": free,
+                "kept_name": kept,
             });
             println!("{value}");
         }
@@ -83,6 +92,11 @@ fn describe(path: &Path, output: Output) -> Result<()> {
             show("Data", info.date.as_deref());
             show("Entidade", info.entity.as_deref());
             show("Título", info.title.as_deref());
+            if kept {
+                println!(
+                    "Não encontrei tipo nem título neste documento; o nome atual foi mantido."
+                );
+            }
             show("Nome", Some(&free));
         }
     }
