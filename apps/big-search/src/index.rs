@@ -161,7 +161,23 @@ pub fn content_fields(index: &Index) -> Result<ContentFields> {
 /// but has not yet bound its socket would do it underneath the daemon. A read
 /// command must fail instead.
 pub fn open_read_only(dir: &Path) -> Result<Index> {
-    let index = open_existing(dir).with_context(|| {
+    open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open)
+}
+
+/// [`open_read_only`] for searching: mapped for small random reads (see
+/// [`NoFsyncDirectory::open_for_queries`]). Commands that walk every document
+/// (`count`, `list`) keep [`open_read_only`] and the kernel's read-ahead.
+///
+/// [`NoFsyncDirectory::open_for_queries`]: crate::nosync_dir::NoFsyncDirectory::open_for_queries
+pub fn open_for_queries(dir: &Path) -> Result<Index> {
+    open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open_for_queries)
+}
+
+fn open_read_only_with(
+    dir: &Path,
+    directory: fn(&Path) -> tantivy::Result<crate::nosync_dir::NoFsyncDirectory>,
+) -> Result<Index> {
+    let index = open_existing_with(dir, directory).with_context(|| {
         format!(
             "no usable index at {} (is the daemon running?)",
             dir.display()
@@ -231,7 +247,14 @@ fn open_or_create_with_schema(dir: &Path, build_schema: fn() -> Schema) -> Resul
 /// recover from. Building a searcher here opens every segment, so the damage
 /// surfaces as an open error and the caller recreates the index instead.
 fn open_existing(dir: &Path) -> Result<Index> {
-    let index = Index::open(crate::nosync_dir::NoFsyncDirectory::open(dir)?)?;
+    open_existing_with(dir, crate::nosync_dir::NoFsyncDirectory::open)
+}
+
+fn open_existing_with(
+    dir: &Path,
+    directory: fn(&Path) -> tantivy::Result<crate::nosync_dir::NoFsyncDirectory>,
+) -> Result<Index> {
+    let index = Index::open(directory(dir)?)?;
     index
         .reader()
         .context("open index reader")?

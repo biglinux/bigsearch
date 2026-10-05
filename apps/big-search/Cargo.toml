@@ -28,5 +28,5 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["cache"] 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150" }
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "isomp4", "mkv", "ogg", "flac", "wav"] }
-tantivy = { version = "0.26.1" }
+tantivy = { version = "0.26.2" }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

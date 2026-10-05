@@ -680,9 +680,13 @@ fn cmd_daemon() -> Result<()> {
     // Main thread serves queries + lifecycle commands; the reader reloads on commit.
     // Built once and held for the daemon's life; `ReloadPolicy::OnCommitWithDelay`
     // (tantivy's default) refreshes them from the meta.json watch after a commit.
-    let name_reader = index.reader().context("open name index reader")?;
-    let content_reader = content_index
-        .reader()
+    // Their own instances of the indexes, mapped for random reads: the watcher's
+    // keep read-ahead for merges and scans (see `index::open_for_queries`).
+    let name_reader = index::open_for_queries(&config::index_dir())
+        .and_then(|index| Ok(index.reader()?))
+        .context("open name index reader")?;
+    let content_reader = index::open_for_queries(&config::content_index_dir())
+        .and_then(|index| Ok(index.reader()?))
         .context("open content index reader")?;
     ipc::serve(
         name_reader,
@@ -1086,9 +1090,9 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
     let outcome = match daemon_query {
         Ok(outcome) => outcome,
         Err(big_indexd_client::ClientError::Io(_)) => {
-            let index = index::open_read_only(&config::index_dir())?;
+            let index = index::open_for_queries(&config::index_dir())?;
             let content_index = matches!(mode, "content" | "both")
-                .then(|| index::open_read_only(&config::content_index_dir()))
+                .then(|| index::open_for_queries(&config::content_index_dir()))
                 .transpose()?;
             let origin_reader = s
                 .include_origin
