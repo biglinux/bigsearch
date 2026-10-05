@@ -142,6 +142,21 @@ name_known_item.py`), first-place hits went from 15-19 % to 19-25 % and every
 short-name file is now found (14 of 15 were not). A new name schema rebuilds only
 the name index: the content rows stay unless the content index is empty.
 
+**Content prefix and paging (2026-10).** The last content word is read as typed
+so far (`query::last_word_query`): it also matches the indexed words it begins,
+most frequent first, within 32 words and 50 000 documents, the exact word boosted
+— as-you-type, and Portuguese/Russian suffixes ("relatorio" → "relatorios",
+"квартал" → "квартале"). It does not cover the reverse (a plural query, a
+singular document); that is the stem study still to do. On the i3's 5400 rpm disk
+the expansion cost nothing measurable cold ("zz relatorio" 1013 ms against
+"relatorio zz" 1019 ms, both dominated by opening the indexes), and a tighter
+budget (16/10 000) changed no timing while dropping Portuguese words from short
+prefixes in a code-heavy home. A query reads only the candidates its page needs
+when the index answers every filter, and counts its total from the postings up to
+the ceiling (`count_capped`); warm, a name query went from 17-24 ms to 3-5 ms and
+"both" from 19-25 ms to 5-18 ms. Names carry their folded stem as a term so the
+exact name stays first among few candidates.
+
 ### 3.2 Initial scan — `scan.rs`
 
 `ignore` crate `WalkBuilder` (parallel, the engine behind `fd`/`rg`): respects
