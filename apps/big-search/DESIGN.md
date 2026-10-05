@@ -108,6 +108,24 @@ dedicated in-RAM `memchr` name table later — **deferred, not built now.**
 Deletes: `delete_term(path)` then re-add. Commits batched (debounce window or N docs)
 — Tantivy commit is the durability boundary (atomic, fsync).
 
+**Segments and reads (2026-10, measured on an i3-2375M with a 5400 rpm disk).**
+Queries read through their own index instances mapped `MADV_RANDOM`
+(`index::open_for_queries`): with the kernel's read-ahead the first query on a
+cold cache read 35 MB of a 47 MB index whatever it asked for. The writer keeps
+read-ahead, which merges need (a build without it took 104 s instead of 49 s).
+A cold query pays per segment (~70-100 ms each on that disk), and tantivy's
+merge policy leaves 7-12 segments and never merges a large one for its deletes
+(the daemon's largest segments held a third of dead documents). So when a
+content backfill pass finishes, off battery, each index is merged into one
+segment once a tenth of it changed, and otherwise its small segments are joined
+into one (`watch::compact_when_worth_it`). Over 18 000 simulated edits that wrote
+less than the default policy (334 vs 355 MB) and left 2 segments instead of 4 at
+its worst point: cold queries 124-374 ms instead of 335-655 ms, 55-213 ms right
+after a full merge. On the notebook's own index a full merge took 61 MB to 32 MB
+and its cold queries from 743-1041 ms to 42-62 ms. SQLite FTS5 was measured
+against this on the same machine and corpus: 7-65x slower with a warm cache on
+common terms, slower to build, larger — tantivy stays.
+
 ### 3.2 Initial scan — `scan.rs`
 
 `ignore` crate `WalkBuilder` (parallel, the engine behind `fd`/`rg`): respects

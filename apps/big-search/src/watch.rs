@@ -733,11 +733,17 @@ fn run_content_backfill_batch(
 }
 
 /// Merge every segment of `index` into one when enough has changed (see
-/// [`crate::index::worth_compacting`]). The writer's merge thread does the work,
-/// at the indexer's idle priority, and publishes the result itself; nothing
-/// waits for it here, and whoever closes the writer next waits for it to end.
-/// A merge already running on one of the segments makes tantivy refuse this
-/// one, which the next finished pass asks again.
+/// [`crate::index::worth_compacting`]); short of that, merge the small segments
+/// that piled up beside the largest into one. Each segment costs a cold query
+/// its own disk reads: on a 5400 rpm disk 5 segments answered in 360-682 ms, 2
+/// in 153-435 ms, 1 in 55-213 ms — and joining the small ones cost 1.8 s and
+/// 5 MB against 12.2 s and 37 MB for everything.
+///
+/// The writer's merge thread does the work, at the indexer's idle priority, and
+/// publishes the result itself; nothing waits for it here, and whoever closes
+/// the writer next waits for it to end. A merge already running on one of the
+/// segments makes tantivy refuse this one, which the next finished pass asks
+/// again.
 fn compact_when_worth_it(index: &Index, writer: &mut IndexWriter, label: &str) {
     let Ok(metas) = index.searchable_segment_metas() else {
         return;
@@ -746,11 +752,26 @@ fn compact_when_worth_it(index: &Index, writer: &mut IndexWriter, label: &str) {
         .iter()
         .map(|meta| (meta.max_doc(), meta.num_deleted_docs()))
         .collect();
-    if !crate::index::worth_compacting(&segments) {
+    let ids: Vec<_> = if crate::index::worth_compacting(&segments) {
+        log::info!("compacting the {label} index: {} segments", metas.len());
+        metas.iter().map(|meta| meta.id()).collect()
+    } else if metas.len() >= 3 {
+        let largest = metas
+            .iter()
+            .max_by_key(|meta| meta.max_doc())
+            .map(|meta| meta.id());
+        log::info!(
+            "joining the {} small segments of the {label} index",
+            metas.len() - 1
+        );
+        metas
+            .iter()
+            .map(|meta| meta.id())
+            .filter(|id| Some(*id) != largest)
+            .collect()
+    } else {
         return;
-    }
-    log::info!("compacting the {label} index: {} segments", metas.len());
-    let ids: Vec<_> = metas.iter().map(|meta| meta.id()).collect();
+    };
     drop(writer.merge(&ids));
 }
 
@@ -1009,6 +1030,31 @@ mod tests {
         compact_when_worth_it(&index, &mut writer, "test");
         writer.wait_merging_threads().unwrap();
         assert_eq!(index.searchable_segment_ids().unwrap(), before);
+
+        // Below a tenth changed, the small segments beside the largest are joined.
+        let mut writer = crate::index::background_writer(&index).unwrap();
+        for n in 4..24 {
+            let path = std::path::PathBuf::from(format!("/docs/{n}.md"));
+            crate::scan::add_name_only(&writer, &f, &path, None).unwrap();
+        }
+        writer.commit().unwrap();
+        writer.wait_merging_threads().unwrap();
+        let mut writer = crate::index::background_writer(&index).unwrap();
+        compact_when_worth_it(&index, &mut writer, "test");
+        writer.wait_merging_threads().unwrap();
+        let mut writer = crate::index::background_writer(&index).unwrap();
+        for n in 24..26 {
+            let path = std::path::PathBuf::from(format!("/docs/{n}.md"));
+            crate::scan::add_name_only(&writer, &f, &path, None).unwrap();
+            writer.commit().unwrap();
+        }
+        assert_eq!(index.searchable_segment_ids().unwrap().len(), 3);
+        compact_when_worth_it(&index, &mut writer, "test");
+        writer.wait_merging_threads().unwrap();
+        let metas = index.searchable_segment_metas().unwrap();
+        let mut sizes: Vec<u32> = metas.iter().map(|meta| meta.max_doc()).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![2, 24]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
