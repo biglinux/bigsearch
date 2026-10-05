@@ -1,0 +1,14 @@
+​
+​
+​
+​
+​
+Home Network Security Checklist 2026
+Most households now run a dozen connected devices, from phones to smart plugs. This
+guide helps you review each one and close the gaps attackers use first. Not every item
+will apply to every home.
+The list draws on figures compiled from the annual Network Threat Report and the
+advisories published by router vendors during the past year.
+
+1. Change the default router password.
+2. Turn on automatic firmware updates.

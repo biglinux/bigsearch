@@ -226,6 +226,11 @@ pub fn names_a_kind(normalized: &str) -> bool {
     COMBINED.is_match(normalized)
 }
 
+/// Whether a normalized line opens with a kind ("real decreto 105 2025 de…").
+pub fn opens_with_kind(normalized: &str) -> bool {
+    COMBINED.find(normalized).is_some_and(|m| m.start() == 0)
+}
+
 /// The word that opens a file name for `kind`, in the language that named it.
 pub fn word(kind: &str, lang: &str) -> Option<&'static str> {
     let words: &[(&str, &str)] = match lang {

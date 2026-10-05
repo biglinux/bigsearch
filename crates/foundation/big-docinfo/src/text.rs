@@ -90,11 +90,16 @@ pub fn lines(s: &str) -> Vec<&str> {
     out
 }
 
-/// Non-empty lines, trimmed.
+/// Non-empty lines, trimmed. Zero-width characters count as blank: editors pad
+/// with them, and a line of nothing but U+200B is not a title.
 pub fn content_lines(s: &str) -> Vec<&str> {
     lines(s)
         .into_iter()
-        .map(str::trim)
+        .map(|l| {
+            l.trim_matches(|c: char| {
+                c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
+            })
+        })
         .filter(|l| !l.is_empty())
         .collect()
 }

@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::kind::names_a_kind;
+use crate::kind::{names_a_kind, opens_with_kind};
 use crate::text::{content_lines, first_chars, norm, word_count};
 
 static COMPANY_NAME: LazyLock<Regex> = LazyLock::new(|| {
@@ -128,18 +128,30 @@ pub fn title(text: &str) -> Option<String> {
             .then(|| c[1].trim().to_owned());
         }
     }
-    if let Some(line) = lines.iter().find(|line| {
-        line.chars().count() <= 140 && !line.ends_with([':', ',']) && names_a_kind(&norm(line))
-    }) {
-        return Some((*line).to_owned());
-    }
     // A text that is not a known kind of document usually opens with its title:
     // a book chapter, a report, a review.
-    lines
-        .into_iter()
+    let first_title = lines
+        .iter()
         .take(FALLBACK_TITLE_LINES)
-        .find(|line| looks_like_title(line))
-        .map(str::to_owned)
+        .position(|line| looks_like_title(line));
+    if let Some(at) = lines.iter().position(|line| {
+        line.chars().count() <= 140 && !line.ends_with([':', ',']) && names_a_kind(&norm(line))
+    }) {
+        // A kind word inside running prose ("…compiled from our AI Risk Report
+        // and the") does not make that line the title of an earlier heading.
+        let title = match first_title {
+            Some(title)
+                if title < at
+                    && is_wrapped_prose(lines[at])
+                    && !opens_with_kind(&norm(lines[at])) =>
+            {
+                lines[title]
+            }
+            _ => lines[at],
+        };
+        return Some(title.to_owned());
+    }
+    first_title.map(|at| lines[at].to_owned())
 }
 
 /// A short line of words that is not a field, a greeting, a placeholder or an address.
@@ -162,6 +174,11 @@ fn looks_like_title(line: &str) -> bool {
         && !TWO_SENTENCES.is_match(line)
         && !line.contains('@')
         && !line.contains("http")
+}
+
+/// A long line cut mid-sentence: many words and no closing punctuation.
+fn is_wrapped_prose(line: &str) -> bool {
+    word_count(line) >= 10 && line.ends_with(char::is_lowercase)
 }
 
 /// "JOANA D'ARC SILVA" → "Joana D'Arc Silva": capital after every non-letter.
