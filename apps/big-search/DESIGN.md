@@ -126,6 +126,22 @@ and its cold queries from 743-1041 ms to 42-62 ms. SQLite FTS5 was measured
 against this on the same machine and corpus: 7-65x slower with a warm cache on
 common terms, slower to build, larger — tantivy stays.
 
+**Name search (2026-10).** Names are folded once, before the grams
+(`index::name_text`: `extract::fold_lower` — accents precomposed or decomposed,
+Latin through tantivy's `AsciiFoldingFilter`, ё→е, Greek tonos and ς — with
+separators as spaces and a space at each end), and the post-filter reads the
+same text, so recall and verification can no longer disagree. Hits are ranked:
+the whole name (without extension) first, then the query as a word of the name,
+as the start of a word, anywhere; within a kind the shorter name (field norms on
+`name`), and among equal scores the newest (`mtime_day` fast field, a pure
+tie-break — as a stronger factor it moved 42 of 165 known-item queries, as many
+down as up). One or two letters stand for a whole name or a whole word ("go" →
+GO.pdf, then "Contrato GO.pdf", never Google.pdf); longer words use 3-grams only.
+On 165 known-item queries from a real home (`local-agent-mini/tools/
+name_known_item.py`), first-place hits went from 15-19 % to 19-25 % and every
+short-name file is now found (14 of 15 were not). A new name schema rebuilds only
+the name index: the content rows stay unless the content index is empty.
+
 ### 3.2 Initial scan — `scan.rs`
 
 `ignore` crate `WalkBuilder` (parallel, the engine behind `fd`/`rg`): respects
