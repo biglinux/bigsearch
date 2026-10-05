@@ -466,7 +466,7 @@ pub(crate) fn own_cgroup_dir() -> Option<std::path::PathBuf> {
 
 /// Whether the machine has a mains supply and none of them is plugged in.
 /// A desktop with no mains entry at all is never "on battery".
-fn on_battery() -> bool {
+pub(crate) fn on_battery() -> bool {
     let Ok(supplies) = std::fs::read_dir("/sys/class/power_supply") else {
         return false;
     };

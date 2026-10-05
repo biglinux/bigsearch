@@ -413,16 +413,30 @@ pub fn run(
                     runtime
                         .activity
                         .store(ACTIVITY_BACKFILLING, Ordering::Relaxed);
-                    if let Err(e) = run_content_backfill_batch(
+                    match run_content_backfill_batch(
                         &content_index,
                         &mut content_writer,
                         &content_fields,
                         &mut content_backfill,
                     ) {
-                        log::error!("content backfill failed: {e:#}");
-                        // A writer that failed mid-batch is not trusted for the next one.
-                        let _ = close_index_writer(&mut content_writer);
-                        content_backfill.request();
+                        // Nothing left to read: the time to tidy the indexes, unless
+                        // the charge is someone else's.
+                        Ok(true) if !crate::throttle::on_battery() => {
+                            compact_when_worth_it(&index, active_index_writer(&mut writer), "name");
+                            match open_content_writer(&content_index, &mut content_writer) {
+                                Ok(content) => {
+                                    compact_when_worth_it(&content_index, content, "content")
+                                }
+                                Err(e) => log::warn!("content index not compacted: {e:#}"),
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::error!("content backfill failed: {e:#}");
+                            // A writer that failed mid-batch is not trusted for the next one.
+                            let _ = close_index_writer(&mut content_writer);
+                            content_backfill.request();
+                        }
                     }
                     runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
                     continue;
@@ -616,12 +630,14 @@ pub fn run(
     Ok(())
 }
 
+/// One batch of the content backfill; `true` when it finished a pass with
+/// nothing left to read.
 fn run_content_backfill_batch(
     content_index: &Index,
     writer: &mut Option<IndexWriter>,
     f: &ContentFields,
     content_backfill: &mut ContentBackfill,
-) -> Result<()> {
+) -> Result<bool> {
     let started = Instant::now();
     crate::throttle::begin_cpu_window();
     // Only when something was actually deleted. Proving "no orphans" still costs
@@ -690,7 +706,7 @@ fn run_content_backfill_batch(
     }
     if let Some((_, pause)) = pace {
         content_backfill.next_batch_at = Some(Instant::now() + pause);
-        return Ok(());
+        return Ok(false);
     }
     close_index_writer(writer).context("close content writer")?;
     crate::throttle::release_idle_memory();
@@ -704,15 +720,38 @@ fn run_content_backfill_batch(
             retry_in.as_secs()
         );
         content_backfill.finish_pass_deferred(retry_in);
-        return Ok(());
+        return Ok(false);
     }
     if content_backfill.finish_pass() {
         content_backfill.deferred_gauge.store(0, Ordering::Relaxed);
         log::info!("content backfill: complete");
         crate::index::mark_content_state_synced(&crate::config::content_index_dir())
             .context("mark content index synced")?;
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
+}
+
+/// Merge every segment of `index` into one when enough has changed (see
+/// [`crate::index::worth_compacting`]). The writer's merge thread does the work,
+/// at the indexer's idle priority, and publishes the result itself; nothing
+/// waits for it here, and whoever closes the writer next waits for it to end.
+/// A merge already running on one of the segments makes tantivy refuse this
+/// one, which the next finished pass asks again.
+fn compact_when_worth_it(index: &Index, writer: &mut IndexWriter, label: &str) {
+    let Ok(metas) = index.searchable_segment_metas() else {
+        return;
+    };
+    let segments: Vec<(u32, u32)> = metas
+        .iter()
+        .map(|meta| (meta.max_doc(), meta.num_deleted_docs()))
+        .collect();
+    if !crate::index::worth_compacting(&segments) {
+        return;
+    }
+    log::info!("compacting the {label} index: {} segments", metas.len());
+    let ids: Vec<_> = metas.iter().map(|meta| meta.id()).collect();
+    drop(writer.merge(&ids));
 }
 
 fn active_index_writer(writer: &mut Option<IndexWriter>) -> &mut IndexWriter {
@@ -939,4 +978,37 @@ fn send_history_page(
         let _ = history.send(crate::history::HistoryEvent::Catalogued(documents));
     }
     done
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The merge is left running on the writer's merge thread; it must still
+    /// land, and an index with nothing to tidy must be left alone.
+    #[test]
+    fn compaction_merges_a_changed_index_into_one_segment() {
+        let dir = std::env::temp_dir().join(format!("bs-compact-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let index = crate::index::open_or_create(&dir).unwrap();
+        let f = fields(&index).unwrap();
+        let mut writer = crate::index::background_writer(&index).unwrap();
+        for n in 0..4 {
+            let path = std::path::PathBuf::from(format!("/docs/{n}.md"));
+            crate::scan::add_name_only(&writer, &f, &path, None).unwrap();
+            writer.commit().unwrap();
+        }
+        assert_eq!(index.searchable_segment_ids().unwrap().len(), 4);
+
+        compact_when_worth_it(&index, &mut writer, "test");
+        writer.wait_merging_threads().unwrap();
+        assert_eq!(index.searchable_segment_ids().unwrap().len(), 1);
+
+        let mut writer = crate::index::background_writer(&index).unwrap();
+        let before = index.searchable_segment_ids().unwrap();
+        compact_when_worth_it(&index, &mut writer, "test");
+        writer.wait_merging_threads().unwrap();
+        assert_eq!(index.searchable_segment_ids().unwrap(), before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

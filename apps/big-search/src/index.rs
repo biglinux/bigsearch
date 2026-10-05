@@ -406,6 +406,28 @@ fn low_impact_writer(index: &Index, memory_budget: usize) -> Result<IndexWriter<
         .context("open low-impact index writer")
 }
 
+/// Whether merging every segment into one is worth what it costs, given each
+/// segment's `(documents, deleted)`: when the documents outside the largest
+/// segment plus everything deleted make up a tenth of the index or more.
+///
+/// One segment answers a cold query with a fraction of the disk reads: on a
+/// 5400 rpm notebook disk, the first query on its own 11-segment index took
+/// 743-1041 ms, 42-62 ms after merging, and the index shrank from 61 to 32 MB.
+/// Deleted documents only leave a segment when it is merged, and tantivy's
+/// merge policy never merges a large segment for its deletes: the daemon's
+/// largest segments carried a third of dead documents. Each merge rewrites
+/// the whole index (117 MB in 8 s for a 149 MB index), so it waits until a
+/// tenth has changed: in a simulated stretch of edits the merges added 10 %
+/// to what the edits themselves wrote.
+pub fn worth_compacting(segments: &[(u32, u32)]) -> bool {
+    let total: u64 = segments.iter().map(|&(docs, _)| u64::from(docs)).sum();
+    let Some(&(largest, largest_deleted)) = segments.iter().max_by_key(|&&(docs, _)| docs) else {
+        return false;
+    };
+    let changed = total - u64::from(largest) + u64::from(largest_deleted);
+    changed > 0 && changed * 10 >= total
+}
+
 pub fn document_count(reader: &tantivy::IndexReader) -> Result<u64> {
     Ok(reader.searcher().num_docs())
 }
@@ -487,6 +509,23 @@ pub fn is_divergent_document_count(indexed_documents: u64, cached_paths: u64) ->
 mod tests {
     use super::*;
     use tantivy::schema::FieldType;
+
+    #[test]
+    fn compacts_once_a_tenth_of_the_index_changed() {
+        assert!(!worth_compacting(&[]));
+        assert!(!worth_compacting(&[(1000, 0)]));
+        assert!(!worth_compacting(&[(1000, 50), (40, 0)]));
+        assert!(worth_compacting(&[(1000, 100)]));
+        assert!(worth_compacting(&[(1000, 0), (70, 0), (50, 0)]));
+        // The daemon's own name index before the change: 1 of 3 documents dead.
+        assert!(worth_compacting(&[
+            (102_746, 34_296),
+            (18_215, 851),
+            (16_389, 9),
+            (7_403, 1),
+            (1, 0)
+        ]));
+    }
 
     #[test]
     fn inflated_document_count_allows_small_drift_only() {
