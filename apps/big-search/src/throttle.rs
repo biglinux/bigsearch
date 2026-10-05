@@ -243,55 +243,103 @@ pub enum Load {
 /// What the machine looked like over the last backfill cycle.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Signals {
-    /// Stall of this service's own tasks (cgroup PSI, `some avg10`).
-    own_cpu: f64,
+    /// I/O stall of this service's own tasks (cgroup PSI, `some avg10`).
     own_io: f64,
     /// I/O stall of everything else: system `some` minus this service's own.
     others_io: f64,
     memory: Option<Pressure>,
-    /// CPU the rest of the machine used, in cores, since the previous batch.
+    /// CPU the rest of the machine used, in logical CPUs, since the previous batch.
     others_cores: f64,
-    cpus: f64,
+    /// Physical cores this process may run on, and whether some carry two
+    /// hardware threads (SMT) — see [`topology`].
+    cores: f64,
+    smt: bool,
+    /// Extraction workers that will run at once.
+    workers: f64,
     on_battery: bool,
 }
 
 /// Classify how much this service would be in the way.
 ///
-/// Stall alone misses the common case: on a two-core machine with SMT, one
-/// busy program leaves logical CPUs free, so nobody queues and CPU pressure
-/// stays at zero — while our workers on the sibling thread of the same core
-/// slow that program by double digits. So the CPU the *others* are using counts
-/// as much as the stall we feel. Memory is system-wide, because page cache this
-/// service fills stalls everyone else. Running on battery counts as busy: the
-/// charge is theirs.
+/// CPU time is not the question any more: the indexer only runs on CPU time
+/// nobody else wants (`SCHED_IDLE`, its `cpu.idle` cgroup), and a program that
+/// wakes takes its CPU back at once — so its own CPU stall only says others are
+/// busy, and on a CPU without SMT that harms nobody. What still harms is a
+/// shared core: on an SMT CPU a worker on the sibling thread of a busy program's
+/// core slows it however low its priority. Measured on simulated machines (a
+/// CPU loop in the program's place, workers running flat out): sharing every
+/// worker's core cost the program 42-49 %, one of two 23-28 %, none -1-8 %
+/// (noise); without SMT ~0 % in every case. The scheduler gives each busy
+/// program a core of its own while it can, so the free cores are the cores
+/// minus the CPUs the others keep busy; with fewer free cores than workers,
+/// some worker shares one.
+///
+/// Memory is system-wide, because page cache this service fills stalls
+/// everyone else, and so is the disk: most disk schedulers ignore I/O priority.
+/// Running on battery counts as busy: the charge is theirs.
 fn classify_load(signals: Signals) -> Load {
     let Signals {
-        own_cpu,
         own_io,
         others_io,
         memory,
         others_cores,
-        cpus,
+        cores,
+        smt,
+        workers,
         on_battery,
     } = signals;
+    let free_cores = cores - others_cores;
     if memory.is_some_and(|p| p.full >= 2.0 || p.some >= 20.0)
-        || own_cpu >= 50.0
         || own_io >= 50.0
-        || others_cores >= (cpus / 2.0).max(1.0)
+        || (smt && free_cores <= 0.0)
     {
         Load::Heavy
-    } else if on_battery
-        || own_cpu >= 20.0
-        || own_io >= 20.0
-        || others_io >= 10.0
-        || others_cores >= 0.5
-    {
+    } else if on_battery || own_io >= 20.0 || others_io >= 10.0 || (smt && free_cores < workers) {
         Load::Busy
-    } else if own_cpu >= 5.0 || own_io >= 5.0 || others_io >= 3.0 || others_cores >= 0.2 {
+    } else if own_io >= 5.0 || others_io >= 3.0 {
         Load::Moderate
     } else {
         Load::Calm
     }
+}
+
+/// Physical cores and whether any carries two hardware threads, over the CPUs
+/// this process may run on; read once. Hardware threads of one core list each
+/// other in `thread_siblings_list`. A CPU whose topology cannot be read counts
+/// as a core of its own.
+fn topology() -> (f64, bool) {
+    static TOPOLOGY: std::sync::OnceLock<(f64, bool)> = std::sync::OnceLock::new();
+    *TOPOLOGY.get_or_init(|| {
+        // SAFETY: a zeroed cpu_set_t is a valid empty set; sched_getaffinity
+        // writes at most size_of::<cpu_set_t>() bytes into it.
+        let mut allowed: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        let read = unsafe {
+            libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut allowed)
+        } == 0;
+        let mut cores = std::collections::HashSet::new();
+        let mut logical = 0usize;
+        for cpu in 0..libc::CPU_SETSIZE as usize {
+            // SAFETY: cpu < CPU_SETSIZE, the bit count of a cpu_set_t.
+            if !(read && unsafe { libc::CPU_ISSET(cpu, &allowed) }) {
+                continue;
+            }
+            logical += 1;
+            let siblings = std::fs::read_to_string(format!(
+                "/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
+            ))
+            .map_or_else(|_| cpu.to_string(), |list| list.trim().to_owned());
+            cores.insert(siblings);
+        }
+        if logical == 0 {
+            let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+            return (cpus as f64, false);
+        }
+        log::info!(
+            "pacing for {} cores, {logical} hardware threads",
+            cores.len()
+        );
+        (cores.len() as f64, logical > cores.len())
+    })
 }
 
 /// Rest after a batch that took `work`: a duty cycle of 80 % on a calm
@@ -317,13 +365,15 @@ pub fn backfill_pace(work: Duration) -> (Load, Duration) {
     };
     let own_io = own("io.pressure");
     let system_io = read_pressure("/proc/pressure/io").map_or(0.0, |p| p.some);
+    let (cores, smt) = topology();
     let load = classify_load(Signals {
-        own_cpu: own("cpu.pressure"),
         own_io,
         others_io: (system_io - own_io).max(0.0),
         memory: read_pressure("/proc/pressure/memory"),
         others_cores: others_cores(cgroup.as_deref()),
-        cpus: std::thread::available_parallelism().map_or(1, std::num::NonZero::get) as f64,
+        cores,
+        smt,
+        workers: crate::content::default_workers() as f64,
         on_battery: on_battery(),
     });
     (load, pause_after(work, load))
@@ -474,10 +524,17 @@ mod tests {
             some: 30.0,
             full: 5.0,
         };
+        // Four SMT cores, two workers: nothing else running.
         let idle = Signals {
             memory: Some(calm),
-            cpus: 4.0,
+            cores: 4.0,
+            smt: true,
+            workers: 2.0,
             ..Signals::default()
+        };
+        let with = |others_cores: f64, signals: Signals| Signals {
+            others_cores,
+            ..signals
         };
         assert_eq!(classify_load(idle), Load::Calm);
         assert_eq!(classify_load(Signals::default()), Load::Calm);
@@ -490,30 +547,7 @@ mod tests {
         );
         assert_eq!(
             classify_load(Signals {
-                own_cpu: contended.some,
-                ..idle
-            }),
-            Load::Busy
-        );
-        assert_eq!(
-            classify_load(Signals {
                 memory: Some(contended),
-                ..idle
-            }),
-            Load::Heavy
-        );
-        // One program busy on a four-thread machine: no stall anywhere, but we
-        // would be sharing its core.
-        assert_eq!(
-            classify_load(Signals {
-                others_cores: 1.0,
-                ..idle
-            }),
-            Load::Busy
-        );
-        assert_eq!(
-            classify_load(Signals {
-                others_cores: 2.0,
                 ..idle
             }),
             Load::Heavy
@@ -525,6 +559,23 @@ mod tests {
             }),
             Load::Busy
         );
+        // One busy program leaves three free cores for two workers.
+        assert_eq!(classify_load(with(1.0, idle)), Load::Calm);
+        // Two and a half leave one and a half: a worker would share a core.
+        assert_eq!(classify_load(with(2.5, idle)), Load::Busy);
+        // Every core busy: each worker would share one.
+        assert_eq!(classify_load(with(4.0, idle)), Load::Heavy);
+        // Without SMT a busy machine is no reason to wait: the idle class
+        // already hands every CPU back the moment someone wants it.
+        let no_smt = Signals { smt: false, ..idle };
+        assert_eq!(classify_load(with(4.0, no_smt)), Load::Calm);
+        // One SMT core and one worker: background noise already shares it.
+        let one_core = Signals {
+            cores: 1.0,
+            workers: 1.0,
+            ..idle
+        };
+        assert_eq!(classify_load(with(0.3, one_core)), Load::Busy);
 
         let work = Duration::from_secs(2);
         assert_eq!(pause_after(work, Load::Calm), Duration::from_millis(500));
