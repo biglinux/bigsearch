@@ -189,7 +189,13 @@ lists and columnar zstd went unused, and the release binary went from 9.1 to
 8.1 MB. The docstore compressor thread stays: it lives only while a segment is
 written, and it is spawned by the indexing thread, whose idle policy and cgroup
 it inherits. The state migrations for earlier installs are gone; the program is
-not installed anywhere yet.
+not installed anywhere yet. BigLinux mounts btrfs with `compress-force=zstd`, and every
+measurement above ran on it: it stores the content index in 81 of its 120 MB
+(term dictionary 75 → 56 MB, postings 43 → 23 MB). On the 5400 rpm disk the same
+index uncompressed (a NOCOW directory — `compression=none` does not override
+`compress-force`) answered cold queries 1-36 % slower: reading fewer bytes beats
+decompressing whole 128 KB extents. tantivy's own lz4 only covers the doc store,
+1.6 MB of stored paths, so it stays as is.
 
 ### 3.2 Initial scan — `scan.rs`
 
