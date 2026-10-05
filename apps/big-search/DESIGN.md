@@ -168,6 +168,18 @@ here, part of it under heavy load). The 42-query test in 12 languages went from
 23 to 39 hits; left are simplified/traditional Chinese (needs a dictionary) and
 German "oe" for "ö".
 
+**Unicode composition (2026-10).** Every text is put in NFKC before anything
+else reads it (`extract::compose`, used by `fold_lower` and by the content
+tokenizer, so names, pages, content and queries agree): Korean syllables written
+as jamo and kana with a separate voicing mark (macOS names, some PDFs),
+halfwidth katakana, Arabic presentation forms, compatibility ideographs and
+fullwidth Latin become what people type. It has to come before the tokenizer: a
+jamo sequence is not a Hangul syllable, so it was indexed as one long word
+instead of bigrams. Text already in NFKC, nearly all of it, is not copied. On
+the translation-catalog test (`local-agent-mini/tools/lang_eval.py`, 13
+languages) Korean NFD documents went from 0 % to 100 % found, Japanese NFD from
+79 % and halfwidth from 37 % to 100 %, with no other result changed.
+
 The backfill's duty cycle follows the CPU time the service used in a batch, not
 the batch's wall time: at idle priority on a busy machine a 250-file batch took
 29 s of mostly waiting, and resting four times that put the re-index on course

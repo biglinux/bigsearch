@@ -122,7 +122,10 @@ fn tokenize(text: &str) -> Vec<Token> {
 /// pushing every character one by one made this the hottest function of a
 /// content pass.
 pub struct CjkTokenStream<'a> {
-    text: &'a str,
+    /// The text composed as [`crate::extract::compose`] says: a decomposed
+    /// Hangul syllable or halfwidth kana must be one character before it can
+    /// be part of a bigram. Offsets point into this text.
+    text: std::borrow::Cow<'a, str>,
     /// Byte offset of the next character to read; always a character boundary.
     cursor: usize,
     /// The last character of the space-less run being read, and whether that run
@@ -248,7 +251,7 @@ impl Tokenizer for CjkFriendlyTokenizer {
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
         CjkTokenStream {
-            text,
+            text: crate::extract::compose(text),
             cursor: 0,
             run: None,
             position: 0,
@@ -313,7 +316,7 @@ mod tests {
             "relato\u{301}rio \u{301}solto ca\u{327}a\u{303}o",
         ];
         for text in corpus {
-            let expected = tokenize(text);
+            let expected = tokenize(&crate::extract::compose(text));
             let got = streamed(text);
             assert_eq!(got.len(), expected.len(), "count for {text:?}");
             for (got, expected) in got.iter().zip(expected.iter()) {
@@ -371,6 +374,16 @@ mod tests {
     fn mixed_script_separates_cjk_from_words() {
         // "报告report" → CJK bigram then the Latin word.
         assert_eq!(texts("报告report"), ["报告", "report"]);
+    }
+
+    #[test]
+    fn decomposed_and_halfwidth_text_tokenizes_like_what_people_type() {
+        assert_eq!(
+            texts("\u{1112}\u{1161}\u{11AB}\u{1100}\u{116E}\u{11A8}어"),
+            texts("한국어")
+        );
+        assert_eq!(texts("ﾃﾞｰﾀﾍﾞｰｽ"), texts("データベース"));
+        assert_eq!(texts("テ\u{3099}ータ"), texts("データ"));
     }
 
     #[test]

@@ -31,4 +31,5 @@ symphonia = { version = "0.6", default-features = false, features = ["mp3", "iso
 # Only the mmap directory and the store's lz4: the default stemmer, stopword
 # lists and columnar zstd (a C library) go unused.
 tantivy = { version = "0.26.2", default-features = false, features = ["mmap", "lz4-compression"] }
+unicode-normalization = { version = "0.1.25" }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

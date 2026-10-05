@@ -620,6 +620,7 @@ fn office_text_with<R: std::io::Read + std::io::Seek>(
 /// - accents and other marks go, whether the text carries them precomposed
 ///   ("relatório") or decomposed, as names unpacked from macOS archives do
 ///   ("relato\u{301}rio"); so does the dot that "İ" lowercases with;
+/// - the text is first composed as [`compose`] says;
 /// - Latin letters fold through tantivy's `AsciiFoldingFilter`, the table the
 ///   content analyzer uses: "ß" is "ss", "Ł" is "l", "Æ" is "ae";
 /// - the other scripts fold as [`fold_script_into`] says.
@@ -639,7 +640,7 @@ pub fn fold_lower_into(s: &str, out: &mut String) {
         out.extend(s.chars().map(|c| c.to_ascii_lowercase()));
         return;
     }
-    let lowered: String = s.chars().flat_map(char::to_lowercase).collect();
+    let lowered: String = compose(s).chars().flat_map(char::to_lowercase).collect();
     let mut folded = String::with_capacity(lowered.len());
     fold_script_into(&lowered, &mut folded);
     ASCII_FOLDING.with(|analyzer| {
@@ -649,6 +650,21 @@ pub fn fold_lower_into(s: &str, out: &mut String) {
             out.push_str(&stream.token().text);
         }
     });
+}
+
+/// `text` in NFKC, the form every comparison and every tokenizer starts from:
+/// Korean syllables decomposed into jamo and kana with a separate voicing mark
+/// (as macOS writes names), halfwidth katakana, Arabic presentation forms,
+/// compatibility ideographs, fullwidth Latin and ligatures ("ﬁ") become the
+/// characters people type. Text already in that form, nearly all of it, is not
+/// copied.
+pub(crate) fn compose(text: &str) -> std::borrow::Cow<'_, str> {
+    use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfkc_quick};
+    if text.is_ascii() || is_nfkc_quick(text.chars()) == IsNormalized::Yes {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(text.nfkc().collect())
+    }
 }
 
 /// The folding of lowercase text that `AsciiFoldingFilter` leaves to others:
@@ -1036,6 +1052,10 @@ mod tests {
             ("Αναφορά ΟΔΟΣ οδός", "αναφορα οδοσ οδοσ"),
             ("أحمد مُحَمَّد مستشفى", "احمد محمد مستشفي"),
             ("中文内容 ABC", "中文内容 abc"),
+            ("\u{1112}\u{1161}\u{11AB}\u{1100}\u{116E}\u{11A8}", "한국"),
+            ("テ\u{3099}ータ ﾃﾞｰﾀ", "データ データ"),
+            ("ＡＢＣ１２ ﬁle", "abc12 file"),
+            ("ﻣﺮﺣﺒﺎ \u{F900}", "مرحبا \u{8C48}"),
             ("🙂 EMOJI", "🙂 emoji"),
             ("", ""),
         ] {
