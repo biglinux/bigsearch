@@ -156,14 +156,22 @@ and in Russian did not even join "квартал" to "квартале"; the rul
 such pair, in both directions. Totals went from 363 to the ceiling for
 "relatorios", 898 to 1509 for "acoes", 367 to 764 for "responsaveis", with no
 change in latency. Russian inflection beyond the last-word prefix ("кварталы" →
-"квартале") is not covered. Spellings the analyzer keeps apart are asked for at query time
-(`query::script_variants`: Russian е/ё, Greek accent and final ς, Arabic hamza
-alef and article; one CJK character as the prefix of the bigrams it opens, in
-content and names) instead of a content re-index: re-extracting every document
-on every machine to fold them would have fixed only decomposed accents, 387 of
-5.5 million indexed words, all the dot of a Turkish İ. The 42-query test in 12
-languages went from 23 to 38 hits; left are simplified/traditional Chinese
-(needs a dictionary), German "oe" for "ö" and the Turkish İ in content. On the i3's 5400 rpm disk
+"квартале") is not covered. Content words are folded at index time like names
+(`index::ScriptFold` over `extract::fold_script_into`, then ASCII folding:
+combining marks, ё, Greek accents and ς, Arabic hamza alef, alef maqsura, vowel
+signs, tatweel and article), and the tokenizer keeps combining marks inside a
+word so a decomposed accent no longer splits it. One CJK character finds the
+bigrams it opens, in content and names. A query-time variant scheme was built
+first to spare installed machines a re-index; the program is not installed
+anywhere yet, so the one-time re-index won (88 055 documents in about 13 minutes
+here, part of it under heavy load). The 42-query test in 12 languages went from
+23 to 39 hits; left are simplified/traditional Chinese (needs a dictionary) and
+German "oe" for "ö".
+
+The backfill's duty cycle follows the CPU time the service used in a batch, not
+the batch's wall time: at idle priority on a busy machine a 250-file batch took
+29 s of mostly waiting, and resting four times that put the re-index on course
+for more than ten hours. On the i3's 5400 rpm disk
 the expansion cost nothing measurable cold ("zz relatorio" 1013 ms against
 "relatorio zz" 1019 ms, both dominated by opening the indexes), and a tighter
 budget (16/10 000) changed no timing while dropping Portuguese words from short
