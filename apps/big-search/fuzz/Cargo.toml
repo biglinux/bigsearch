@@ -8,6 +8,9 @@ rust-version = "1.95"
 [package.metadata]
 cargo-fuzz = true
 
+# Its own workspace: nightly-only, and kept out of the main one's lock file.
+[workspace]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 
