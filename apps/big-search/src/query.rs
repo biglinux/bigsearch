@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, ConstScoreQuery, Occur, Query, TermQuery};
+use tantivy::query::{
+    AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, Occur, Query, TermQuery,
+};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::tokenizer::TokenStream;
 use tantivy::{IndexReader, TantivyDocument, Term};
@@ -38,28 +40,53 @@ pub fn run_query(
     include_origin: bool,
     origin_reader: Option<&crate::origin::OriginReader>,
 ) -> Result<QueryOutcome> {
+    // Only what the page needs is read when the index can answer every filter
+    // itself: the date and size filters need a `stat` of each candidate, and the
+    // content index knows no folder, extension or type. Otherwise every
+    // candidate up to the ceiling is read, as before. Reading 5 000 stored
+    // documents for a page of 50 was most of a query's cost, and on a cold
+    // disk thousands of scattered reads.
+    let stat_filters = filter.mtime.is_some() || filter.size.is_some();
+    let path_filters = filter.under.is_some() || !filter.ext.is_empty() || !filter.mime.is_empty();
+    let reads_content = matches!(mode, "content" | "both");
+    let paged = mode != "list" && !stat_filters && !(reads_content && path_filters);
+    let fetch = if paged {
+        // Room for names the post-filter turns away and files gone since.
+        page.offset
+            .saturating_add(page.limit.saturating_mul(2))
+            .min(CANDIDATE_CEILING)
+    } else {
+        CANDIDATE_CEILING
+    };
+    let content_reader = || {
+        indexes
+            .content
+            .context("content index required for content search")
+    };
     let base = match mode {
-        "content" => search_content(
-            indexes
-                .content
-                .context("content index required for content search")?,
-            q,
-            CANDIDATE_CEILING,
-        )?,
-        "both" => search_both(
-            indexes.name,
-            indexes
-                .content
-                .context("content index required for combined search")?,
-            q,
-            CANDIDATE_CEILING,
-        )?,
+        "content" => search_content(content_reader()?, q, fetch)?,
+        "both" => search_both(indexes.name, content_reader()?, q, fetch)?,
         // Everything the index holds, for a caller that is narrowing by
         // filter rather than by words: "every PDF under my home folder" has
         // no text to search for, and the name search refuses a query shorter
         // than two letters because the ngram index cannot narrow one.
         "list" => list_matching(indexes.name, filter, CANDIDATE_CEILING)?,
-        _ => search(indexes.name, q, filter, CANDIDATE_CEILING)?,
+        _ => search(indexes.name, q, filter, fetch)?,
+    };
+    // The count of a paged query comes from the postings, up to the ceiling,
+    // without reading documents; "both" adds the two counts, so a file that
+    // matches by name and by content counts twice and the total can run
+    // over, never under, what paging will reach.
+    let counted = if paged {
+        Some(match mode {
+            "content" => count_content(content_reader()?, q, CANDIDATE_CEILING)?,
+            "both" => (count_names(indexes.name, q, &Filter::default(), CANDIDATE_CEILING)?
+                + count_content(content_reader()?, q, CANDIDATE_CEILING)?)
+            .min(CANDIDATE_CEILING),
+            _ => count_names(indexes.name, q, filter, CANDIDATE_CEILING)?,
+        })
+    } else {
+        None
     };
 
     // Cheap, path-only filters first — shrink the set before any `stat`.
@@ -112,7 +139,7 @@ pub fn run_query(
         });
     }
 
-    let total = kept.len();
+    let total = counted.map_or(kept.len(), |counted| counted.max(kept.len()));
     let next_offset = (page.offset + page.limit < total).then_some(page.offset + page.limit);
 
     // Page, then enrich only the visible window with metadata.
@@ -212,66 +239,9 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
         return Ok(Vec::new());
     }
 
-    // Each word is matched on its own, so a name holds all of them in any order
-    // (`raio bruno` finds `Raio-X Bruno ….pdf`). The grams are cut from the same
-    // text the field indexes (`index::name_text`), spaces at word edges included.
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-    let term = |gram: &str| -> Box<dyn Query> {
-        Box::new(TermQuery::new(
-            Term::from_field_text(f.name, gram),
-            IndexRecordOption::Basic,
-        ))
-    };
-    for word in &words {
-        let chars: Vec<char> = word.chars().collect();
-        if is_whole_word_query(word) {
-            // One or two letters stand for a name or a word that is exactly them:
-            // "go" is "GO.pdf" or "Contrato GO.pdf", not "Google.pdf".
-            let grams = if chars.len() == 1 {
-                vec![format!(" {word} ")]
-            } else {
-                vec![format!(" {word}"), format!("{word} ")]
-            };
-            for gram in grams {
-                clauses.push((Occur::Must, term(&gram)));
-            }
-            continue;
-        }
-        // Three-letter grams only: they imply the two-letter ones, whose
-        // posting lists are the longest reads on a cold disk.
-        let mut grams: Vec<String> = if chars.len() < 3 {
-            vec![word.clone()]
-        } else {
-            chars.windows(3).map(|w| w.iter().collect()).collect()
-        };
-        grams.sort_unstable();
-        grams.dedup();
-        for gram in &grams {
-            clauses.push((Occur::Must, term(gram)));
-        }
-        // A word that starts or ends where the query does ranks above one that
-        // only contains it, so the best names are among the candidates even when
-        // thousands match.
-        if chars.len() >= 2 {
-            let start: String = chars[..2].iter().collect();
-            let end: String = chars[chars.len() - 2..].iter().collect();
-            for edge in [format!(" {start}"), format!("{end} ")] {
-                clauses.push((
-                    Occur::Should,
-                    Box::new(ConstScoreQuery::new(term(&edge), WORD_EDGE_SCORE)),
-                ));
-            }
-        }
-    }
-    // A single CJK character: the index holds no one-character grams.
-    if !clauses.iter().any(|(occur, _)| *occur == Occur::Must) {
+    let Some(query) = name_query(&f, &words, filter) else {
         return Ok(Vec::new());
-    }
-    // The folder and the extensions narrow the index's own answer: filtered
-    // only afterwards, the candidate ceiling was spent on whatever matched
-    // the words, and `pr` found no video among 5 000 other files.
-    clauses.extend(filter_clauses(&f, filter));
-    let query = BooleanQuery::new(clauses);
+    };
 
     // Over-fetch for the post-filter, but cap the candidate pool so a huge
     // `limit` (e.g. -a) doesn't allocate an enormous TopDocs heap.
@@ -340,6 +310,110 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
     ranked.sort_by_key(|(quality, _)| std::cmp::Reverse(*quality));
     Ok(ranked.into_iter().map(|(_, hit)| hit).collect())
 }
+
+/// The query for names holding every word in `words`, narrowed by the index
+/// clauses of `filter`; `None` when no word gives the index anything to look
+/// up (a single CJK character).
+///
+/// Each word is matched on its own, so a name holds all of them in any order
+/// (`raio bruno` finds `Raio-X Bruno ….pdf`). The grams are cut from the same
+/// text the field indexes (`index::name_text`), spaces at word edges included.
+/// Should clauses rank, they never widen: an exact name, then words that
+/// start or end where the query does, are lifted above the rest, so they are
+/// among the candidates even when only a page of them is read.
+fn name_query(f: &crate::index::Fields, words: &[String], filter: &Filter) -> Option<BooleanQuery> {
+    let term = |field, text: &str| -> Box<dyn Query> {
+        Box::new(TermQuery::new(
+            Term::from_field_text(field, text),
+            IndexRecordOption::Basic,
+        ))
+    };
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    for word in words {
+        let chars: Vec<char> = word.chars().collect();
+        if is_whole_word_query(word) {
+            // One or two letters stand for a name or a word that is exactly them:
+            // "go" is "GO.pdf" or "Contrato GO.pdf", not "Google.pdf".
+            let grams = if chars.len() == 1 {
+                vec![format!(" {word} ")]
+            } else {
+                vec![format!(" {word}"), format!("{word} ")]
+            };
+            for gram in grams {
+                clauses.push((Occur::Must, term(f.name, &gram)));
+            }
+            continue;
+        }
+        // Three-letter grams only: they imply the two-letter ones, whose
+        // posting lists are the longest reads on a cold disk.
+        let mut grams: Vec<String> = if chars.len() < 3 {
+            vec![word.clone()]
+        } else {
+            chars.windows(3).map(|w| w.iter().collect()).collect()
+        };
+        grams.sort_unstable();
+        grams.dedup();
+        for gram in &grams {
+            clauses.push((Occur::Must, term(f.name, gram)));
+        }
+        if chars.len() >= 2 {
+            let start: String = chars[..2].iter().collect();
+            let end: String = chars[chars.len() - 2..].iter().collect();
+            for edge in [format!(" {start}"), format!("{end} ")] {
+                clauses.push((
+                    Occur::Should,
+                    Box::new(ConstScoreQuery::new(term(f.name, &edge), WORD_EDGE_SCORE)),
+                ));
+            }
+        }
+    }
+    if !clauses.iter().any(|(occur, _)| *occur == Occur::Must) {
+        return None;
+    }
+    clauses.push((
+        Occur::Should,
+        Box::new(ConstScoreQuery::new(
+            term(f.stem, &words.join(" ")),
+            WHOLE_NAME_SCORE,
+        )),
+    ));
+    // The folder and the extensions narrow the index's own answer: filtered
+    // only afterwards, the candidate ceiling was spent on whatever matched
+    // the words, and `pr` found no video among 5 000 other files.
+    clauses.extend(filter_clauses(f, filter));
+    Some(BooleanQuery::new(clauses))
+}
+
+/// Matches of `query` in the index, counted up to `cap`: the posting lists
+/// are walked, nothing is scored and no document is read.
+fn count_capped(searcher: &tantivy::Searcher, query: &dyn Query, cap: usize) -> Result<usize> {
+    let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(
+        searcher,
+    ))?;
+    let mut total = 0usize;
+    for segment in searcher.segment_readers() {
+        total += weight.count(segment)? as usize;
+        if total >= cap {
+            return Ok(cap);
+        }
+    }
+    Ok(total)
+}
+
+/// How many names answer `q` under `filter`, up to `cap`, from the index
+/// alone: the grams say a name holds the letters, so this can count a rare
+/// name the post-filter turns away.
+fn count_names(reader: &IndexReader, q: &str, filter: &Filter, cap: usize) -> Result<usize> {
+    let searcher = reader.searcher();
+    let f = fields(searcher.index())?;
+    match name_query(&f, &crate::index::name_words(q), filter) {
+        Some(query) => count_capped(&searcher, &query, cap),
+        None => Ok(0),
+    }
+}
+
+/// Score that lifts a name that is exactly the query (see [`name_query`]).
+const WHOLE_NAME_SCORE: f32 = 100_000.0;
 
 /// Score added for each query word whose start or end is a word edge in the
 /// name — far above what the grams' own BM25 adds, so it orders kinds of match
@@ -534,31 +608,9 @@ pub fn search_content(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec
         return Ok(Vec::new());
     }
     let f = content_fields(index)?;
-    // Reader policy follows the index it opened, not the current writer's
-    // memory profile/config. Resolve once, rather than rereading configuration
-    // for every term; requesting frequencies from Basic cannot invent them.
-    let schema = index.schema();
-    let indexing = match schema.get_field_entry(f.body).field_type() {
-        tantivy::schema::FieldType::Str(options) => options.get_indexing_options(),
-        _ => None,
-    }
-    .context("body must be an indexed text field")?;
-    let record = if indexing.index_option().has_freq() {
-        IndexRecordOption::WithFreqs
-    } else {
-        IndexRecordOption::Basic
-    };
-    let mut analyzer = index.tokenizers().get(BODY).context("body tokenizer")?;
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-    let mut stream = analyzer.token_stream(q);
-    while stream.advance() {
-        let term = Term::from_field_text(f.body, stream.token().text.as_str());
-        clauses.push((Occur::Must, Box::new(TermQuery::new(term, record))));
-    }
-    if clauses.is_empty() {
+    let Some(query) = content_query(&searcher, q)? else {
         return Ok(Vec::new());
-    }
-    let query = BooleanQuery::new(clauses);
+    };
 
     let top = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
 
@@ -591,6 +643,142 @@ pub fn search_content(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec
     Ok(hits)
 }
 
+/// The query for documents holding every word of `q`, the last one as typed
+/// so far (see [`last_word_query`]); `None` for a query with no word.
+fn content_query(searcher: &tantivy::Searcher, q: &str) -> Result<Option<BooleanQuery>> {
+    let index = searcher.index();
+    let f = content_fields(index)?;
+    // Reader policy follows the index it opened, not the current writer's
+    // memory profile/config. Resolve once, rather than rereading configuration
+    // for every term; requesting frequencies from Basic cannot invent them.
+    let schema = index.schema();
+    let indexing = match schema.get_field_entry(f.body).field_type() {
+        tantivy::schema::FieldType::Str(options) => options.get_indexing_options(),
+        _ => None,
+    }
+    .context("body must be an indexed text field")?;
+    let record = if indexing.index_option().has_freq() {
+        IndexRecordOption::WithFreqs
+    } else {
+        IndexRecordOption::Basic
+    };
+    let mut analyzer = index.tokenizers().get(BODY).context("body tokenizer")?;
+    let mut words: Vec<String> = Vec::new();
+    let mut stream = analyzer.token_stream(q);
+    while stream.advance() {
+        words.push(stream.token().text.clone());
+    }
+    let Some(last) = words.pop() else {
+        return Ok(None);
+    };
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = words
+        .iter()
+        .map(|word| {
+            let term = Term::from_field_text(f.body, word);
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(term, record)) as Box<dyn Query>,
+            )
+        })
+        .collect();
+    clauses.push((
+        Occur::Must,
+        last_word_query(searcher, f.body, &last, record)?,
+    ));
+    Ok(Some(BooleanQuery::new(clauses)))
+}
+
+/// Shortest last word read as a prefix: shorter ones begin too many words.
+const MIN_PREFIX_CHARS: usize = 3;
+/// Most indexed words a prefix stands for.
+const MAX_PREFIX_TERMS: usize = 32;
+/// Most documents, summed over the words a prefix stands for, read for it —
+/// the bound that matters on a cold disk, where reads follow the postings.
+const PREFIX_DOC_BUDGET: u64 = 50_000;
+/// Indexed words looked at per segment for a prefix, against a very short
+/// one in a large vocabulary.
+const MAX_SCANNED_TERMS: usize = 20_000;
+
+/// The last word of a content query as typed so far: the word itself, ranked
+/// first, or any indexed word it begins — as-you-type in a launcher, and
+/// "relatorio" finds "relatorios", "contrato" finds "contratos". The most
+/// frequent words come first, within [`MAX_PREFIX_TERMS`] and
+/// [`PREFIX_DOC_BUDGET`]; each keeps its BM25 score. A word of CJK bigrams, or
+/// shorter than [`MIN_PREFIX_CHARS`], is matched exactly.
+fn last_word_query(
+    searcher: &tantivy::Searcher,
+    field: tantivy::schema::Field,
+    word: &str,
+    record: IndexRecordOption,
+) -> Result<Box<dyn Query>> {
+    let exact = TermQuery::new(Term::from_field_text(field, word), record);
+    if word.chars().count() < MIN_PREFIX_CHARS
+        || word.chars().any(crate::cjk_tokenizer::is_unspaced)
+    {
+        return Ok(Box::new(exact));
+    }
+    let upper = prefix_end(word.as_bytes());
+    let mut doc_freqs: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for segment in searcher.segment_readers() {
+        let inverted = segment.inverted_index(field)?;
+        let mut range = inverted.terms().range().ge(word.as_bytes());
+        if let Some(upper) = &upper {
+            range = range.lt(upper);
+        }
+        let mut terms = range.into_stream()?;
+        let mut scanned = 0;
+        while scanned < MAX_SCANNED_TERMS && terms.advance() {
+            scanned += 1;
+            if let Ok(text) = std::str::from_utf8(terms.key())
+                && text != word
+            {
+                *doc_freqs.entry(text.to_owned()).or_default() += u64::from(terms.value().doc_freq);
+            }
+        }
+    }
+    let mut expansions: Vec<(String, u64)> = doc_freqs.into_iter().collect();
+    expansions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
+        Occur::Should,
+        Box::new(BoostQuery::new(Box::new(exact), EXACT_WORD_BOOST)),
+    )];
+    let mut read = 0u64;
+    for (text, doc_freq) in expansions.into_iter().take(MAX_PREFIX_TERMS) {
+        if read > 0 && read + doc_freq > PREFIX_DOC_BUDGET {
+            break;
+        }
+        read += doc_freq;
+        let term = Term::from_field_text(field, &text);
+        clauses.push((Occur::Should, Box::new(TermQuery::new(term, record))));
+    }
+    Ok(Box::new(BooleanQuery::new(clauses)))
+}
+
+/// The word as typed weighs this much more than the words it begins.
+const EXACT_WORD_BOOST: f32 = 2.0;
+
+/// The first byte string after every string starting with `prefix`; `None`
+/// when there is none (all 0xFF).
+fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.pop() {
+        if last < u8::MAX {
+            end.push(last + 1);
+            return Some(end);
+        }
+    }
+    None
+}
+
+/// How many documents hold `q`'s words, up to `cap`, from the postings alone.
+fn count_content(reader: &IndexReader, q: &str, cap: usize) -> Result<usize> {
+    let searcher = reader.searcher();
+    match content_query(&searcher, q)? {
+        Some(query) => count_capped(&searcher, &query, cap),
+        None => Ok(0),
+    }
+}
+
 /// One file while the two searches are being merged, with the score each index
 /// gave it kept apart.
 ///
@@ -600,6 +788,7 @@ pub fn search_content(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec
 /// has.
 struct Candidate {
     hit: Hit,
+    name_match: Option<NameMatch>,
     name_score: Option<f32>,
     body_score: Option<f32>,
 }
@@ -668,12 +857,17 @@ pub fn search_both(
 
     let mut merged: HashMap<String, Candidate> =
         HashMap::with_capacity(names.len() + contents.len());
+    // The kind of name match (whole name, word, start of a word, part) leads
+    // the name score inside a band, as it does in a name search.
+    let words = crate::index::name_words(q);
     for hit in names {
         let name_score = hit.score;
+        let name_match = name_match(&hit.name, &words);
         merged.insert(
             hit.path.clone(),
             Candidate {
                 hit,
+                name_match,
                 name_score: Some(name_score),
                 body_score: None,
             },
@@ -693,6 +887,7 @@ pub fn search_both(
                     hit.path.clone(),
                     Candidate {
                         hit,
+                        name_match: None,
                         name_score: None,
                         body_score: Some(body_score),
                     },
@@ -709,6 +904,7 @@ pub fn search_both(
     candidates.sort_by(|a, b| {
         a.tier()
             .cmp(&b.tier())
+            .then_with(|| b.name_match.cmp(&a.name_match))
             .then_with(|| score_of(b.name_score).total_cmp(&score_of(a.name_score)))
             .then_with(|| score_of(b.body_score).total_cmp(&score_of(a.body_score)))
             .then_with(|| a.hit.path.cmp(&b.hit.path))
@@ -1602,6 +1798,72 @@ mod tests {
         );
         // -n caps the output.
         assert_eq!(list_paths(&index, 1, None).unwrap(), vec!["/a/one.txt"]);
+    }
+
+    /// The last word is read as typed so far: it finds the words it begins,
+    /// and a document holding exactly that word ranks first. Earlier words, and
+    /// a last word under three letters, match whole words only.
+    #[test]
+    fn the_last_content_word_is_a_prefix() {
+        let content = content_index_with(
+            "prefix",
+            &[
+                ("/d/plural.txt", "os relatórios e os contratos assinados"),
+                ("/d/exact.txt", "o relatorio do mes"),
+                ("/d/other.txt", "religiao e cultura"),
+            ],
+        );
+        let paths = |q: &str| -> Vec<String> {
+            search_content(&content, q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect()
+        };
+        assert_eq!(paths("relatorio"), ["/d/exact.txt", "/d/plural.txt"]);
+        assert_eq!(paths("contrato"), ["/d/plural.txt"]);
+        assert_eq!(paths("os rela"), ["/d/plural.txt"]);
+        assert!(paths("re").is_empty());
+        // Only the last word stretches: "relatorio" is not in plural.txt.
+        assert!(paths("relatorio contratos").is_empty());
+    }
+
+    /// A page holds only its own hits; the total still counts every match,
+    /// from the postings, though only the page's candidates were read.
+    #[test]
+    fn a_page_counts_all_matches() {
+        let dir = std::env::temp_dir().join(format!("lsearch-paged-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let owned: Vec<String> = (0..30)
+            .map(|i| {
+                let path = dir.join(format!("nota {i}.txt"));
+                std::fs::write(&path, b"x").unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let index = index_with("paged", &refs);
+        let outcome = run_query(
+            QueryIndexes {
+                name: &index,
+                content: None,
+            },
+            "nota",
+            "name",
+            &Filter::default(),
+            &Page {
+                offset: 0,
+                limit: 5,
+            },
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(outcome.hits.len(), 5);
+        assert_eq!(outcome.total, 30);
+        assert_eq!(outcome.next_offset, Some(5));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

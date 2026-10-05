@@ -62,6 +62,10 @@ fn build_name_schema() -> Schema {
     // The media type (see `mime`), then its `major/*` group: "every video" is
     // one term, extension or not. Stored for the hits to carry.
     sb.add_text_field("mime", raw_identifier_options(true));
+    // The whole name without its extension, folded, as one term (see
+    // `stem_key`): the exact name ranks first even when only a page of
+    // candidates is read.
+    sb.add_text_field("stem", raw_identifier_options(false));
     // The day the file last changed, for ranking recent files first among
     // equal matches. A day and not the second, so saving a file again the same
     // day leaves its name document alone (see `scan::name_doc_stale`).
@@ -127,6 +131,16 @@ pub fn name_text(name: &str) -> String {
     text
 }
 
+/// The `stem` term of a file name: its words without the extension, folded and
+/// joined by single spaces — what a query for exactly that name joins to.
+pub fn stem_key(name: &str) -> String {
+    let stem = Path::new(name)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name_words(&stem).join(" ")
+}
+
 /// The folded words of a name or of a name query, split at separators.
 pub fn name_words(text: &str) -> Vec<String> {
     crate::extract::fold_lower(text)
@@ -185,6 +199,7 @@ pub struct Fields {
     pub dir: Field,
     pub ext: Field,
     pub mime: Field,
+    pub stem: Field,
     pub mtime_day: Field,
 }
 
@@ -203,6 +218,7 @@ pub fn fields(index: &Index) -> Result<Fields> {
         dir: schema.get_field("dir").context("field dir")?,
         ext: schema.get_field("ext").context("field ext")?,
         mime: schema.get_field("mime").context("field mime")?,
+        stem: schema.get_field("stem").context("field stem")?,
         mtime_day: schema.get_field("mtime_day").context("field mtime_day")?,
     })
 }
