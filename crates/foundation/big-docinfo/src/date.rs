@@ -65,7 +65,7 @@ static DAYS_OF: LazyLock<Regex> = LazyLock::new(|| {
 /// Words before a date that make it NOT the document's date (pt, es, en).
 static AGAINST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"venc|validade|valid[ao] ate|nasc|inicio|termino|prazo|\bate\b|a partir|periodo|referen|leitura|coleta|vigen|proxim|previst|lancamento|entrega",
+        r"venc|validade|valid[ao] ate|nasc|\bdn\b|inicio|termino|prazo|\bate\b|a partir|periodo|referen|leitura|coleta|vigen|proxim|previst|lancamento|entrega",
         r"|validez|valid[oa] hasta|nacim|nacid|plazo|\bhasta\b|\bfin\b",
         r"|\bdue\b|expir|valid until|valid through|birth|born|\bstart|\bend\b|deadline|\buntil\b|\bthrough\b|effective|renew|\bnext\b|\bperiod\b",
         // Another document the text answers or amends: its date is not this one's.
@@ -106,9 +106,20 @@ static STAMP: LazyLock<Regex> = LazyLock::new(|| {
 /// publisher stamps on every page, never the document's.
 static COPY_STAMP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)downloaded|accessed|retrieved|baixado|acess[oa]|descargado|consultado|recuperado",
+        r"(?i)downloaded|accessed|retrieved|baixado|acess[oa]|descargado|consultado|recuperado|\.pdf (?:by|por)\b",
     )
     .expect("valid")
+});
+/// The header a browser prints on a saved page: "18/12/2024, 23:13", alone on
+/// its line. It dates the printout, not the page.
+static PRINT_HEADER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*\d{1,2}/\d{1,2}/\d{2,4},?\s+\d{1,2}:\d{2}\s*$").expect("valid")
+});
+/// An identity document a party is described by, anywhere on the date's line:
+/// "portador da Carteira Nacional de Habilitação nº 0485…, expedida em".
+static IDENTITY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"habilitacao|carteira de identidade|\brg\b|passaporte|passport|driver s license")
+        .expect("valid")
 });
 /// A law, decree or order named by its number just before its date ("Lei nº
 /// 13.844, de", "Decreto Municipal nº 2.812 de", "Reglamento (UE) 2016/679 …
@@ -428,16 +439,20 @@ fn is_english(text: &str) -> bool {
     english >= 5 && english > iberian * 2
 }
 
-/// The document's own date, or `None` when no candidate scores above zero.
-pub fn document_date(text: &str) -> Option<String> {
+/// The document's own date, or `None` when no candidate scores above zero, with
+/// the score that chose it: how much evidence says this is the document's own
+/// date (a signature line, "emitido em", a dateline). A signature stamp, the
+/// fallback, scores 0.
+pub fn scored_date(text: &str) -> Option<(String, i32)> {
     let mut best: Option<(i32, f64, String)> = None;
     let mut first_stamp: Option<(usize, String)> = None;
     for found in candidates(text) {
         let before_raw = &text[..found.at];
         let line_start = before_raw.rfind('\n').map_or(0, |i| i + 1);
         // The words that give the date its role sit on its line ("Data: …",
-        // "Vencimento …") or, when the date opens its line, on the line above.
-        let scope = if text[line_start..found.at].trim().is_empty() {
+        // "Vencimento …") or, when the date opens its line, on the line above…
+        // …or when only a word or two precede it ("nascido" / "em 13 de março").
+        let scope = if text[line_start..found.at].split_whitespace().count() <= 2 {
             before_raw[..line_start]
                 .trim_end()
                 .rfind('\n')
@@ -461,7 +476,10 @@ pub fn document_date(text: &str) -> Option<String> {
             .find_iter(window)
             .last()
             .is_some_and(|m| candidates(&window[m.end()..]).is_empty());
-        if copy_stamp {
+        let line_end = text[found.at..]
+            .find('\n')
+            .map_or(text.len(), |i| found.at + i);
+        if copy_stamp || PRINT_HEADER.is_match(&text[line_start..line_end]) {
             continue;
         }
         if STAMP.is_match(&norm(window)) {
@@ -471,7 +489,9 @@ pub fn document_date(text: &str) -> Option<String> {
             continue;
         }
         let mut score = 0;
-        if AGAINST.is_match(near) {
+        if AGAINST.is_match(near)
+            || IDENTITY.is_match(&norm(last_chars(&text[scope..found.at], 200)))
+        {
             score -= 3;
         }
         if CITED_ACT.is_match(&norm(last_chars(before_raw, 120))) {
@@ -518,8 +538,8 @@ pub fn document_date(text: &str) -> Option<String> {
         }
     }
     best.filter(|(score, _, _)| *score >= 1)
-        .map(|(_, _, iso)| iso)
-        .or(first_stamp.map(|(_, iso)| iso))
+        .map(|(score, _, iso)| (iso, score))
+        .or(first_stamp.map(|(_, iso)| (iso, 0)))
 }
 
 /// Tuple order: score, then position, then the ISO string.
@@ -536,6 +556,10 @@ fn greater(a: &(i32, f64, String), b: &(i32, f64, String)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn document_date(text: &str) -> Option<String> {
+        scored_date(text).map(|(iso, _)| iso)
+    }
 
     /// `month` binary-searches the generated table.
     #[test]

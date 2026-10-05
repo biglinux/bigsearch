@@ -17,5 +17,8 @@ fuzz_target!(|data: &[u8]| {
     let name = &info.suggested_name;
     assert!(!name.contains(['/', '\0']), "unsafe name {name:?}");
     assert!(name.ends_with(".pdf") && name.len() > ".pdf".len(), "extension lost in {name:?}");
-    assert!(name.chars().count() <= 70, "name too long: {name:?}");
+    assert!(name.chars().count() <= 120 + ".pdf".len(), "name too long: {name:?}");
+    assert!(name.len() <= 255, "name over NAME_MAX: {name:?}");
+    assert!(!name.starts_with('.'), "hidden name {name:?}");
+    assert!(!name.contains(['\\', ':', '*', '?', '"', '<', '>', '|']), "name a FAT drive refuses: {name:?}");
 });

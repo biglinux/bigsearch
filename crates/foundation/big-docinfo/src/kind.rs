@@ -262,72 +262,32 @@ pub fn opens_with_kind(normalized: &str) -> bool {
     COMBINED.find(normalized).is_some_and(|m| m.start() == 0)
 }
 
-/// The word that opens a file name for `kind`, in the language that named it.
-pub fn word(kind: &str, lang: &str) -> Option<&'static str> {
-    let words: &[(&str, &str)] = match lang {
+/// The word a file name opens with for `kind`, in the language that named it —
+/// only for kinds whose own words are evidence enough (an invoice says
+/// "nota fiscal"); an article or a report is named by its title alone.
+pub fn label(kind: &str, lang: &str) -> Option<&'static str> {
+    let labels: &[(&str, &str)] = match lang {
         "en" => &[
-            ("nota_fiscal", "invoice"),
-            ("recibo", "receipt"),
-            ("fatura_boleto", "bill"),
-            ("extrato", "statement"),
-            ("contrato", "contract"),
-            ("ata", "minutes"),
-            ("ato_normativo", "regulation"),
-            ("edital", "call"),
-            ("parecer", "opinion"),
-            ("relatorio", "report"),
-            ("oficio_carta", "letter"),
-            ("email", "email"),
-            ("declaracao_certidao", "certificate"),
-            ("curriculo", "resume"),
-            ("manual", "manual"),
-            ("artigo", "article"),
-            ("orcamento", "quote"),
-            ("anotacoes", "notes"),
-            ("saude", "medical"),
+            ("nota_fiscal", "Invoice"),
+            ("recibo", "Receipt"),
+            ("fatura_boleto", "Bill"),
+            ("extrato", "Statement"),
+            ("contrato", "Contract"),
         ],
         "es" => &[
-            ("nota_fiscal", "factura"),
-            ("recibo", "recibo"),
-            ("fatura_boleto", "cobro"),
-            ("extrato", "extracto"),
-            ("contrato", "contrato"),
-            ("ata", "acta"),
-            ("ato_normativo", "norma"),
-            ("edital", "convocatoria"),
-            ("parecer", "dictamen"),
-            ("relatorio", "informe"),
-            ("oficio_carta", "carta"),
-            ("email", "correo"),
-            ("declaracao_certidao", "certificado"),
-            ("curriculo", "currículum"),
-            ("manual", "manual"),
-            ("artigo", "artículo"),
-            ("orcamento", "presupuesto"),
-            ("anotacoes", "notas"),
-            ("saude", "salud"),
+            ("nota_fiscal", "Factura"),
+            ("recibo", "Recibo"),
+            ("fatura_boleto", "Cobro"),
+            ("extrato", "Extracto"),
+            ("contrato", "Contrato"),
         ],
         _ => &[
-            ("nota_fiscal", "nota-fiscal"),
-            ("recibo", "recibo"),
-            ("fatura_boleto", "fatura"),
-            ("extrato", "extrato"),
-            ("contrato", "contrato"),
-            ("ata", "ata"),
-            ("ato_normativo", "norma"),
-            ("edital", "edital"),
-            ("parecer", "parecer"),
-            ("relatorio", "relatório"),
-            ("oficio_carta", "ofício"),
-            ("email", "email"),
-            ("declaracao_certidao", "declaração"),
-            ("curriculo", "currículo"),
-            ("manual", "manual"),
-            ("artigo", "artigo"),
-            ("orcamento", "orçamento"),
-            ("anotacoes", "notas"),
-            ("saude", "saúde"),
+            ("nota_fiscal", "Nota fiscal"),
+            ("recibo", "Recibo"),
+            ("fatura_boleto", "Fatura"),
+            ("extrato", "Extrato"),
+            ("contrato", "Contrato"),
         ],
     };
-    words.iter().find(|(k, _)| *k == kind).map(|(_, w)| *w)
+    labels.iter().find(|(k, _)| *k == kind).map(|(_, w)| *w)
 }

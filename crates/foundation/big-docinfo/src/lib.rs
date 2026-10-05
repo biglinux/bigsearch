@@ -66,13 +66,17 @@ pub struct Hints<'a> {
     pub prominent: &'a [String],
 }
 
+/// The score from which a date goes into the file name: on the evaluation
+/// corpus it keeps 80 of 95 right dates and drops the weak ones (a signature
+/// stamp, the day an article was received).
+const STRONG_DATE: i32 = 3;
+
 /// Reads `text` (the extracted content of a file whose extension is `ext`).
 #[must_use]
 pub fn analyze(text: &str, ext: &str, hints: &Hints<'_>) -> DocInfo {
     let found = kind::by_rules(text);
     let kind = found.map(|(kind, _)| kind);
-    let word = found.and_then(|(kind, lang)| kind::word(kind, lang));
-    let date = date::document_date(text);
+    let scored = date::scored_date(text);
     // A title shows as written, without the invisible hyphenation points
     // ("rec\u{AD}om\u{AD}men\u{AD}da\u{AD}tion") typeset books leave in their text.
     let title = hints
@@ -80,11 +84,28 @@ pub fn analyze(text: &str, ext: &str, hints: &Hints<'_>) -> DocInfo {
         .and_then(|declared| entity::declared_title(declared, text))
         .or_else(|| entity::title(text, hints.prominent))
         .map(|title| title.replace('\u{AD}', ""));
+    // The name says the kind only where the title does not ("Nota fiscal
+    // Padaria Pão Quente", not "Nota fiscal Nota fiscal de serviços").
+    let label = found
+        .and_then(|(kind, lang)| kind::label(kind, lang))
+        .filter(|label| {
+            !title
+                .as_deref()
+                .is_some_and(|t| text::fold_lower(t).contains(&text::fold_lower(label)))
+        });
+    // And the date only on strong evidence: a signature line, "emitido em", a
+    // dateline. A weaker one is still shown in the details.
+    let name_date = scored
+        .as_ref()
+        .filter(|(_, score)| *score >= STRONG_DATE)
+        .map(|(iso, _)| iso.as_str());
+    let suggested_name = name::suggested_name(label, title.as_deref(), name_date, ext);
+    let date = scored.map(|(iso, _)| iso);
     DocInfo {
         kind,
         entity: entity::main_entity(text, kind),
         highlights: highlights::extract(text),
-        suggested_name: name::suggested_name(word, title.as_deref(), date.as_deref(), ext),
+        suggested_name,
         date,
         title,
     }

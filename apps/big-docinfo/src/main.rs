@@ -65,9 +65,10 @@ fn describe(path: &Path, output: Output) -> Result<()> {
         prominent: &file.prominent,
     };
     let info = analyze(&file.text, ext, &hints);
-    // With neither a kind nor a title the suggestion would say less than the
-    // current name ("documento.odt"), so the current name stays.
-    let kept = info.kind.is_none() && info.title.is_none();
+    // A suggestion with nothing to say ("documento.odt") would say less than the
+    // current name, so the current name stays.
+    let kept =
+        info.suggested_name == format!("documento.{ext}") || info.suggested_name == "documento";
     let free = if kept {
         path.file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
@@ -137,7 +138,8 @@ fn extension(path: &Path) -> &str {
     path.extension().and_then(|e| e.to_str()).unwrap_or("")
 }
 
-/// `name` if no other file in the folder has it, else `name-2`, `name-3`… before the extension.
+/// `name` if no other file in the folder has it, else `name (2)`, `name (3)`…
+/// before the extension, as the file manager numbers copies.
 fn free_name(path: &Path, name: &str, ext: &str) -> String {
     let dir = path.parent().unwrap_or(Path::new("."));
     let taken = |candidate: &str| {
@@ -157,7 +159,7 @@ fn free_name(path: &Path, name: &str, ext: &str) -> String {
         format!(".{ext}")
     };
     (2..1000)
-        .map(|n| format!("{stem}-{n}{dotted}"))
+        .map(|n| format!("{stem} ({n}){dotted}"))
         .find(|candidate| !taken(candidate))
         .unwrap_or_else(|| name.to_owned())
 }

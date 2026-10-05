@@ -100,8 +100,19 @@ static AFFILIATION: LazyLock<Regex> = LazyLock::new(|| {
 });
 /// A filing or billing code ("6730–02–P", "1–13–25"): number, dash, number, dash.
 static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+[-–]\d+[-–]\w").expect("valid"));
+/// "Nome: Maria", "Médico :JOANA" — a label of up to three words and its value.
 static FIELD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\S+\s+){0,2}\S+:\s*\S").expect("valid"));
+    LazyLock::new(|| Regex::new(r"^(\S+\s+){0,2}\S+\s*:\s*\S").expect("valid"));
+/// The opening of a letterhead, normalized: "GOVERNO DO DISTRITO FEDERAL",
+/// "SECRETARIA DE ESTADO DE CULTURA", "Universidade de Brasília".
+static LETTERHEAD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"^(?:governo|secretaria|ministerio|prefeitura|tribunal|camara municipal|universidade",
+        r"|republica|estado d[eo]|poder (?:judiciario|executivo|legislativo)|assembleia legislativa",
+        r"|gobierno|ayuntamiento|universidad|ministry|department of|university|state of)\b"
+    ))
+    .expect("valid")
+});
 /// The type of article a journal prints above its title, in the original or
 /// translated: "Original Article", "Relatório especial", "Carta al editor".
 /// Alone on its line, or glued to the next word by the extraction
@@ -116,6 +127,9 @@ static ARTICLE_TYPE: LazyLock<Regex> = LazyLock::new(|| {
         r"|original (?:research|investigation)|research paper|methodological article|state of the art",
         r"|isth ssc communication|add your logos here",
         r"|(?:\w+ )?investiga(?:tion|[cç][aã]o|ci[oó]n)(?: \w+)?",
+        // a few words ending on the kind of piece: "Policy Brief", "Spotlight Review
+        // Article", "Original Clinical Research Report" (an audit report is a report)
+        r"|(?:[\w-]+\s+){0,4}(?:article|brief|research\s+report)|(?:artigo|art[ií]culo)\s+[\w-]+",
         r"|pesquisa original|artigo metodol[oó]gico|estado da arte|estado do cora[cç][aã]o",
         // the first section of a paper, when its title was not found above it
         r"|(?:introduction|introdu[cç][aã]o|introducci[oó]n|background)(?: and \w+)?",
@@ -285,18 +299,34 @@ pub fn title(text: &str, prominent: &[String]) -> Option<String> {
         return Some(line.to_owned());
     }
     let at = heading(&opening)?;
-    Some(match continuation(&opening, at) {
-        Some(next) => format!("{} {next}", opening[at]),
-        None => opening[at].to_owned(),
-    })
+    // A title may run over three lines: "THE URGENT NEED TO" / "IMPLEMENT
+    // PATIENT" / "BLOOD MANAGEMENT".
+    let mut title = opening[at].to_owned();
+    let mut last = at;
+    while last < at + 2
+        && let Some(next) = continuation(&opening, last)
+    {
+        title.push(' ');
+        title.push_str(next);
+        last += 1;
+    }
+    Some(title)
 }
 
 /// Whether line `at` carries on a sentence from the line above: "…em risco
 /// após o" / "de TEV recorrente… para orientar…" is prose, whatever it matches.
 fn continues_sentence(lines: &[&str], at: usize) -> bool {
-    at > 0
-        && lines[at - 1].ends_with(|c: char| c.is_lowercase() || c == ',')
-        && lines[at].starts_with(char::is_lowercase)
+    let Some(above) = at.checked_sub(1).map(|i| lines[i]) else {
+        return false;
+    };
+    (above.ends_with(|c: char| c.is_lowercase() || c == ',')
+        && lines[at].starts_with(char::is_lowercase))
+        // "…celebrada el 28 de mayo de" / "2026, aprobó…"
+        || above
+            .rsplit(' ')
+            .next()
+            .is_some_and(|w| JOINING.contains(&fold_lower(w).as_str()))
+            && continuation(lines, at - 1).is_none()
 }
 
 /// The next line when line `at` is a title wrapped mid-phrase ("…gene therapy,
@@ -370,6 +400,7 @@ fn is_letter_spaced(line: &str) -> bool {
 /// the opening: "-", "2.12.008" and a bare link do not push the title out of it.
 fn heading(lines: &[&str]) -> Option<usize> {
     let mut seen = 0;
+    let mut letterhead = None;
     for (at, &line) in lines.iter().enumerate() {
         if word_count(line) < 2 && !line.chars().any(is_cjk) {
             continue;
@@ -379,20 +410,41 @@ fn heading(lines: &[&str]) -> Option<usize> {
         }
         let at_top = seen < 3;
         seen += 1;
-        if continues_sentence(lines, at) {
+        // …nor does the rest of a journal's name: "Revista Internacional de" /
+        // "Dermatologia e Venereologia".
+        let continues_label =
+            at > 0 && is_above_title(lines[at - 1]) && continuation(lines, at - 1).is_some();
+        // A line left hanging on "de" or "of" with no title line to finish it
+        // ("…celebrada el 28 de mayo de" / "2026, aprobó…") is a sentence.
+        let hanging = line
+            .rsplit(' ')
+            .next()
+            .is_some_and(|w| JOINING.contains(&fold_lower(w).as_str()))
+            && continuation(lines, at).is_none();
+        if continues_sentence(lines, at) || continues_label || hanging {
             continue;
         }
         // A title wrapped at its colon is judged whole ("…for sickle cell
         // disease:" / "transfusion support").
-        let titled = looks_like_title(line, at_top)
+        let titled = (looks_like_title(line, at_top)
             || continuation(lines, at)
-                .is_some_and(|next| looks_like_title(&format!("{line} {next}"), true));
-        // A label alone is no title: the file keeps the name it has.
-        if titled && !is_date_line(line) && !has_glued_words(line) && !is_above_title(line) {
-            return Some(at);
+                .is_some_and(|next| looks_like_title(&format!("{line} {next}"), true)))
+            && !is_date_line(line)
+            && !has_glued_words(line);
+        if !titled {
+            continue;
+        }
+        if !is_above_title(line) {
+            // Below a letterhead, running prose is no title: the issuer names
+            // the document better ("AYUNTAMIENTO DE VILLANUEVA DEL ARCE").
+            return Some(letterhead.filter(|_| is_wrapped_prose(line)).unwrap_or(at));
+        }
+        // A label alone is no title, but a letterhead is the last resort.
+        if letterhead.is_none() && LETTERHEAD.is_match(&norm(line)) {
+            letterhead = Some(at);
         }
     }
-    None
+    letterhead
 }
 
 /// `line` without a section label it opens with: "Relatório especial Avançando
@@ -431,6 +483,13 @@ fn without_article_type(line: &str) -> &str {
 /// capitalized word ("TRANSPLANTATION"), and a poster's section headings set
 /// side by side ("Introduction Results").
 fn is_above_title(line: &str) -> bool {
+    // A letterhead, in capitals or short, names the issuer, not the document.
+    let cased_lower = line
+        .chars()
+        .any(|c| c.is_lowercase() && c.to_uppercase().next() != Some(c));
+    if LETTERHEAD.is_match(&norm(line)) && (!cased_lower || word_count(line) <= 6) {
+        return true;
+    }
     line.split_whitespace().all(|word| {
         SECTION_WORDS
             .contains(&fold_lower(word.trim_matches(|c: char| !c.is_alphanumeric())).as_str())
@@ -448,7 +507,9 @@ fn is_author_line(line: &str) -> bool {
         .filter(|word| {
             let mut chars = word.chars();
             chars.next().is_some_and(char::is_uppercase) && {
+                // "Verma1Swati", "Dargaud,1,2": a name, then its affiliation number.
                 let rest: String = chars.collect();
+                let rest = rest.replacen(',', "", 1);
                 rest.find(|c: char| c.is_ascii_digit())
                     .is_some_and(|at| at > 0 && rest[..at].chars().all(char::is_lowercase))
             }
@@ -500,7 +561,8 @@ fn looks_like_title(line: &str, at_top: bool) -> bool {
         && line.chars().count() <= if at_top { 200 } else { 120 }
         && letters * 2 >= visible.len()
         && !line.ends_with([',', ';', ':'])
-        && !line.starts_with(['[', '(', '{', '<', '.', '…', '•', '▪', '◦', '-', '–', '*'])
+        // ":BRUNO…" is the value of a field whose label is the line above
+        && !line.starts_with(['[', '(', '{', '<', '.', '…', '•', '▪', '◦', '-', '–', '*', ':'])
         && !line.contains(" = ")
         && !COPYRIGHT.is_match(line)
         && !is_author_line(line)
