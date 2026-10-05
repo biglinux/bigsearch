@@ -7,6 +7,8 @@
     reason = "integration test spawns the built big-search binary under test"
 )]
 
+mod scratch;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -98,8 +100,7 @@ fn await_paused(sock: &Path, want: bool) -> bool {
 
 #[test]
 fn pause_resume_rebuild_cycle() {
-    let base = std::env::temp_dir().join(format!("bs-ctl-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
+    let base = scratch::scratch_dir("bs-ctl");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     let run = base.join("run");
@@ -162,8 +163,7 @@ fn pause_resume_rebuild_cycle() {
 
 #[test]
 fn daemon_content_backfill_continues_after_first_limited_batch() {
-    let base = std::env::temp_dir().join(format!("bs-content-backfill-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
+    let base = scratch::scratch_dir("bs-content-backfill");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     let run = base.join("run");

@@ -548,12 +548,11 @@ fn persist_state_if_needed(state: &mut State) -> Result<()> {
 mod tests {
     use super::*;
     use crate::index::{fields, open_or_create};
-    use crate::test_env::{ENV_LOCK, EnvVarGuard};
+    use crate::test_env::{ENV_LOCK, EnvVarGuard, scratch_dir};
 
     #[test]
     fn subtree_indexes_visible_skips_hidden() {
-        let base = std::env::temp_dir().join(format!("lsearch-scan-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = scratch_dir("lsearch-scan");
         let tree = base.join("tree");
         std::fs::create_dir_all(tree.join("sub")).unwrap();
         std::fs::write(tree.join("visible_file.txt"), b"bodyonlyneedle").unwrap();
@@ -630,9 +629,7 @@ mod tests {
 
     #[test]
     fn reconcile_subtree_skips_unchanged_children() {
-        let base =
-            std::env::temp_dir().join(format!("lsearch-scan-reconcile-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = scratch_dir("lsearch-scan-reconcile");
         let tree = base.join("tree");
         std::fs::create_dir_all(tree.join("sub")).unwrap();
         std::fs::write(tree.join("sub/nested.md"), b"x").unwrap();
@@ -669,9 +666,7 @@ mod tests {
 
     #[test]
     fn a_directory_its_repository_ignores_is_not_walked_when_it_appears() {
-        let base =
-            std::env::temp_dir().join(format!("lsearch-scan-repo-ignore-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = scratch_dir("lsearch-scan-repo-ignore");
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         std::fs::create_dir_all(repo.join("fuzz/corpus/archive_index")).unwrap();
@@ -715,9 +710,7 @@ mod tests {
 
     #[test]
     fn metadata_only_change_skips_name_index_rewrite() {
-        let base =
-            std::env::temp_dir().join(format!("lsearch-scan-metaonly-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = scratch_dir("lsearch-scan-metaonly");
         let tree = base.join("tree");
         std::fs::create_dir_all(&tree).unwrap();
         let file = tree.join("nota.md");
@@ -758,8 +751,7 @@ mod tests {
     /// watched. The subtree walk must refuse the root itself.
     #[test]
     fn subtree_walk_refuses_an_excluded_root() {
-        let base = std::env::temp_dir().join(format!("lsearch-scope-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = scratch_dir("lsearch-scope");
         let tree = base.join("proj");
         std::fs::create_dir_all(tree.join("target/debug")).unwrap();
         std::fs::create_dir_all(tree.join("src")).unwrap();
@@ -827,9 +819,7 @@ mod tests {
     #[test]
     fn default_ignore_prunes_nested_dependency_and_build_dirs() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let base =
-            std::env::temp_dir().join(format!("lsearch-default-ignore-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = scratch_dir("lsearch-default-ignore");
         let home = base.join("home");
         let config = base.join("config");
         let xdg_storage_home = base.join("data");

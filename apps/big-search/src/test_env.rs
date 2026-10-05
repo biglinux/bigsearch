@@ -1,4 +1,5 @@
-//! Serialized access to process-wide environment variables, for tests only.
+//! Test isolation from the process environment: serialized access to
+//! environment variables, and scratch directories outside `TMPDIR`.
 //!
 //! Unit tests share one process and run in parallel, so any two that set
 //! `XDG_*` race: one test's guard restores a value the other is still using, and
@@ -9,6 +10,7 @@
 //! one lock for the whole crate, because a per-module lock only serializes that
 //! module and the modules collide with each other.
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -46,4 +48,14 @@ impl Drop for EnvVarGuard {
             }
         }
     }
+}
+
+/// An empty directory in `/tmp` for a test whose files are judged by their
+/// ancestors: the scan refuses a path under a dot-directory, a git work tree's
+/// ignored files or a build directory, and `TMPDIR` can be any of those
+/// (`~/.cache/…`, a repository's `target/`).
+pub fn scratch_dir(name: &str) -> PathBuf {
+    let dir = PathBuf::from(format!("/tmp/{name}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    dir
 }

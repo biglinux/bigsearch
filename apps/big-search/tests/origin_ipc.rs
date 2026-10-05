@@ -7,6 +7,8 @@
     reason = "integration test spawns the built big-search binary under test"
 )]
 
+mod scratch;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -70,8 +72,7 @@ fn run_stdout(args: &[&str], home: &Path, xdg_storage_home: &Path, run: &Path) -
 
 #[test]
 fn register_created_then_query_origin() {
-    let base = std::env::temp_dir().join(format!("bs-origin-ipc-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
+    let base = scratch::scratch_dir("bs-origin-ipc");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     let run = base.join("run");
@@ -130,8 +131,7 @@ fn register_created_then_query_origin() {
 
 #[test]
 fn cli_exposes_origin_commands() {
-    let base = std::env::temp_dir().join(format!("bs-origin-cli-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
+    let base = scratch::scratch_dir("bs-origin-cli");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     let run = base.join("run");

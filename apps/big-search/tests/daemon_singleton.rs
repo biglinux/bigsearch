@@ -8,6 +8,8 @@
     reason = "integration test spawns the built big-search binary under test"
 )]
 
+mod scratch;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
@@ -50,8 +52,7 @@ fn wait_socket(sock: &Path, timeout: Duration) -> bool {
 
 #[test]
 fn second_daemon_refuses_and_leaves_first_intact() {
-    let base = std::env::temp_dir().join(format!("bs-singleton-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
+    let base = scratch::scratch_dir("bs-singleton");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     let run = base.join("run");

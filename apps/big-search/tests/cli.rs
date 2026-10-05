@@ -8,6 +8,8 @@
     reason = "integration test spawns the built big-search binary under test"
 )]
 
+mod scratch;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -34,8 +36,7 @@ fn run(home: &Path, xdg_storage_home: &Path, args: &[&str]) -> String {
 
 #[test]
 fn count_and_list_subcommands_report_catalog() {
-    let base = std::env::temp_dir().join(format!("bs-cli-{}", std::process::id()));
-    fs::remove_dir_all(&base).ok();
+    let base = scratch::scratch_dir("bs-cli");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     fs::create_dir_all(home.join("sub")).unwrap();
@@ -86,8 +87,7 @@ fn count_and_list_subcommands_report_catalog() {
 
 #[test]
 fn reindex_empty_index_reextracts_content_despite_stale_content_state() {
-    let base = std::env::temp_dir().join(format!("bs-cli-stale-content-{}", std::process::id()));
-    fs::remove_dir_all(&base).ok();
+    let base = scratch::scratch_dir("bs-cli-stale-content");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     fs::create_dir_all(home.join("docs")).unwrap();
@@ -106,9 +106,7 @@ fn reindex_empty_index_reextracts_content_despite_stale_content_state() {
 
 #[test]
 fn reindex_empty_content_index_reextracts_content_despite_stale_content_state() {
-    let base =
-        std::env::temp_dir().join(format!("bs-cli-stale-content-index-{}", std::process::id()));
-    fs::remove_dir_all(&base).ok();
+    let base = scratch::scratch_dir("bs-cli-stale-content-index");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     fs::create_dir_all(home.join("docs")).unwrap();

@@ -1412,8 +1412,7 @@ mod tests {
 
     #[test]
     fn git_work_trees_and_their_ignore_rules_are_found() {
-        let root = std::env::temp_dir().join(format!("bs-history-git-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        let root = crate::test_env::scratch_dir("bs-history-git");
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join(".git/info")).unwrap();
         std::fs::create_dir_all(repo.join("docs/drafts")).unwrap();
