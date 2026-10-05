@@ -38,6 +38,9 @@ impl State {
         match open_state_db(&db_path) {
             Ok(conn) => {
                 migrate_legacy_json_if_needed(&conn, &namespace, &legacy_json_path).ok();
+                if namespace == CONTENT_NAMESPACE {
+                    forget_newly_read_formats(&conn).ok();
+                }
                 State {
                     db_path,
                     namespace,
@@ -624,6 +627,42 @@ fn migrate_legacy_json_if_needed(
     tx.commit().context("commit legacy state migration")
 }
 
+/// Formats the extractor learned to read, with the marker that records their
+/// files were sent back to extraction. Files of a format it did not read were
+/// recorded as done with no text; forgetting those rows once lets the next pass
+/// read them. It costs one extraction per such file, never data.
+const NEWLY_READ_FORMATS: (&str, &[&str]) =
+    ("content_formats:epub-eml-rtf", &["epub", "eml", "rtf"]);
+
+fn forget_newly_read_formats(conn: &Connection) -> Result<()> {
+    let (marker, extensions) = NEWLY_READ_FORMATS;
+    let done: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM meta WHERE key = ?1",
+            params![marker],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if done > 0 {
+        return Ok(());
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin format migration")?;
+    for ext in extensions {
+        // LIKE is case-insensitive for ASCII: ".EPUB" goes too.
+        tx.execute(
+            "DELETE FROM file_state WHERE namespace = ?1 AND path LIKE ?2",
+            params![CONTENT_NAMESPACE, format!("%.{ext}")],
+        )?;
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, 1)",
+        params![marker],
+    )?;
+    tx.commit().context("commit format migration")
+}
+
 fn u64_to_db_size(size: u64) -> i64 {
     i64::try_from(size).unwrap_or(i64::MAX)
 }
@@ -651,6 +690,44 @@ pub fn meta(path: &Path) -> Option<(i64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Files of a format the extractor learned to read were recorded as done
+    /// with no text; they go back to extraction once, and only once.
+    #[test]
+    fn newly_read_formats_go_back_to_extraction_once() {
+        let dir = std::env::temp_dir().join(format!("bs-state-formats-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("content-state.json");
+        let (book, mail, text) = (
+            Path::new("/x/Livro.EPUB"),
+            Path::new("/x/a.eml"),
+            Path::new("/x/a.txt"),
+        );
+        // An index from before: written without the migration's marker.
+        let mut s = State::empty(file.clone());
+        for p in [book, mail, text] {
+            s.set(p, 100, 5);
+        }
+        s.persist().unwrap();
+        s.conn
+            .execute(
+                "DELETE FROM meta WHERE key = ?1",
+                params![NEWLY_READ_FORMATS.0],
+            )
+            .unwrap();
+        drop(s);
+
+        let mut s = State::load(file.clone());
+        assert!(!s.unchanged(book, 100, 5) && !s.unchanged(mail, 100, 5));
+        assert!(s.unchanged(text, 100, 5));
+        // Read now and recorded again: a later start does not forget it.
+        s.set(book, 100, 5);
+        s.persist().unwrap();
+        drop(s);
+        assert!(State::load(file).unchanged(book, 100, 5));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn dedup_roundtrip() {

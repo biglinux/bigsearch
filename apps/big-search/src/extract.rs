@@ -42,7 +42,47 @@ pub(crate) fn is_text_like_ext(ext: &str) -> bool {
 
 /// Whether `path` is a file we attempt content extraction for.
 pub fn is_content_path(path: &Path) -> bool {
-    matches!(ext_of(path).as_deref(), Some(e) if is_text_like_ext(e) || is_office_ext(e))
+    matches!(ext_of(path).as_deref(), Some(e) if is_text_like_ext(e) || is_office_ext(e) || is_titled_ext(e))
+}
+
+/// Formats read whole by their own reader, which also gives the title the file
+/// declares: EPUB books, saved e-mail, RTF documents.
+fn is_titled_ext(ext: &str) -> bool {
+    matches!(ext, "epub" | "eml" | "rtf")
+}
+
+/// The text of an EPUB, e-mail or RTF file and the title it declares.
+fn read_titled(path: &Path, ext: &str) -> Option<(String, Option<String>)> {
+    match ext {
+        "epub" => read_epub(path),
+        "eml" => mail_text(&read_capped_bytes(path)?),
+        "rtf" => rtf_text(&read_capped_bytes(path)?),
+        _ => None,
+    }
+}
+
+/// The text and subject of an e-mail message held in memory (`.eml` bytes).
+pub fn mail_text(bytes: &[u8]) -> Option<(String, Option<String>)> {
+    crate::extract_mail::read_eml(bytes)
+}
+
+/// The text and declared title of an RTF document held in memory.
+pub fn rtf_text(bytes: &[u8]) -> Option<(String, Option<String>)> {
+    crate::extract_rtf::read_rtf(bytes)
+}
+
+/// A text-like file's bytes, when it is within the text input cap; read up to
+/// the extraction cap.
+fn read_capped_bytes(path: &Path) -> Option<Vec<u8>> {
+    let size = text_input_size(path)?;
+    let cap = max_extract_bytes();
+    let mut buf = Vec::with_capacity(size.min(cap as u64) as usize);
+    std::fs::File::open(path)
+        .ok()?
+        .take(cap as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(buf)
 }
 
 fn ext_of(path: &Path) -> Option<String> {
@@ -58,6 +98,8 @@ pub fn content(path: &Path) -> Option<String> {
         read_pdf(path)
     } else if is_office_ext(&ext) {
         read_office(path, &ext)
+    } else if is_titled_ext(&ext) {
+        read_titled(path, &ext).map(|(text, _)| text)
     } else {
         None
     }
@@ -98,6 +140,7 @@ pub fn described(path: &Path) -> Option<Described> {
             let html = content(path)?;
             (html_text(&html), html_element(&html, "title"))
         }
+        e if is_titled_ext(e) => read_titled(path, e)?,
         _ => (content_with_lines(path)?, office_declared_title(path, &ext)),
     };
     let prominent = match ext.as_str() {
@@ -112,6 +155,147 @@ pub fn described(path: &Path) -> Option<Described> {
         declared_title,
         prominent,
     })
+}
+
+/// Spine documents read from one EPUB, against a book built to be endless.
+const MAX_EPUB_PARTS: usize = 2_000;
+
+/// An EPUB's text, its chapters in reading order, and its `dc:title`.
+///
+/// `META-INF/container.xml` names the package document; its manifest maps ids
+/// to files and its spine orders them. Each chapter is XHTML, read as HTML.
+fn read_epub(path: &Path) -> Option<(String, Option<String>)> {
+    if exceeds_input_cap(path) {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
+    if zip.len() > MAX_ZIP_ENTRIES {
+        return None;
+    }
+    let cap = max_extract_bytes();
+    let mut part = |name: &str| -> Option<String> {
+        let mut entry = zip.by_name(name).ok()?;
+        let mut bytes = Vec::new();
+        entry
+            .by_ref()
+            .take(cap as u64)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    let container = part("META-INF/container.xml")?;
+    let opf_path = epub_package(container.as_bytes())?;
+    let opf = part(&opf_path)?;
+    let base = opf_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let (title, spine) = epub_spine(opf.as_bytes());
+    let mut text = String::new();
+    for href in spine.iter().take(MAX_EPUB_PARTS) {
+        let name = if base.is_empty() {
+            percent_decoded(href)
+        } else {
+            format!("{base}/{}", percent_decoded(href))
+        };
+        if let Some(chapter) = part(&name) {
+            text.push_str(&html_text(&chapter));
+            text.push('\n');
+        }
+        if text.len() >= cap {
+            truncate_to_char_boundary(&mut text, cap);
+            break;
+        }
+    }
+    (!text.trim().is_empty()).then_some((text, title))
+}
+
+/// The local name of an XML element, without its namespace prefix.
+fn local_name(e: &quick_xml::events::BytesStart<'_>) -> Vec<u8> {
+    e.local_name().as_ref().to_vec()
+}
+
+fn xml_attribute(e: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String> {
+    e.attributes()
+        .flatten()
+        .find(|a| a.key.local_name().as_ref() == name)
+        .map(|a| decode_entities(&String::from_utf8_lossy(&a.value)))
+}
+
+/// The package document `META-INF/container.xml` points to.
+fn epub_package(container: &[u8]) -> Option<String> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_reader(container);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e) | Event::Empty(e)) if local_name(&e) == b"rootfile" => {
+                return xml_attribute(&e, b"full-path");
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// A package document's `dc:title` and its spine: the chapter files in reading order.
+fn epub_spine(opf: &[u8]) -> (Option<String>, Vec<String>) {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_reader(opf);
+    let mut buf = Vec::new();
+    let (mut hrefs, mut order) = (std::collections::HashMap::new(), Vec::new());
+    let (mut title, mut in_title) = (None::<String>, false);
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e) | Event::Empty(e)) => match local_name(&e).as_slice() {
+                b"item" => {
+                    if let (Some(id), Some(href)) =
+                        (xml_attribute(&e, b"id"), xml_attribute(&e, b"href"))
+                    {
+                        hrefs.insert(id, href);
+                    }
+                }
+                b"itemref" => order.extend(xml_attribute(&e, b"idref")),
+                b"title" if title.is_none() => in_title = true,
+                _ => {}
+            },
+            Ok(Event::Text(t)) if in_title => {
+                let text = t.decode().map(|s| s.trim().to_owned()).unwrap_or_default();
+                if !text.is_empty() {
+                    title = Some(text);
+                }
+            }
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"title" => in_title = false,
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    let spine = order
+        .iter()
+        .filter_map(|id| hrefs.get(id).cloned())
+        .collect();
+    (title, spine)
+}
+
+/// "%20" and the like in an EPUB's file references.
+fn percent_decoded(href: &str) -> String {
+    let bytes = href.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(byte) = href
+                .get(i + 1..i + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The `dc:title` an office document's metadata part declares.
@@ -159,7 +343,7 @@ fn html_element(html: &str, tag: &str) -> Option<String> {
 /// The readable text of HTML: scripts and styles dropped, block elements as
 /// line breaks, the common entities decoded. Enough to read a saved page's
 /// title and dates, not a renderer.
-fn html_text(html: &str) -> String {
+pub(crate) fn html_text(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len() / 2);
     let mut at = 0;
@@ -909,6 +1093,54 @@ mod tests {
         let text = content(&path).unwrap();
         assert!(text.contains("quarterly"));
         assert!(text.contains("budget"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An EPUB reads in its spine's order, from the package `container.xml`
+    /// names, with the title its metadata declares.
+    #[test]
+    fn epub_reads_its_spine_in_order_with_its_title() {
+        let dir = temporary_extract_dir("epub");
+        let path = dir.join("livro.epub");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let mut add = |name: &str, body: &str| {
+                zw.start_file(name, stored_zip_options()).unwrap();
+                zw.write_all(body.as_bytes()).unwrap();
+            };
+            add("mimetype", "application/epub+zip");
+            add(
+                "META-INF/container.xml",
+                r#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#,
+            );
+            add(
+                "OEBPS/content.opf",
+                r#"<package><metadata><dc:title>Dom Casmurro</dc:title></metadata>
+                <manifest><opf:item id="c2" href="cap%202.xhtml"/><item id="c1" href="cap1.xhtml"/></manifest>
+                <spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#,
+            );
+            add(
+                "OEBPS/cap1.xhtml",
+                "<html><body><h1>Do título</h1><p>Uma noite destas&#8230;</p></body></html>",
+            );
+            add(
+                "OEBPS/cap 2.xhtml",
+                "<html><body><p>Do livro</p></body></html>",
+            );
+            zw.finish().unwrap();
+        }
+        assert!(is_content_path(&path));
+        let (text, title) = read_epub(&path).unwrap();
+        assert_eq!(title.as_deref(), Some("Dom Casmurro"));
+        let (first, second) = (
+            text.find("Do título").unwrap(),
+            text.find("Do livro").unwrap(),
+        );
+        assert!(
+            first < second && text.contains("Uma noite destas…"),
+            "{text:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

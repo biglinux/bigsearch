@@ -41,7 +41,7 @@ over the user's *visible* home subtree:
 
 1. **Filename search** — substring/prefix, interactive latency (target < 10 ms warm).
 2. **Content search** — full-text over a small set of common document types
-   (`txt md pdf docx odt ods pptx`), keyword, ranked.
+   (`txt md pdf docx odt ods pptx epub eml rtf`), keyword, ranked.
 
 Stays fresh in real time. Lean code: only what these two jobs need.
 
@@ -136,8 +136,10 @@ Per format, lightest tool, **argv arrays only — never a shell**:
 | txt, md | read directly, cap size, binary-sniff | — | **P3 (MVP)** |
 | pdf | `pdftotext` subprocess, bounded parallel + throttled (beat `pdf_oxide` 4× speed, 12× memory in P3.1) | poppler (runtime) | P3.1 |
 | docx, odt, ods, pptx | unzip + parse the body XML (`zip`+`quick-xml`) | `zip` + `quick-xml` | P3.2 |
+| epub | container → package → spine chapters, read as HTML (`zip`+`quick-xml`) | — | done |
+| eml | headers + plain/HTML body; MIME parts, base64, quoted-printable, RFC 2047 (`extract_mail.rs`) | — | done |
+| rtf | control words, `\'hh` / `\u` escapes, skipped destinations (`extract_rtf.rs`) | — | done |
 | doc (legacy, OLE2) | `litchi` (native OLE2) **or** `antiword` iff present, else skip | optional | later |
-| rtf | `litchi` if adopted, else skip | optional | later |
 
 **Extraction — PDF via `pdftotext` subprocess, bounded parallelism (P3.1 head-to-head).**
 The P3.1 spike compared the in-process pure-Rust path (`pdf_oxide`) against the
@@ -197,7 +199,13 @@ Pure pdftotext is 10.8 s. The "never fork-per-file" rule does not apply at this 
   xlsx `xl/sharedStrings.xml`+sheets; pptx `ppt/slides/*.xml`. No LibreOffice/Tika/JVM
   (1–2 s startup per file). Rejected: `undoc` (no ODT), `text_analysis` (bundles a
   pdf path we already own), `dotext` (dead 2017).
-- **doc (OLE2) / rtf** → NOT zip+XML (compound binary / markup). Only here does a
+- **epub / eml / rtf** → read in-process with no new dependency: EPUB is zip+XHTML;
+  a saved message is MIME text (`extract_mail.rs`); RTF is markup whose text part a
+  small state machine reads (`extract_rtf.rs`). Measured `unzip`+`sed` against the
+  in-process office path: 14 ms vs 1.5 ms per file — a subprocess per file costs
+  more than parsing the XML. Files of these formats indexed before they were read
+  are sent back to extraction once (`state.rs`, `forget_newly_read_formats`).
+- **doc (OLE2)** → NOT zip+XML (compound binary). Only here does a
   crate earn its place: **`litchi`** (Apache-2.0, native OLE2+ODF+OOXML+RTF, active
   but young — 32★, full-CRUD weight) is the **watch item**: if it matures it could
   later consolidate the whole office family + `.doc` + `.rtf` into one crate. For now

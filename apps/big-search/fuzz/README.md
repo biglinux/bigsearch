@@ -19,6 +19,8 @@ cargo +nightly fuzz run docinfo_text -- -max_total_time=300
 | `xml_text`   | `extract::xml_text` — the quick-xml character-data walk |
 | `office_zip` | `extract::office_text_from_reader` — zip parsing + entry selection + XML walk on arbitrary bytes as the archive (the primary hostile-document path) |
 | `text_bytes` | `extract::text_from_bytes` — NUL/binary rejection + lossy-UTF-8 decode |
+| `mail_bytes` | `extract::mail_text` — an `.eml` message: MIME parts, base64, quoted-printable, encoded headers |
+| `rtf_bytes` | `extract::rtf_text` — an RTF document: groups, control words, hex and Unicode escapes |
 
 Each asserts the parser never panics, hangs, or over-allocates. `extract.rs` caps
 the text taken from one file; the harness checks the cap holds for any input.

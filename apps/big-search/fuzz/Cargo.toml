@@ -50,3 +50,17 @@ bench = false
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "mail_bytes"
+path = "fuzz_targets/mail_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtf_bytes"
+path = "fuzz_targets/rtf_bytes.rs"
+test = false
+doc = false
+bench = false

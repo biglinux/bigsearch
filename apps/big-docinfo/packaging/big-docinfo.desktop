@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Service
 ServiceTypes=KonqPopupMenu/Plugin
-MimeType=application/pdf;application/vnd.oasis.opendocument.text;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.oasis.opendocument.presentation;application/vnd.openxmlformats-officedocument.presentationml.presentation;text/plain;text/markdown;text/html;
+MimeType=application/pdf;application/vnd.oasis.opendocument.text;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.oasis.opendocument.presentation;application/vnd.openxmlformats-officedocument.presentationml.presentation;text/plain;text/markdown;text/html;application/epub+zip;message/rfc822;text/rtf;application/rtf;
 Actions=SuggestName;
 X-KDE-Priority=TopLevel
 Icon=edit-rename
