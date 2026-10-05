@@ -5,9 +5,10 @@
 //! (often over-long, dropped) token. Here such a run emits **overlapping
 //! bigrams** (中文内容 → 中文, 文内, 内容), so a query of ≥2 chars matches by
 //! substring — the same effect the ngram name field already gives. An isolated
-//! char is a unigram. Everything else is split into alphanumeric words exactly
-//! like `SimpleTokenizer`, so Latin / Cyrillic / Hebrew / Arabic / etc. (all
-//! space-separated) behave unchanged.
+//! char is a unigram, and the index also holds every char of a run alone (see
+//! [`CjkFriendlyTokenizer`]). Everything else is split into alphanumeric words
+//! exactly like `SimpleTokenizer`, so Latin / Cyrillic / Hebrew / Arabic / etc.
+//! (all space-separated) behave unchanged.
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 
 /// Scripts written without inter-word spaces — Han/kana/Hangul plus the
@@ -425,13 +426,11 @@ mod tests {
                 "报", "报告", "告", "中", "中文", "文", "文内", "内", "内容", "容", "文"
             ]
         );
-        // Words and positions are otherwise those of the query tokenizer.
-        let words = streamed_with("relatório 2026 中文", true);
-        assert_eq!(
-            words.iter().map(|t| t.position).collect::<Vec<_>>(),
-            [0, 1, 2, 3, 4]
-        );
-        assert_eq!(words[0].text, "relatório");
+        let words: Vec<String> = streamed_with("relatório 2026 中文", true)
+            .into_iter()
+            .map(|t| t.text)
+            .collect();
+        assert_eq!(words, ["relatório", "2026", "中", "中文", "文"]);
     }
 
     #[test]

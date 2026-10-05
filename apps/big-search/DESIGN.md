@@ -143,31 +143,31 @@ short-name file is now found (14 of 15 were not). A new name schema rebuilds onl
 the name index: the content rows stay unless the content index is empty.
 
 **Content prefix and paging (2026-10).** The last content word is read as typed
-so far (`query::last_word_query`): it also matches the indexed words it begins,
-most frequent first, within 32 words and 50 000 documents, the exact word boosted
-— as-you-type, and Portuguese/Russian suffixes ("relatorio" → "relatorios",
-"квартал" → "квартале"). Every word, wherever it stands, also matches its plural
-or singular by suffix rules on folded words (`query::inflections`: pt/es -ões,
--ais, -eis, -ns, -res, -zes and -s, en -es after x/ch/sh), ranked below the word
-as typed. Snowball was measured on this index's own 5.5 million-term vocabulary
-first: on folded words it joined none of 670 -ões, 421 -ais, 261 -eis and 194
--ns pairs to their singulars, merged "casa" with "caso", "casado" and "case",
-and in Russian did not even join "квартал" to "квартале"; the rules joined every
-such pair, in both directions. Totals went from 363 to the ceiling for
-"relatorios", 898 to 1509 for "acoes", 367 to 764 for "responsaveis", with no
-change in latency. Russian and Ukrainian words match their other case endings
-(`query::slavic_stem`: the word without its longest noun, adjective or
-participle ending that leaves four letters, then the indexed words that are
-that stem plus an ending — "кварталы" finds "квартале"). On hunspell lemma
-groups from 120 Russian catalogs, documents holding a form of the typed word's
-lemma went from 50 % to 94 % found, with 0.33 other documents per query
-instead of 0.15, mostly kin ("фотограф" finding "фотографии"). Stems that
-change inside ("щелчок", "щелчком") stay apart. Content words are folded at index time like names
-(`index::ScriptFold` over `extract::fold_script_into`, then ASCII folding:
-combining marks, ё, Greek accents and ς, Arabic hamza alef, alef maqsura and
-Persian yeh, Persian kaf, ta marbuta as heh, vowel signs, tatweel and article),
-and the tokenizer keeps combining marks inside a
-word so a decomposed accent no longer splits it. A query-time variant scheme was built
+so far (`query::word_query`): it also matches the indexed words it begins,
+most frequent first, within 32 words and 50 000 documents, the exact word
+boosted — as-you-type, and Portuguese/Russian suffixes ("relatorio" →
+"relatorios", "квартал" → "квартале"). Every word, wherever it stands, also
+matches its plural or singular by suffix rules on folded words
+(`query::inflections`: pt/es -ões, -ais, -eis, -ns, -res, -zes and -s, en -es
+after x/ch/sh), ranked below the word as typed. Snowball was measured on this
+index's own 5.5 million-term vocabulary first: on folded words it joined none of
+670 -ões, 421 -ais, 261 -eis and 194 -ns pairs to their singulars, merged "casa"
+with "caso", "casado" and "case", and in Russian did not even join "квартал" to
+"квартале"; the rules joined every such pair, in both directions. Totals went
+from 363 to the ceiling for "relatorios", 898 to 1509 for "acoes", 367 to 764
+for "responsaveis", with no change in latency. Russian and Ukrainian words match
+their other case endings (`query::slavic_stem`: the word without its longest
+noun, adjective or participle ending that leaves four letters, then the indexed
+words that are that stem plus an ending — "кварталы" finds "квартале"). On
+hunspell lemma groups from 120 Russian catalogs, documents holding a form of the
+typed word's lemma went from 50 % to 94 % found, with 0.33 other documents per
+query instead of 0.15, mostly kin ("фотограф" finding "фотографии"). Stems that
+change inside ("щелчок", "щелчком") stay apart. Content words are folded at
+index time like names (`index::ScriptFold` over `extract::fold_script_into`,
+then ASCII folding: combining marks, ё, Greek accents and ς, Arabic hamza alef,
+alef maqsura and Persian yeh, Persian kaf, ta marbuta as heh, vowel signs,
+tatweel and article), and the tokenizer keeps combining marks inside a word so a
+decomposed accent no longer splits it. A query-time variant scheme was built
 first to spare installed machines a re-index; the program is not installed
 anywhere yet, so the one-time re-index won (88 055 documents in about 13 minutes
 here, part of it under heavy load). The 42-query test in 12 languages went from
@@ -192,7 +192,7 @@ Thai, Lao, Khmer or Myanmar run alone as well as its bigrams, in content
 queries of two characters or more still ask for bigrams only (`BODY_QUERY`). One
 typed character used to be expanded to the indexed bigrams it begins, capped at
 32 (content) and 64 (names) in byte order, and a character that only ended runs
-began none: documents holding a sampled character were all found for 30-55 %
+began none: documents holding a sampled character were all found for 35-65 %
 of queries; now for all of them, with the content index of the 13-language test
 3 % larger.
 
@@ -208,7 +208,8 @@ phrase list, which this does not attempt. Japanese results did not change.
 
 An Arabic word still being typed keeps the article the index dropped, so the
 last word also begins words without it ("اعادة الات" finds "إعادة الاتصال",
-indexed as "اتصال"): Arabic as-you-type queries went from 42 % to 100 %.
+indexed as "اتصال"): Arabic as-you-type queries went from 41 % to 91 %; the
+rest had one letter after the article.
 
 The backfill's duty cycle follows the CPU time the service used in a batch, not
 the batch's wall time: at idle priority on a busy machine a 250-file batch took

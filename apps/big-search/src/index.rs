@@ -133,16 +133,21 @@ impl Tokenizer for NameGrams {
             text,
             start: 0,
             length: 0,
-            token: Token::default(),
+            token: Token {
+                position: 0,
+                ..Token::default()
+            },
         }
     }
 }
 
+/// Like tantivy's `NgramTokenizer`, every token is at position 0: the field
+/// keeps no positions.
 struct NameGramStream<'a> {
     text: &'a str,
     /// Byte offset of the character the next grams start at.
     start: usize,
-    /// Characters in the last gram emitted from `start`.
+    /// Characters in the gram last considered at `start`.
     length: usize,
     token: Token,
 }
@@ -151,29 +156,22 @@ impl TokenStream for NameGramStream<'_> {
     fn advance(&mut self) -> bool {
         while let Some(first) = self.text[self.start..].chars().next() {
             self.length += 1;
-            let wanted =
-                self.length == 1 && crate::cjk_tokenizer::is_unspaced(first) || self.length >= 2;
-            let end = self.text[self.start..]
-                .char_indices()
-                .nth(self.length - 1)
-                .map(|(at, c)| self.start + at + c.len_utf8());
-            match end {
-                Some(end) if self.length <= 3 => {
-                    if !wanted {
-                        continue;
-                    }
-                    self.token.offset_from = self.start;
-                    self.token.offset_to = end;
-                    self.token.position = self.start;
-                    self.token.text.clear();
-                    self.token.text.push_str(&self.text[self.start..end]);
-                    return true;
-                }
-                _ => {
-                    self.start += first.len_utf8();
-                    self.length = 0;
-                }
+            if self.length == 1 && !crate::cjk_tokenizer::is_unspaced(first) {
+                continue;
             }
+            if self.length <= 3
+                && let Some((at, last)) =
+                    self.text[self.start..].char_indices().nth(self.length - 1)
+            {
+                let end = self.start + at + last.len_utf8();
+                self.token.offset_from = self.start;
+                self.token.offset_to = end;
+                self.token.text.clear();
+                self.token.text.push_str(&self.text[self.start..end]);
+                return true;
+            }
+            self.start += first.len_utf8();
+            self.length = 0;
         }
         false
     }
@@ -760,6 +758,7 @@ pub fn is_divergent_document_count(indexed_documents: u64, cached_paths: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tantivy::schema::FieldType;
 
     fn grams(text: &str) -> Vec<String> {
         let mut tokenizer = NameGrams;
@@ -790,7 +789,6 @@ mod tests {
             ]
         );
     }
-    use tantivy::schema::FieldType;
 
     #[test]
     fn compacts_once_a_tenth_of_the_index_changed() {

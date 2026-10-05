@@ -715,9 +715,8 @@ fn word_query(
     record: IndexRecordOption,
     last: bool,
 ) -> Result<Box<dyn Query>> {
-    let exact = TermQuery::new(Term::from_field_text(field, word), record);
     if word.chars().any(crate::cjk_tokenizer::is_unspaced) {
-        return Ok(Box::new(exact));
+        return Ok(with_forms(word, Vec::new(), field, record));
     }
     // Only forms the index holds: a query term for a word no document has
     // would cost a lookup for nothing on every segment.
@@ -754,16 +753,18 @@ fn word_query(
             forms.extend(words_beginning(searcher, field, rest, |_| true)?);
         }
     }
-    Ok(with_forms(exact, forms, field, record))
+    Ok(with_forms(word, forms, field, record))
 }
 
-/// `exact`, ranked first, or any of `forms`.
+/// `word`, ranked first, or any of `forms` other than it.
 fn with_forms(
-    exact: TermQuery,
+    word: &str,
     mut forms: Vec<String>,
     field: tantivy::schema::Field,
     record: IndexRecordOption,
 ) -> Box<dyn Query> {
+    let exact = TermQuery::new(Term::from_field_text(field, word), record);
+    forms.retain(|form| form != word);
     if forms.is_empty() {
         return Box::new(exact);
     }
@@ -880,7 +881,7 @@ fn inflections(word: &str) -> Vec<String> {
         }
         for to in *tos {
             let form = format!("{base}{to}");
-            if form.len() >= 4 && form != word && !forms.contains(&form) {
+            if form.len() >= 4 && !forms.contains(&form) {
                 forms.push(form);
             }
         }
@@ -2054,8 +2055,8 @@ mod tests {
     }
 
     /// One CJK character is a term of its own: it is found wherever it stands,
-    /// however many different characters follow it elsewhere (the names held
-    /// to be scanned for the grams it opens stopped at 64).
+    /// however many different characters follow it elsewhere (expanding it to
+    /// the grams it begins stopped at 64).
     #[test]
     fn one_cjk_character_is_found_wherever_it_stands() {
         let mut paths: Vec<String> = (0..70)

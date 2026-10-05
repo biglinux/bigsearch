@@ -617,10 +617,10 @@ fn office_text_with<R: std::io::Read + std::io::Seek>(
 /// content words does, so a person types a word the way they would write it
 /// by hand:
 ///
+/// - the text is first composed as [`compose`] says;
 /// - accents and other marks go, whether the text carries them precomposed
 ///   ("relatório") or decomposed, as names unpacked from macOS archives do
 ///   ("relato\u{301}rio"); so does the dot that "İ" lowercases with;
-/// - the text is first composed as [`compose`] says;
 /// - Latin letters fold through tantivy's `AsciiFoldingFilter`, the table the
 ///   content analyzer uses: "ß" is "ss", "Ł" is "l", "Æ" is "ae";
 /// - the other scripts fold as [`fold_script_into`] says.
