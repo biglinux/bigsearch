@@ -79,6 +79,16 @@ pub fn content_with_lines(path: &Path) -> Option<String> {
     }
 }
 
+/// [`content_with_lines`] plus the title the file declares in its metadata, when
+/// it is a PDF that declares one. `big-docinfo` weighs that title against the text.
+pub fn content_with_lines_and_title(path: &Path) -> Option<(String, Option<String>)> {
+    if ext_of(path).as_deref() == Some("pdf") {
+        crate::extract_pdf::read_pdf_titled(path)
+    } else {
+        content_with_lines(path).map(|text| (text, None))
+    }
+}
+
 /// Extract text for a file identified by content sniffing (no usable extension):
 /// PDF via `pdftotext`, anything `text/*` as plain text. Used by the metadata
 /// pass so an extension-less document is still full-text searchable.

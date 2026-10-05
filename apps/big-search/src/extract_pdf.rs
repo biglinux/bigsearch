@@ -20,14 +20,54 @@ use std::time::Duration;
 /// a deployment explicitly wants to skip very large PDF inputs.
 pub(crate) fn read_pdf(path: &Path) -> Option<String> {
     let cap = crate::extract::max_extract_bytes();
-    let bytes = pdftotext_capped(path, cap)?;
+    let bytes = pdftotext_capped(path, cap, false)?;
     // The bytes become the string when they are valid UTF-8, which they are for
     // every ordinary PDF: `from_utf8_lossy(&bytes).into_owned()` copied the whole
     // text layer a second time.
-    let mut text = match String::from_utf8(bytes) {
+    let text = match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(invalid) => String::from_utf8_lossy(invalid.as_bytes()).into_owned(),
     };
+    text_layer(text, cap)
+}
+
+/// Like [`read_pdf`], plus the title the PDF declares in its metadata, from the
+/// same `pdftotext` run: `-htmlmeta` puts the metadata in an HTML head (escaped)
+/// and the text, unchanged, in a `<pre>` block.
+pub(crate) fn read_pdf_titled(path: &Path) -> Option<(String, Option<String>)> {
+    let cap = crate::extract::max_extract_bytes();
+    let bytes = pdftotext_capped(path, cap, true)?;
+    let html = String::from_utf8_lossy(&bytes);
+    let (title, body) = split_html_meta(&html);
+    Some((text_layer(body.to_owned(), cap)?, title))
+}
+
+/// The metadata title and the text of `pdftotext -htmlmeta` output.
+fn split_html_meta(html: &str) -> (Option<String>, &str) {
+    let title = html
+        .split_once("<title>")
+        .and_then(|(_, rest)| rest.split_once("</title>"))
+        .map(|(title, _)| unescape_html(title.trim()))
+        .filter(|title| !title.is_empty());
+    // The text may itself contain "</pre>": the block ends at the last one, or
+    // at the end of the output when the cap cut it short.
+    let body = html.split_once("<pre>\n").map_or("", |(_, rest)| {
+        rest.rfind("</pre>").map_or(rest, |end| &rest[..end])
+    });
+    (title, body)
+}
+
+/// The five entities `pdftotext -htmlmeta` writes in metadata values.
+fn unescape_html(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// The text of a PDF, cut to the cap, or `None` when it has none (a scanned page).
+fn text_layer(mut text: String, cap: usize) -> Option<String> {
     crate::extract::truncate_to_char_boundary(&mut text, cap);
     if text.trim().is_empty() {
         None // scanned / image-only PDF (no text layer) → name-only, opt-in OCR later
@@ -36,7 +76,7 @@ pub(crate) fn read_pdf(path: &Path) -> Option<String> {
     }
 }
 
-fn pdftotext_capped(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
+fn pdftotext_capped(path: &Path, max_bytes: usize, html_meta: bool) -> Option<Vec<u8>> {
     if exceeds_pdf_input_cap(path) {
         return None;
     }
@@ -47,14 +87,14 @@ fn pdftotext_capped(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
     // case, kill and reap the unguarded child before respawning through
     // timeout(1), so every successful spawn has a wall-clock deadline.
     let use_watchdog = pidfd_supported();
-    let mut child = spawn_pdftotext(path, !use_watchdog)?;
+    let mut child = spawn_pdftotext(path, !use_watchdog, html_meta)?;
     let watchdog = if use_watchdog {
         match SubprocessDeadline::arm(&child, Duration::from_secs(pdf_timeout_secs())) {
             Some(watchdog) => Some(watchdog),
             None => {
                 kill_child_tree(&mut child);
                 let _ = child.wait();
-                child = spawn_pdftotext(path, true)?;
+                child = spawn_pdftotext(path, true, html_meta)?;
                 None
             }
         }
@@ -113,7 +153,7 @@ fn pdftotext_capped(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn spawn_pdftotext(path: &Path, use_timeout_wrapper: bool) -> Option<Child> {
+fn spawn_pdftotext(path: &Path, use_timeout_wrapper: bool, html_meta: bool) -> Option<Child> {
     let mut command = if use_timeout_wrapper {
         let mut wrapped = Command::new("timeout");
         wrapped.arg(pdf_timeout_secs().to_string()).arg("pdftotext");
@@ -121,8 +161,11 @@ fn spawn_pdftotext(path: &Path, use_timeout_wrapper: bool) -> Option<Child> {
     } else {
         Command::new("pdftotext")
     };
+    command.arg("-q");
+    if html_meta {
+        command.arg("-htmlmeta");
+    }
     command
-        .arg("-q")
         .arg("--")
         .arg(path)
         .arg("-")
@@ -310,7 +353,7 @@ fn pdf_timeout_secs() -> u64 {
 /// it, for an answer that is a handful of page numbers.
 pub(crate) fn for_each_pdf_page(path: &Path, on_page: &mut dyn FnMut(&str)) {
     let cap = crate::extract::max_extract_bytes();
-    let Some(bytes) = pdftotext_capped(path, cap) else {
+    let Some(bytes) = pdftotext_capped(path, cap, false) else {
         return;
     };
     for page in String::from_utf8_lossy(&bytes).split('\u{000C}') {
@@ -348,6 +391,18 @@ mod tests {
         let dir = base.join(format!("lsearch-exec-{}-{label}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The title is escaped in the HTML head; the text in `<pre>` is not.
+    #[test]
+    fn htmlmeta_output_splits_into_title_and_text() {
+        let html = "<html><head>\n<title>Fish &amp; chips: &lt;a&gt; &quot;study&quot;</title>\n</head>\n<body>\n<pre>\nA & B </pre> C\n</pre>\n</body>\n</html>\n";
+        let (title, body) = split_html_meta(html);
+        assert_eq!(title.as_deref(), Some("Fish & chips: <a> \"study\""));
+        assert_eq!(body, "A & B </pre> C\n");
+        // No title, and output cut by the cap before the block closed.
+        let (title, body) = split_html_meta("<head>\n<title></title>\n</head>\n<pre>\ncut sho");
+        assert_eq!((title, body), (None, "cut sho"));
     }
 
     #[test]
