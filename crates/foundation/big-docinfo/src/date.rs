@@ -496,11 +496,14 @@ pub fn document_date(text: &str) -> Option<String> {
         if signature_line(&text[line_start..found.at]) || found.formal {
             score += 3;
         }
-        let line_end = text[found.at..]
+        // A date may run across a line break ("26 de\nmaio de 2026"): what
+        // follows it on its line starts where the date ends.
+        let date_end = found.at + found.len;
+        let line_end = text[date_end..]
             .find('\n')
-            .map_or(text.len(), |i| found.at + i);
+            .map_or(text.len(), |i| date_end + i);
         if text[line_start..found.at].trim().is_empty()
-            && text[found.at + found.len..line_end]
+            && text[date_end..line_end]
                 .trim_matches(|c: char| c.is_whitespace() || c == '.')
                 .is_empty()
         {
@@ -597,6 +600,13 @@ mod tests {
         assert_eq!(document_date(cites), None);
         let own = "DECRETO Nº 010, DE 02 DE ABRIL DE 2020\nDispõe sobre medidas conforme o Decreto nº 006, de 17 de março de 2020.";
         assert_eq!(document_date(own).as_deref(), Some("2020-04-02"));
+    }
+
+    /// A date broken across two lines used to slice the text backwards.
+    #[test]
+    fn a_date_across_a_line_break() {
+        let text = "Relatório anual\n26 de\nmaio de 2026\nTexto do relatório.";
+        assert_eq!(document_date(text).as_deref(), Some("2026-05-26"));
     }
 
     /// Stamps repeat on every page and for every signer; they date a document
