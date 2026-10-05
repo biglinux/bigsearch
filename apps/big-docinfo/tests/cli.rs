@@ -39,7 +39,7 @@ fn suggests_a_free_name_with_the_extension_kept() {
     let doc = dir.join("scan0001.txt");
     fs::write(&doc, CONTRACT).expect("write");
     fs::write(
-        dir.join("contrato-locacao-residencial-2026-04-22.txt"),
+        dir.join("contrato-locação-residencial-2026-04-22.txt"),
         "taken",
     )
     .expect("write");
@@ -55,11 +55,11 @@ fn suggests_a_free_name_with_the_extension_kept() {
     assert_eq!(json["date"], "2026-04-22");
     assert_eq!(
         json["suggested_name"],
-        "contrato-locacao-residencial-2026-04-22.txt"
+        "contrato-locação-residencial-2026-04-22.txt"
     );
     assert_eq!(
         json["free_name"],
-        "contrato-locacao-residencial-2026-04-22-2.txt"
+        "contrato-locação-residencial-2026-04-22-2.txt"
     );
     fs::remove_dir_all(dir).expect("cleanup");
 }

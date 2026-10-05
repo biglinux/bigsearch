@@ -15,31 +15,49 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::kind::names_a_kind;
-use crate::text::{content_lines, norm, word_count};
+use crate::text::{content_lines, first_chars, norm, word_count};
 
-static COMPANY_NAME: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^raz[aã]o social:\s*(.+)").expect("valid"));
+static COMPANY_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:raz[aã]o social|raz[oó]n social|company name):\s*(.+)").expect("valid")
+});
 static PARTY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)^(?:paciente|titular|cliente|contribuinte|requerente|declarante|contratante|locador[a]?|vendedor[a]?|benefici[aá]rio|candidat[oa])\s*:\s*([A-ZÀ-Ý][\wÀ-ÿ'.& -]{3,80})",
+        concat!(
+            r"^(?i:paciente|titular|cliente|contribuinte|requerente|declarante|contratante|locador[a]?|vendedor[a]?|benefici[aá]rio|candidat[oa]",
+            r"|contribuyente|arrendador[a]?|comprador[a]?",
+            r"|patient|client|customer|tenant|landlord|lessor|seller|buyer|applicant|candidate|beneficiary|taxpayer)",
+            // Unbounded here, bounded in code: a counted repeat of a Unicode class
+            // is compiled as that many copies of it (megabytes of automaton).
+            r"\s*:\s*([A-ZÀ-Ý][\wÀ-ÿ'.& -]{3,})"
+        ),
     )
     .expect("valid")
 });
 static SENDER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^de:\s*([^<@]+?)\s*<").expect("valid"));
-static FIRST_PERSON: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\bEu,\s+([A-ZÀ-Ý][\wÀ-ÿ' ]{5,60}?),").expect("valid"));
+    LazyLock::new(|| Regex::new(r"(?i)^(?:de|from):\s*([^<@]+?)\s*<").expect("valid"));
+static FIRST_PERSON: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"\b(?:Eu|Yo),\s+([A-ZÀ-Ý][\wÀ-ÿ' ]{5,}?),",
+        // English "I," also opens "items I, III and IV": a name needs a lowercase letter.
+        r"|\bI,\s+([A-ZÀ-Ý][a-zà-ÿ][\wÀ-ÿ' ]{4,}?),"
+    ))
+    .expect("valid")
+});
 static PERSON_NAME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[A-ZÀ-Ý][A-Za-zÀ-ÿ]+( [A-ZÀ-Ý][A-Za-zÀ-ÿ]+){1,4}$").expect("valid")
 });
 static INSTITUTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"\b(prefeitura|camara|secretaria|ministerio|universidade|instituto|associacao|condominio|fundacao|tribunal|governo|companhia|cooperativa|banco|hospital|escola|agencia|conselho|assembleia|ltda|s a|eireli|me)\b",
+        concat!(
+            r"\b(prefeitura|camara|secretaria|ministerio|universidade|instituto|associacao|condominio|fundacao|tribunal|governo|companhia|cooperativa|banco|hospital|escola|agencia|conselho|assembleia|ltda|s a|eireli|me",
+            r"|ayuntamiento|municipalidad|universidad|asociacion|gobierno|compania|escuela|consejo|junta|diputacion|s l",
+            r"|city of|county|department|ministry|university|institute|association|foundation|court|government|company|bank|school|agency|council|inc|llc|ltd|corp|corporation)\b"
+        ),
     )
     .expect("valid")
 });
 static SUBJECT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^assunto:\s*(.+)").expect("valid"));
+    LazyLock::new(|| Regex::new(r"(?i)^(?:assunto|asunto|subject):\s*(.+)").expect("valid"));
 
 /// Header lines searched for labelled parties, and for institutions.
 const PARTY_LINES: usize = 40;
@@ -55,18 +73,31 @@ static TWO_SENTENCES: LazyLock<Regex> =
 static FIELD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\S+\s+){0,2}\S+:\s*\S").expect("valid"));
 
+/// Only the opening of a document is read for its entity and title.
+const HEAD_CHARS: usize = 20_000;
+
 pub fn main_entity(text: &str, kind: Option<&str>) -> Option<String> {
+    let text = first_chars(text, HEAD_CHARS);
     let lines = content_lines(text);
     for line in lines.iter().take(PARTY_LINES) {
-        if let Some(c) = COMPANY_NAME.captures(line).or_else(|| PARTY.captures(line)) {
+        if let Some(c) = COMPANY_NAME.captures(line) {
             return Some(c[1].trim_matches([' ', '.', ',', ';']).to_owned());
+        }
+        if let Some(c) = PARTY.captures(line) {
+            let name = first_chars(&c[1], 81); // at most 80 after the capital
+            return Some(name.trim_matches([' ', '.', ',', ';']).to_owned());
         }
         if let Some(c) = SENDER.captures(line) {
             return Some(c[1].trim().to_owned());
         }
     }
-    if let Some(c) = FIRST_PERSON.captures(text) {
-        return Some(c[1].trim().to_owned());
+    if let Some(name) = FIRST_PERSON
+        .captures_iter(text)
+        .filter_map(|c| c.get(1).or_else(|| c.get(2)))
+        .map(|m| m.as_str())
+        .find(|name| name.chars().count() <= 61)
+    {
+        return Some(name.trim().to_owned());
     }
     if kind == Some("curriculo")
         && let Some(first) = lines.first()
@@ -85,18 +116,21 @@ pub fn main_entity(text: &str, kind: Option<&str>) -> Option<String> {
 }
 
 pub fn title(text: &str) -> Option<String> {
-    let lines: Vec<&str> = content_lines(text).into_iter().take(TITLE_LINES).collect();
+    let lines: Vec<&str> = content_lines(first_chars(text, HEAD_CHARS))
+        .into_iter()
+        .take(TITLE_LINES)
+        .collect();
     for line in &lines {
         if let Some(c) = SUBJECT.captures(line) {
             let subject = norm(&c[1]);
-            return (!subject.is_empty() && subject != "sem assunto")
-                .then(|| c[1].trim().to_owned());
+            return (!subject.is_empty()
+                && !["sem assunto", "sin asunto", "no subject"].contains(&subject.as_str()))
+            .then(|| c[1].trim().to_owned());
         }
     }
-    if let Some(line) = lines
-        .iter()
-        .find(|line| line.chars().count() <= 140 && names_a_kind(&norm(line)))
-    {
+    if let Some(line) = lines.iter().find(|line| {
+        line.chars().count() <= 140 && !line.ends_with([':', ',']) && names_a_kind(&norm(line))
+    }) {
         return Some((*line).to_owned());
     }
     // A text that is not a known kind of document usually opens with its title:
@@ -110,10 +144,16 @@ pub fn title(text: &str) -> Option<String> {
 
 /// A short line of words that is not a field, a greeting, a placeholder or an address.
 fn looks_like_title(line: &str) -> bool {
-    let words = word_count(line);
     let visible: Vec<char> = line.chars().filter(|c| !c.is_whitespace()).collect();
     let letters = visible.iter().filter(|c| c.is_alphabetic()).count();
-    (2..=15).contains(&words)
+    // Chinese and Japanese put no spaces between words: there the length is
+    // counted in characters, and an ideographic full stop marks a sentence.
+    let length_ok = if visible.iter().any(|&c| is_cjk(c)) {
+        (2..=40).contains(&visible.len()) && !line.contains('。')
+    } else {
+        (2..=15).contains(&word_count(line))
+    };
+    length_ok
         && line.chars().count() <= 120
         && letters * 2 >= visible.len()
         && !line.ends_with([',', ';', ':'])
@@ -140,4 +180,11 @@ fn title_case(s: &str) -> String {
         after_letter = cased;
     }
     out
+}
+
+/// Han ideographs and Japanese kana (Hangul is written with spaces).
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}'
+        | '\u{F900}'..='\u{FAFF}' | '\u{20000}'..='\u{2FA1F}')
 }

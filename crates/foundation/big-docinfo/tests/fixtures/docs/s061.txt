@@ -1,0 +1,71 @@
+AquaPure Trio KW-UF300
+3-Stage Under-Sink Water Filtration System
+USER MANUAL - Installation, Operation and Maintenance
+
+Kettlewell Home Products
+Please read this manual completely before installing. Keep it for future
+reference.
+
+1. IMPORTANT SAFETY INFORMATION
+- Do not use with water that is microbiologically unsafe or of unknown
+  quality without adequate disinfection before or after the system.
+- Install on the cold water supply only. Hot water (above 100 °F / 38 °C)
+  will damage the filter cartridges.
+- Operating pressure: 30-100 psi. If your household pressure exceeds 100
+  psi, install a pressure-reducing valve.
+- Do not install where the unit may freeze or be exposed to direct
+  sunlight.
+
+2. WHAT'S IN THE BOX
+A. Filter head assembly with mounting bracket (1)
+B. Stage 1 sediment cartridge, 5 micron (gray label) (1)
+C. Stage 2 carbon block cartridge (blue label) (1)
+D. Stage 3 lead and cyst reduction cartridge (green label) (1)
+E. Dedicated faucet, brushed nickel, with base plate (1)
+F. 3/8" feed water adapter and shut-off valve (1)
+G. 1/4" tubing, 15 ft (1)
+H. Mounting screws (4) and housing wrench (1)
+
+3. INSTALLATION
+Step 1. Turn off the cold water supply under the sink and open the
+kitchen faucet to release pressure.
+Step 2. Install the feed water adapter (F) between the cold water valve
+and the faucet supply line. Hand-tighten, then one half turn with a
+wrench. Do not use thread sealant on compression fittings.
+Step 3. Mount the filter head (A) on the cabinet wall with the screws,
+leaving at least 3 inches below the housings for cartridge changes.
+Step 4. Drill a 1/2" hole in the sink or countertop if no spare hole is
+available, and mount the faucet (E).
+Step 5. Cut the tubing (G) squarely and push it firmly into the quick-
+connect fittings: adapter to "IN", "OUT" to faucet.
+Step 6. Insert the three cartridges in order (gray, blue, green), turning
+each one clockwise until it locks.
+Step 7. Open the cold water supply slowly and check for leaks.
+
+4. FIRST USE
+Open the filter faucet and flush the system for 5 minutes. Small black
+particles of carbon fines and a cloudy appearance are normal during the
+first flush and will clear.
+
+5. MAINTENANCE
+Replace the cartridges according to this schedule, or sooner if the flow
+rate drops noticeably:
+- Stage 1 (sediment): every 6 months
+- Stage 2 (carbon block): every 6 months or 750 gallons
+- Stage 3 (lead and cyst): every 12 months or 1,500 gallons
+The LED on the faucet base blinks red when 6 months have passed since the
+last reset. After replacing cartridges, hold the button for 5 seconds to
+reset the timer.
+
+6. TROUBLESHOOTING
+Low flow - Clogged sediment cartridge; replace Stage 1.
+Leak at fitting - Tubing not fully inserted; cut squarely and reinsert.
+Bad taste - Cartridges overdue or not flushed; replace and flush.
+LED off - Replace the CR2032 battery in the faucet base.
+
+7. LIMITED WARRANTY
+Kettlewell Home Products warrants the filter head and faucet against
+defects in materials and workmanship for 2 years from the date of
+purchase. Cartridges are consumables and are not covered. Register your
+product at kettlewellhome.example/register. Customer care: 1-800-555-0163,
+Monday-Friday, 8 a.m.-6 p.m. Central Time.

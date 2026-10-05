@@ -1,0 +1,192 @@
+RIVERBEND REGIONAL TRANSIT AUTHORITY
+
+FISCAL YEAR 2026 ANNUAL PERFORMANCE REPORT
+(July 1, 2025 - June 30, 2026)
+
+Accepted by the Board of Directors on September 24, 2026
+Prepared by the Office of Planning and Performance
+
+-------------------------------------------------------------------------
+
+MESSAGE FROM THE CHIEF EXECUTIVE OFFICER
+
+Fiscal Year 2026 was the year Riverbend Regional Transit finally moved
+past the pandemic. For the first time since 2019, total ridership
+exceeded pre-pandemic levels, reaching 9.84 million unlinked passenger
+trips, 4.1 percent above FY2019 and 13.6 percent above FY2025. This
+growth did not happen by accident. It is the result of the Frequent
+Network redesign launched on August 17, 2025, which concentrated service
+on fewer, more direct corridors with buses every 15 minutes or better
+from 6 a.m. to 9 p.m., seven days a week.
+
+We also faced real challenges: an operator shortage that forced us to
+cancel more trips than we would like during the fall, rising fuel and
+parts costs, and the expiration of federal relief funds that had
+supported our operating budget for four years. This report describes
+both our progress and the work still ahead, with the same honesty our
+riders expect from us.
+
+Lucinda Graves-Mbeki
+Chief Executive Officer
+
+-------------------------------------------------------------------------
+
+1. SYSTEM OVERVIEW
+
+Riverbend Regional Transit Authority (RRTA) provides fixed-route bus,
+paratransit and microtransit service to the City of Riverbend and eight
+surrounding municipalities in Calloway and Dunmore counties, a service
+area of 412 square miles with a population of approximately 486,000.
+At the end of FY2026, RRTA operated:
+
+- 31 fixed routes, including 9 Frequent Network corridors and 2 bus
+  rapid transit lines (the Red Line and the new Blue Line);
+- 168 buses in the active fleet, of which 42 are battery-electric;
+- the RiverRide paratransit service, with 64 vehicles;
+- RRTA Flex on-demand microtransit in four zones.
+
+The agency employs 1,027 people, including 612 bus operators.
+
+2. RIDERSHIP
+
+Fixed-route ridership grew to 9.21 million trips, up 12.3 percent from
+FY2025. The nine Frequent Network corridors carried 68 percent of all
+fixed-route trips, compared with 55 percent on the same streets before
+the redesign. Weekend ridership grew fastest, up 21 percent, reflecting
+the decision to run Sunday service at the same frequency as Saturdays.
+
+The Blue Line bus rapid transit, which opened on March 9, 2026 along
+Harmon Avenue and Old Mill Road, averaged 7,450 weekday boardings in its
+first three full months, well ahead of the forecast of 5,800 used in
+its federal grant application.
+
+Paratransit ridership reached 318,000 trips (up 6 percent), and RRTA
+Flex carried 311,000 trips, nearly double the previous year, after the
+Eastgate and Pine Hollow zones were added in January.
+
+Table 1. Ridership by mode (unlinked trips)
+Mode                      FY2025        FY2026      Change
+Fixed route (incl. BRT)   8,201,000     9,210,000   +12.3%
+Paratransit (RiverRide)     300,000       318,000    +6.0%
+Microtransit (Flex)         158,000       311,000   +96.8%
+Total                     8,659,000     9,839,000   +13.6%
+
+3. SERVICE RELIABILITY
+
+On-time performance, defined as departing a timepoint no more than one
+minute early or five minutes late, averaged 82.7 percent, short of our
+target of 85 percent. Performance was strongest on the Red and Blue
+Lines (91 and 89 percent), where buses benefit from dedicated lanes and
+transit signal priority, and weakest on Routes 4, 12 and 27, which share
+congested downtown streets with construction detours.
+
+Missed trips, caused mostly by operator shortages, peaked at 3.8 percent
+of scheduled trips in October 2025. After the hiring and retention
+measures described in Section 6, the rate fell to 0.9 percent in June
+2026. Mean distance between mechanical failures improved from 9,100 to
+10,400 miles, thanks largely to the retirement of 23 diesel buses from
+2009.
+
+4. SAFETY AND SECURITY
+
+There were 2.1 preventable collisions per 100,000 miles, an improvement
+from 2.6 in FY2025. Reported assaults on operators fell from 19 to 11
+after the installation of protective operator barriers on the entire
+fleet was completed in December. Customer injuries remained low, at 0.4
+per 100,000 boardings.
+
+RRTA launched a Transit Ambassador program in partnership with the
+Calloway County Department of Behavioral Health, placing 14 trained
+ambassadors at the Central Station and on the busiest routes to assist
+riders and connect people in crisis with services.
+
+5. CUSTOMER EXPERIENCE
+
+The annual customer satisfaction survey, conducted in April 2026 with
+3,212 riders, found that 78 percent were satisfied or very satisfied with
+RRTA overall, up from 71 percent. Frequency and the new real-time
+arrival screens were the most frequently cited improvements; cleanliness
+of shelters and reliability on crosstown routes were the top complaints.
+
+Fare capping was introduced with the Tap&Ride card on November 1, 2025:
+riders never pay more than $2.50 per day or $50 per month, regardless of
+how many trips they take. By June 2026, 61 percent of fare payments were
+made with the card or the mobile app, and 18,400 riders reached the
+monthly cap at least once.
+
+6. WORKFORCE
+
+The operator shortage was the most serious operational challenge of the
+year. At the start of FY2026, RRTA had 548 operators against a
+requirement of 610. The agency responded with:
+
+- a new collective bargaining agreement with Transit Workers Union
+  Local 1789, ratified on December 3, 2025, raising the starting
+  operator wage from $19.40 to $23.10 per hour;
+- paid training with a $3,000 retention bonus after one year;
+- an in-house commercial driver's license school that graduated eight
+  classes of new operators.
+
+By June 30, 2026, the operator headcount reached 612. Voluntary turnover
+among operators with less than one year of service fell from 34 percent
+to 19 percent.
+
+7. FLEET AND FACILITIES
+
+RRTA received 18 battery-electric buses during the year, bringing the
+zero-emission fleet to 42 vehicles, 25 percent of the active fleet. The
+North Division garage completed the installation of 30 depot chargers
+and a 1.2-megawatt solar canopy. Electric buses averaged 1.9 kilowatt-
+hours per mile in FY2026; energy cost per mile was 61 percent lower than
+for comparable diesel buses, although maintenance costs for the first
+generation of batteries were higher than expected.
+
+Construction of the Eastgate Transit Center reached 70 percent
+completion, with opening planned for the spring of 2027. Forty-six bus
+stops received new shelters, benches and lighting, prioritized by
+ridership and by equity criteria.
+
+8. FINANCIAL SUMMARY
+
+Operating expenses totaled $162.4 million, 2.8 percent under the
+adopted budget of $167.1 million. Sources of operating revenue were:
+
+Table 2. Operating revenue, FY2026 (millions)
+Local sales tax (half-cent transit tax)    $ 98.7
+Fares and passes                           $ 14.9
+State operating assistance                 $ 21.6
+Federal formula funds (preventive maint.)  $ 19.3
+Advertising and other                      $  3.4
+Total                                      $157.9
+
+The $4.5 million difference between expenses and revenue was covered by
+the operating reserve, which ended the year at $38.2 million, equal to
+2.8 months of operating expenses and above the board policy minimum of
+two months. The farebox recovery ratio was 9.2 percent.
+
+Capital spending reached $71.8 million, mostly for the Blue Line,
+electric buses and the Eastgate Transit Center, funded 62 percent by
+federal grants.
+
+9. LOOKING AHEAD TO FY2027
+
+The FY2027 budget, adopted on June 18, 2026, totals $171.5 million for
+operations. The main priorities are:
+
+- Service: the fall service change effective October 4, 2026 extends
+  15-minute frequency to Routes 8 and 19 and adds late-night trips on the
+  Red Line until 1 a.m. on Fridays and Saturdays.
+- Reliability: bus lanes on Fourth Street and Grant Boulevard, to be
+  installed by the City of Riverbend in spring 2027.
+- Finances: the half-cent transit tax expires on December 31, 2028.
+  The Board will decide by June 2027 whether to ask voters to renew it.
+  Without renewal, RRTA would lose 62 percent of its operating revenue.
+- Fleet: an order for 24 more battery-electric buses, with deliveries
+  through 2028.
+
+The full audited financial statements are available in the Annual
+Comprehensive Financial Report, published separately.
+
+Riverbend Regional Transit Authority
+200 Commerce Street, Riverbend
+www.riverbendtransit.example  |  Customer Service (555) 010-4400

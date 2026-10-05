@@ -1,0 +1,51 @@
+BANCO CORDILLERA DEL NORTE, S.A., Institución de Banca Múltiple
+Av. Constitución 2140 Pte., Col. Centro, Monterrey, N.L., C.P. 64000
+
+ESTADO DE CUENTA - CUENTA DE DÉBITO "CUENTA ÁGIL PLUS"
+
+Cliente: ROSALBA ITZEL VILLARREAL GARZA
+RFC: VIGR870614XX3
+Domicilio: Calle Río Nazas 318, Col. Del Valle, San Pedro Garza García,
+N.L., C.P. 66220
+
+No. de cuenta: 0482 1173 9906           CLABE: 072 580 00482117399 6
+Sucursal: 0731 Valle Oriente             Moneda: Pesos mexicanos (MXN)
+
+Periodo: del 01/08/2026 al 31/08/2026    Fecha de corte: 31/08/2026
+Días del periodo: 31                     Próxima fecha de corte: 30/09/2026
+
+RESUMEN DEL PERIODO
+Saldo anterior ................................... $  48,215.37
+(+) Depósitos / abonos ........................... $  61,880.00
+(-) Retiros / cargos ............................. $  47,402.91
+(-) Comisiones cobradas .......................... $       0.00
+(+) Intereses a favor ............................ $      12.44
+(-) ISR retenido ................................. $       1.31
+Saldo al corte ................................... $  62,703.59
+Saldo promedio diario ............................ $  55,942.08
+
+DETALLE DE MOVIMIENTOS
+FECHA   DESCRIPCIÓN                                  CARGO        ABONO
+02/08   PAGO NÓMINA GRUPO ACERERO SIERRA MADRE                 30,940.00
+03/08   DOMICILIACIÓN ENERGÍA DEL NORESTE SA      1,284.00
+04/08   TRANSF. SPEI A ARRENDADORA PALMAS DEL VALLE 16,500.00
+06/08   COMPRA TDD SUPERMERCADOS LA SILLA              2,317.45
+09/08   RETIRO CAJERO PROPIO 0731                    3,000.00
+12/08   PAGO TARJETA DE CRÉDITO TERMINACIÓN 5521     9,846.20
+15/08   COMPRA TDD FARMACIAS DEL PUEBLO                  684.10
+16/08   PAGO NÓMINA GRUPO ACERERO SIERRA MADRE                 30,940.00
+18/08   DOMICILIACIÓN TELECOMUNICACIONES NORESTE       749.00
+21/08   TRANSF. SPEI A COLEGIO MONTES AZULES AC       8,950.00
+24/08   COMPRA TDD GASOLINERA SERVICIO LINCOLN         1,120.00
+27/08   COMPRA EN LÍNEA LIBRERÍA EL ATENEO DIGITAL       412.16
+29/08   COMPRA TDD SUPERMERCADOS LA SILLA              2,540.00
+31/08   INTERESES A FAVOR                                          12.44
+31/08   RETENCIÓN ISR                                    1.31
+        TOTALES                                     47,404.22    61,892.44
+
+GAT Nominal 0.30 % / GAT Real -3.85 % antes de impuestos. Para fines
+informativos y de comparación. Fecha de cálculo: 31/08/2026. Vigencia: 30
+días.
+
+Si desea presentar una aclaración, tiene 90 días naturales a partir de la
+fecha de corte. Unidad Especializada de Atención a Usuarios: 81 5550 4400.

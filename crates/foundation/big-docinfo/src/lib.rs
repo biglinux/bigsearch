@@ -25,17 +25,17 @@
 //!
 //! ## Reference implementation
 //!
-//! The behaviour mirrors a Python reference kept with the evaluation corpus; the
-//! parity test (`tests/parity.rs`) compares both on the synthetic documents.
+//! The behaviour started as a port of a Python reference measured on an
+//! evaluation corpus; `tests/parity.rs` holds the recorded answers it is checked
+//! against, re-recorded deliberately when a measured change improves them.
 
 mod date;
 mod entity;
 mod highlights;
 mod kind;
+mod months;
 mod name;
 mod text;
-
-pub use name::suggested_name;
 
 /// What [`analyze`] found. `None` means the text gave no clear evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,14 +58,16 @@ pub struct DocInfo {
 /// Reads `text` (the extracted content of a file whose extension is `ext`).
 #[must_use]
 pub fn analyze(text: &str, ext: &str) -> DocInfo {
-    let kind = kind::by_rules(text);
+    let found = kind::by_rules(text);
+    let kind = found.map(|(kind, _)| kind);
+    let word = found.and_then(|(kind, lang)| kind::word(kind, lang));
     let date = date::document_date(text);
     let title = entity::title(text);
     DocInfo {
         kind,
         entity: entity::main_entity(text, kind),
         highlights: highlights::extract(text),
-        suggested_name: suggested_name(kind, title.as_deref(), date.as_deref(), ext),
+        suggested_name: name::suggested_name(word, title.as_deref(), date.as_deref(), ext),
         date,
         title,
     }

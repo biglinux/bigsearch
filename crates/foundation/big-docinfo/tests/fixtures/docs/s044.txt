@@ -1,0 +1,47 @@
+TALLERES MECÁNICOS HERMANOS OLAZÁBAL, S.L.
+CIF B-31847206
+Polígono Industrial Landaben, calle E, nave 14 - 31012 Pamplona (Navarra)
+Tel. 948 555 213 - administracion@olazabaltalleres.example
+
+                                   FACTURA
+
+Nº de factura: 2026/A-0937                     Fecha de factura: 04/10/2026
+Nº de orden de reparación: OR-26-1188          Fecha de entrada: 29/09/2026
+
+DATOS DEL CLIENTE
+Transportes Iruña Express, S.L.
+CIF B-71203584
+Avda. de Zaragoza, 88, 2º dcha. - 31003 Pamplona
+
+Vehículo: Furgoneta Iveca Cargo 35 2.3 TD      Matrícula: 4821 LKT
+Bastidor: VF1MA000X63318842                      Kilómetros: 187.412
+
+-------------------------------------------------------------------------------
+CONCEPTO                                     CANT.   PRECIO      IMPORTE
+-------------------------------------------------------------------------------
+Kit de embrague con volante bimasa           1       642,30 €    642,30 €
+Líquido de embrague DOT 4 (1 l)              1        11,80 €     11,80 €
+Retén de cigüeñal trasero                    1        18,45 €     18,45 €
+Filtro de aceite                             1        14,90 €     14,90 €
+Aceite motor 5W-30 C3 (litros)               7         9,60 €     67,20 €
+Mano de obra (horas)                         6,5      48,00 €    312,00 €
+-------------------------------------------------------------------------------
+                                             Base imponible     1.066,65 €
+                                             IVA 21 %             224,00 €
+                                             TOTAL FACTURA      1.290,65 €
+
+Forma de pago: transferencia bancaria
+IBAN: ES12 0000 4471 8820 0193 5566 (Caja Rural del Arga)
+Vencimiento: 03/11/2026
+
+Garantía de la reparación: 12 meses o 20.000 km desde la fecha de entrega
+del vehículo, según el Real Decreto 1457/1986. Las piezas sustituidas
+quedan a disposición del cliente durante 15 días.
+
+Observaciones: el cliente autorizó el presupuesto nº P-26-0402 por
+teléfono el 30/09/2026 (atendido por Iker Goñi, jefe de taller). Se
+recomienda revisar los discos de freno delanteros en la próxima ITV,
+prevista para el 15/01/2027.
+
+Inscrita en el Registro Mercantil de Navarra, tomo 1.204, folio 87,
+hoja NA-22.651.

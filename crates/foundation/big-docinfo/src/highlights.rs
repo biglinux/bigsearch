@@ -14,24 +14,40 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::text::{lines, norm, word_count};
+use crate::text::{first_chars, lines, norm, word_count};
 
 const MAX_WORDS: usize = 90;
+/// The preview reads the first characters and sentences only.
+const HEAD_CHARS: usize = 100_000;
+const MAX_SENTENCES: usize = 400;
 const DIVERSITY: f64 = 0.4;
 /// List items and "Label: value" lines are fields, not sentences.
 static LABEL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^([-•*]|\d+[.)]\s|[A-ZÀ-Ý][\wÀ-ÿ /]{0,25}:\s)").expect("valid"));
+    LazyLock::new(|| Regex::new(r"^([-•*]|\d+[.)]\s|[A-ZÀ-Ý][\wÀ-ÿ /]*:\s)").expect("valid"));
+
+/// A list item, or a "Label: value" field whose label has at most 26 characters
+/// (bounded here: a counted repeat of `\w` compiles into that many copies of it).
+fn is_label(line: &str) -> bool {
+    LABEL.find(line).is_some_and(|m| {
+        let found = m.as_str();
+        !found.ends_with(char::is_whitespace) || found.chars().count() <= 28
+    })
+}
 
 pub fn extract(text: &str) -> Option<String> {
-    let sents = sentences(text);
+    // A preview comes from the opening; reading a whole book for it would cost
+    // time and memory that grow with the file.
+    let text = first_chars(text, HEAD_CHARS);
+    let mut sents = sentences(text);
+    sents.truncate(MAX_SENTENCES);
     if looks_structured(text) || sents.len() < 2 {
         return None;
     }
-    let vecs = tfidf(&sents);
-    let mut centroid = vec![0.0; vecs.first().map_or(0, Vec::len)];
+    let (vecs, terms) = tfidf(&sents);
+    let mut centroid = vec![0.0; terms];
     for v in &vecs {
-        for (c, x) in centroid.iter_mut().zip(v) {
-            *c += x;
+        for &(j, x) in v {
+            centroid[j] += x;
         }
     }
     #[expect(
@@ -42,7 +58,7 @@ pub fn extract(text: &str) -> Option<String> {
     for c in &mut centroid {
         *c /= n;
     }
-    let length = norm2(&centroid);
+    let length = centroid.iter().map(|c| c * c).sum::<f64>().sqrt();
     let length = if length == 0.0 { 1.0 } else { length };
     for c in &mut centroid {
         *c /= length;
@@ -60,7 +76,7 @@ fn sentences(text: &str) -> Vec<String> {
         if line.is_empty() {
             paras.push(std::mem::take(&mut cur));
         } else if open_end
-            && !LABEL.is_match(line)
+            && !is_label(line)
             && (line.chars().next().is_some_and(char::is_lowercase) || word_count(&cur) >= 8)
         {
             cur.push(' ');
@@ -78,7 +94,7 @@ fn sentences(text: &str) -> Vec<String> {
             if word_count(sent) >= 6
                 && !letters.is_empty()
                 && upper * 2 < letters.len()
-                && !LABEL.is_match(sent)
+                && !is_label(sent)
             {
                 out.push(sent.trim().to_owned());
             }
@@ -125,9 +141,13 @@ fn looks_structured(text: &str) -> bool {
     content.is_empty() || short * 5 > content.len() * 3
 }
 
+/// A sentence as (term, weight) pairs sorted by term: a few dozen entries, where
+/// a dense row would hold the whole vocabulary.
+type Sparse = Vec<(usize, f64)>;
+
 /// Rows of L2-normalized TF-IDF: sublinear term frequency, smoothed inverse
 /// document frequency over the sentences, words of two characters or more.
-fn tfidf(sents: &[String]) -> Vec<Vec<f64>> {
+fn tfidf(sents: &[String]) -> (Vec<Sparse>, usize) {
     let docs: Vec<HashMap<String, usize>> = sents
         .iter()
         .map(|s| {
@@ -155,34 +175,42 @@ fn tfidf(sents: &[String]) -> Vec<Vec<f64>> {
         .iter()
         .map(|&d| ((1.0 + n) / (1.0 + d as f64)).ln() + 1.0)
         .collect();
-    docs.iter()
+    let rows = docs
+        .iter()
         .map(|d| {
-            let mut v = vec![0.0; vocab.len()];
-            for (w, &count) in d {
-                let j = index[w];
-                #[expect(clippy::cast_precision_loss, reason = "counts are far below 2^52")]
-                let tf = 1.0 + (count as f64).ln();
-                v[j] = tf * idf[j];
-            }
-            let length = norm2(&v);
+            let mut v: Sparse = d
+                .iter()
+                .map(|(w, &count)| {
+                    let j = index[w];
+                    #[expect(clippy::cast_precision_loss, reason = "counts are far below 2^52")]
+                    let tf = 1.0 + (count as f64).ln();
+                    (j, tf * idf[j])
+                })
+                .collect();
+            v.sort_unstable_by_key(|&(j, _)| j);
+            let length = v.iter().map(|(_, x)| x * x).sum::<f64>().sqrt();
             if length > 0.0 {
-                for x in &mut v {
+                for (_, x) in &mut v {
                     *x /= length;
                 }
             }
-            // The reference divides once more by (length + 1e-9); keep it bit for bit.
-            let length = norm2(&v) + 1e-9;
-            for x in &mut v {
+            // The reference divided once more by (length + 1e-9); kept for stable output.
+            let length = v.iter().map(|(_, x)| x * x).sum::<f64>().sqrt() + 1e-9;
+            for (_, x) in &mut v {
                 *x /= length;
             }
             v
         })
-        .collect()
+        .collect();
+    (rows, vocab.len())
 }
 
 /// Greedy MMR: relevance to the centroid minus similarity to what is already chosen.
-fn pick(vecs: &[Vec<f64>], centroid: &[f64], sents: &[String]) -> String {
-    let rel: Vec<f64> = vecs.iter().map(|v| dot(v, centroid)).collect();
+fn pick(vecs: &[Sparse], centroid: &[f64], sents: &[String]) -> String {
+    let rel: Vec<f64> = vecs
+        .iter()
+        .map(|v| v.iter().map(|&(j, x)| x * centroid[j]).sum())
+        .collect();
     let mut chosen: Vec<usize> = Vec::new();
     let mut words = 0;
     while chosen.len() < sents.len() {
@@ -193,8 +221,7 @@ fn pick(vecs: &[Vec<f64>], centroid: &[f64], sents: &[String]) -> String {
                 .map(|&j| dot(&vecs[i], &vecs[j]))
                 .fold(0.0, f64::max);
             // Rounded so exact ties go to the earlier sentence whatever the summation order.
-            let score = ((1.0 - DIVERSITY) * rel[i] - DIVERSITY * redundancy) * 1e9;
-            let score = score.round();
+            let score = (((1.0 - DIVERSITY) * rel[i] - DIVERSITY * redundancy) * 1e9).round();
             if best.is_none_or(|(s, _)| score > s) {
                 best = Some((score, i));
             }
@@ -215,10 +242,19 @@ fn pick(vecs: &[Vec<f64>], centroid: &[f64], sents: &[String]) -> String {
         .join(" ")
 }
 
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
-fn norm2(v: &[f64]) -> f64 {
-    dot(v, v).sqrt()
+/// Dot product of two term-sorted sparse rows.
+fn dot(a: &Sparse, b: &Sparse) -> f64 {
+    let (mut i, mut j, mut sum) = (0, 0, 0.0);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                sum += a[i].1 * b[j].1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    sum
 }

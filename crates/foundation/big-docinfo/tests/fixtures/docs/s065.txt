@@ -1,0 +1,53 @@
+CASCADE VALLEY CLINICAL LABORATORIES
+4120 Meridian Avenue N, Seattle, WA 98103  |  CLIA ID 50D0000000
+Laboratory Director: Howard P. Lindholm, MD  |  Client Services (206) 555-0175
+
+                          LABORATORY REPORT - FINAL
+
+Patient: OKAFOR, BENJAMIN CHUKWUEMEKA        Sex: M     Age: 67 Y
+DOB: 11/03/1958                              Patient ID: CV-00418827
+Ordering Provider: Rachel M. Tanaka, ARNP    Accession: 26-251-07733
+Clinic: Greenwood Family Medicine            Fasting: Yes (12 h)
+Collected: 09/08/2026 07:48 AM               Received: 09/08/2026 10:15 AM
+Reported: 09/09/2026 02:31 PM
+
+-------------------------------------------------------------------------
+TEST                         RESULT      FLAG   UNITS        REF. INTERVAL
+-------------------------------------------------------------------------
+COMPREHENSIVE METABOLIC PANEL
+Glucose                      131         H      mg/dL        70-99
+BUN                          24          H      mg/dL        8-23
+Creatinine                   1.38        H      mg/dL        0.70-1.30
+eGFR (CKD-EPI 2021)          55          L      mL/min/1.73  >59
+Sodium                       139                mmol/L       136-145
+Potassium                    4.9                mmol/L       3.5-5.1
+Chloride                     103                mmol/L       98-107
+CO2                          25                 mmol/L       22-29
+Calcium                      9.4                mg/dL        8.6-10.3
+Total Protein                7.1                g/dL         6.0-8.3
+Albumin                      4.2                g/dL         3.5-5.2
+ALT                          28                 U/L          7-55
+AST                          24                 U/L          8-48
+
+HEMOGLOBIN A1c
+Hemoglobin A1c               7.4         H      %            <5.7
+Estimated average glucose    166                mg/dL
+
+LIPID PANEL
+Cholesterol, total           172                mg/dL        <200
+Triglycerides                189         H      mg/dL        <150
+HDL cholesterol              38          L      mg/dL        >39
+LDL cholesterol (calc.)      96                 mg/dL        <100
+
+URINE ALBUMIN/CREATININE RATIO
+Albumin/Creatinine ratio     74          H      mg/g         <30
+-------------------------------------------------------------------------
+INTERPRETIVE NOTES
+HbA1c 6.5% or higher is consistent with diabetes (ADA). An eGFR of 45-59
+with albuminuria of 30-300 mg/g corresponds to CKD stage G3a/A2 if
+persistent for more than 3 months; repeat testing is recommended.
+
+H = above reference interval   L = below reference interval
+Electronically verified by: Sofia Brennan-Ruiz, MLS(ASCP)
+Results were called to the ordering provider's office on 09/09/2026.
+Page 1 of 1

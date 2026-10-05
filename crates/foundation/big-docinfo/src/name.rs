@@ -4,62 +4,50 @@
 //! The suggested file name: `kind-subject-date.ext`, built from fields, never guessed.
 //!
 //! Parts with no evidence are left out; the extension is the one the file already
-//! has. Words are folded to lowercase ASCII where the language allows and joined
-//! with hyphens, so the name carries no character a file system or a shell would
-//! trip on.
+//! has. Words keep their letters as written — `relatório`, `für`, `договор`,
+//! `房屋租赁合同` — lowercased and joined with hyphens, so the name carries no
+//! character a file system or a shell would trip on.
 
-use crate::text::norm;
+use crate::text::{fold_lower, is_word};
 
 /// Longest name before the extension is added, in characters.
 const MAX_NAME: usize = 70;
+/// Words dropped right after a kind word the title repeats ("Ata *da* reunião").
+const LINKING: &[&str] = &["de", "da", "do", "das", "dos", "del", "of"];
 
-/// Word used in the name for kinds whose slug is not a good word on its own.
-fn kind_word(kind: &str) -> &str {
-    match kind {
-        "nota_fiscal" => "nota-fiscal",
-        "fatura_boleto" => "fatura",
-        "ato_normativo" => "norma",
-        "oficio_carta" => "oficio",
-        "declaracao_certidao" => "declaracao",
-        "anotacoes" => "notas",
-        other => other,
-    }
+/// Lowercased words of `s`, everything that is not a letter or a digit dropped.
+fn words(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !is_word(c))
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
-fn slug(s: &str) -> String {
-    norm(s).replace(' ', "-")
-}
-
-/// Builds `kind-subject-date.ext`. With nothing known the stem is `documento`.
-#[must_use]
+/// Builds `kind-subject-date.ext`; `kind` is the word for the kind in the
+/// document's language. With nothing known the stem is `documento`.
 pub fn suggested_name(
     kind: Option<&str>,
     subject: Option<&str>,
     date: Option<&str>,
     ext: &str,
 ) -> String {
-    let word = slug(kind.map_or("", kind_word));
-    let mut topic = slug(subject.unwrap_or(""));
-    // "ata" + "ata-da-reuniao-..." must not become "ata-ata-da-reuniao-...".
-    let mut prefixes = vec![word.clone(), slug(kind.unwrap_or("")).replace('_', "-")];
-    prefixes.retain(|p| !p.is_empty());
-    prefixes.sort_by_key(|p| std::cmp::Reverse(p.len()));
-    prefixes.dedup();
-    for prefix in &prefixes {
-        if topic == *prefix || topic.starts_with(&format!("{prefix}-")) {
-            let rest = topic[prefix.len()..].trim_start_matches('-');
-            let rest = ["de-", "da-", "do-", "das-", "dos-"]
-                .iter()
-                .find_map(|article| rest.strip_prefix(article))
-                .unwrap_or(rest);
-            topic = rest.to_owned();
-            break;
+    let kind_words = words(kind.unwrap_or(""));
+    let mut topic = words(subject.unwrap_or(""));
+    // "relatório" + "Relatório trimestral" must not become "relatório-relatório-trimestral".
+    let folded = |w: &[String]| w.iter().map(|x| fold_lower(x)).collect::<Vec<_>>();
+    if !kind_words.is_empty() && folded(&topic).starts_with(&folded(&kind_words)) {
+        topic.drain(..kind_words.len());
+        if topic
+            .first()
+            .is_some_and(|w| LINKING.contains(&fold_lower(w).as_str()))
+        {
+            topic.remove(0);
         }
     }
-    let stem = [word.as_str(), topic.as_str()]
-        .iter()
-        .filter(|p| !p.is_empty())
-        .copied()
+    let stem = kind_words
+        .into_iter()
+        .chain(topic)
         .collect::<Vec<_>>()
         .join("-");
     let date = date.unwrap_or("");

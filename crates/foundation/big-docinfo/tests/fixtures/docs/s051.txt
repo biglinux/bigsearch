@@ -1,0 +1,49 @@
+SILVER CREEK ELECTRIC COOPERATIVE
+P.O. Box 4180, Abilene, TX 79608   |   Member Services (325) 555-0190
+www.silvercreekcoop.example
+
+                         ELECTRIC SERVICE STATEMENT
+
+Account Number: 30-118742-02            Statement Date: 08/07/2026
+Member: GLORIA M. ESCALANTE             Amount Due: $187.54
+Service Address: 1406 Bluebonnet Trail, Tuscola, TX 79562
+Rate: Residential Service (RS-1)        Due Date: 09/01/2026
+
+ACCOUNT SUMMARY
+Previous Balance ........................................ $  164.21
+Payment Received 07/24/2026 - Thank You ................. -$ 164.21
+Balance Forward ......................................... $    0.00
+Current Charges ......................................... $  187.54
+TOTAL AMOUNT DUE ........................................ $  187.54
+
+METER READING
+Meter No.   Service Period            Days   Previous   Present   kWh Used
+88231947    07/02/2026 - 08/03/2026    32     51,204     52,821     1,617
+
+CURRENT CHARGES
+Customer Charge ................................................ $  32.00
+Energy Charge  1,617 kWh x $0.0841 ............................. $ 135.99
+Power Cost Adjustment 1,617 kWh x $0.0062 ...................... $  10.03
+Rural Development Fund ......................................... $   1.00
+Sales Tax (Tuscola, 2%) ........................................ $   3.58
+Franchise Fee .................................................. $   4.94
+Total Current Charges .......................................... $ 187.54
+
+USAGE HISTORY (kWh)
+Aug-25  1,702 | Sep-25 1,388 | Oct-25  904 | Nov-25  811 | Dec-25 1,046
+Jan-26  1,233 | Feb-26 1,102 | Mar-26  862 | Apr-26  790 | May-26 1,021
+Jun-26  1,455 | Jul-26 1,540 | Aug-26 1,617
+Average daily use this period: 50.5 kWh (same period last year: 53.2 kWh)
+
+IMPORTANT MESSAGES
+- Payments received after the due date are subject to a 5% late fee.
+  Accounts unpaid 15 days after the due date may be scheduled for
+  disconnection.
+- The 2026 Annual Meeting of Members will be held on 09/19/2026 at the
+  Taylor County Expo Center. Register at the door for a $10 bill credit.
+- Capital credits of $28.40 will be retired to your account in December.
+
+--------------------------- detach and return ---------------------------
+Account 30-118742-02     Due 09/01/2026     Amount Due $187.54
+Amount Enclosed $__________
+Make checks payable to Silver Creek Electric Cooperative
