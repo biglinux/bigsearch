@@ -331,6 +331,18 @@ pub fn open_for_queries(dir: &Path) -> Result<Index> {
     open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open_for_queries)
 }
 
+/// A reader for answering queries on an index from [`open_for_queries`]: its
+/// cache of decompressed store blocks holds 8 per segment instead of tantivy's
+/// 100. A query reads only the documents of its page, a few blocks. Measured
+/// on fresh daemons after the same 60 queries: 23.6 MB of anonymous memory
+/// against 26.2-27.0 MB.
+pub fn query_reader(index: &Index) -> Result<tantivy::IndexReader> {
+    Ok(index
+        .reader_builder()
+        .doc_store_cache_num_blocks(8)
+        .try_into()?)
+}
+
 fn open_read_only_with(
     dir: &Path,
     directory: fn(&Path) -> tantivy::Result<crate::nosync_dir::NoFsyncDirectory>,

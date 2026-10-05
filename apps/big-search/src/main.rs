@@ -706,10 +706,10 @@ fn cmd_daemon() -> Result<()> {
     // Their own instances of the indexes, mapped for random reads: the watcher's
     // keep read-ahead for merges and scans (see `index::open_for_queries`).
     let name_reader = index::open_for_queries(&config::index_dir())
-        .and_then(|index| Ok(index.reader()?))
+        .and_then(|index| index::query_reader(&index))
         .context("open name index reader")?;
     let content_reader = index::open_for_queries(&config::content_index_dir())
-        .and_then(|index| Ok(index.reader()?))
+        .and_then(|index| index::query_reader(&index))
         .context("open content index reader")?;
     ipc::serve(
         name_reader,
@@ -1123,8 +1123,11 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
             let origin_reader = s
                 .include_origin
                 .then(|| origin::OriginReader::new(config::origin_db_path()));
-            let name_reader = index.reader()?;
-            let content_reader = content_index.as_ref().map(|i| i.reader()).transpose()?;
+            let name_reader = index::query_reader(&index)?;
+            let content_reader = content_index
+                .as_ref()
+                .map(index::query_reader)
+                .transpose()?;
             query::run_query(
                 query::QueryIndexes {
                     name: &name_reader,
