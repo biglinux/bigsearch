@@ -63,6 +63,22 @@ pub fn content(path: &Path) -> Option<String> {
     }
 }
 
+/// Like [`content`], but office documents keep their paragraphs as lines and their
+/// words whole. For readers that need the document's layout (`big-docinfo` looks
+/// for a title line); the search index keeps using [`content`].
+pub fn content_with_lines(path: &Path) -> Option<String> {
+    let ext = ext_of(path)?;
+    if is_office_ext(&ext) {
+        if exceeds_input_cap(path) {
+            return None;
+        }
+        let file = std::fs::File::open(path).ok()?;
+        office_text_with(std::io::BufReader::new(file), &ext, xml_text_lines)
+    } else {
+        content(path)
+    }
+}
+
 /// Extract text for a file identified by content sniffing (no usable extension):
 /// PDF via `pdftotext`, anything `text/*` as plain text. Used by the metadata
 /// pass so an extension-less document is still full-text searchable.
@@ -178,6 +194,16 @@ pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
     reader: R,
     ext: &str,
 ) -> Option<String> {
+    office_text_with(reader, ext, xml_text)
+}
+
+/// The capped, entry-scoped zip walk shared by both text shapes; `walk` turns one
+/// XML part into text.
+fn office_text_with<R: std::io::Read + std::io::Seek>(
+    reader: R,
+    ext: &str,
+    walk: fn(&[u8], &mut String),
+) -> Option<String> {
     let mut zip = zip::ZipArchive::new(reader).ok()?;
 
     // Per-part decompressed size is capped below, but the central directory is
@@ -216,7 +242,7 @@ pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
         {
             continue;
         }
-        xml_text(&xml, &mut out);
+        walk(&xml, &mut out);
         if out.len() >= cap {
             truncate_to_char_boundary(&mut out, cap);
             break;
@@ -505,6 +531,62 @@ pub fn xml_text(xml: &[u8], out: &mut String) {
 /// Bytes that are not valid UTF-8 are read lossily rather than dropped: an
 /// office part is UTF-8 by specification, so this only happens to a damaged
 /// file, and a damaged file should still give up whatever text it has.
+/// Text of an OOXML/ODF part as the document lays it out: a line per paragraph or
+/// heading, line breaks and tabs kept, and the runs of a paragraph joined as
+/// written — Word splits words across runs, so a space between runs would break
+/// them. Character and predefined entity references are decoded. Field codes,
+/// text deleted under change tracking and comments are not the document's text.
+pub fn xml_text_lines(xml: &[u8], out: &mut String) {
+    use quick_xml::events::Event;
+    let hidden = |name: &[u8]| matches!(name, b"w:instrText" | b"w:delText" | b"office:annotation");
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut hidden_depth = 0usize;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) if hidden(e.name().as_ref()) => hidden_depth += 1,
+            Ok(Event::End(e)) if hidden(e.name().as_ref()) => {
+                hidden_depth = hidden_depth.saturating_sub(1)
+            }
+            Ok(Event::Text(_) | Event::GeneralRef(_) | Event::End(_) | Event::Empty(_))
+                if hidden_depth > 0 => {}
+            Ok(Event::Text(e)) => match e.decode() {
+                Ok(text) => out.push_str(&text),
+                Err(_) => out.push_str(&String::from_utf8_lossy(&e)),
+            },
+            Ok(Event::GeneralRef(r)) => {
+                if let Ok(Some(c)) = r.resolve_char_ref() {
+                    out.push(c);
+                } else if let Ok(name) = r.decode() {
+                    out.push_str(match name.as_ref() {
+                        "amp" => "&",
+                        "lt" => "<",
+                        "gt" => ">",
+                        "quot" => "\"",
+                        "apos" => "'",
+                        _ => "",
+                    });
+                }
+            }
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                b"w:p" | b"text:p" | b"text:h" | b"a:p" => out.push('\n'),
+                b"w:tc" | b"table:table-cell" => out.push('\t'),
+                _ => {}
+            },
+            Ok(Event::Empty(e)) => match e.name().as_ref() {
+                b"w:br" | b"w:cr" | b"text:line-break" => out.push('\n'),
+                b"w:tab" | b"text:tab" => out.push('\t'),
+                b"text:s" => out.push(' '),
+                b"w:p" | b"text:p" | b"text:h" => out.push('\n'),
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
 fn append_decoded(event: &quick_xml::events::BytesText<'_>, out: &mut String, skip_empty: bool) {
     let decoded = event.decode().map_or_else(
         |_| String::from_utf8_lossy(event).into_owned(),
@@ -522,6 +604,21 @@ fn append_decoded(event: &quick_xml::events::BytesText<'_>, out: &mut String, sk
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Paragraphs become lines, a word Word split across runs stays whole, and
+    /// entity references come back as characters.
+    #[test]
+    fn office_lines_keep_paragraphs_and_whole_words() {
+        let docx = br#"<w:document><w:body><w:p><w:r><w:instrText> XE "index" </w:instrText></w:r><w:r><w:t>Re</w:t></w:r><w:r><w:delText>xx</w:delText></w:r><w:r><w:t>lat&#243;rio</w:t></w:r></w:p><w:p><w:r><w:t xml:space="preserve">Lopes &amp; Filhos</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>Curitiba</w:t></w:r></w:p></w:body></w:document>"#;
+        let mut out = String::new();
+        xml_text_lines(docx, &mut out);
+        assert_eq!(out, "Relatório\nLopes & Filhos\nCuritiba\n");
+
+        let odt = br#"<office:text><text:h>Ata da reuni&#227;o<office:annotation><text:p>nota</text:p></office:annotation></text:h><text:p>Pauta<text:tab/>1<text:s/>item</text:p></office:text>"#;
+        let mut out = String::new();
+        xml_text_lines(odt, &mut out);
+        assert_eq!(out, "Ata da reunião\nPauta\t1 item\n");
+    }
 
     /// The one-pass version has to answer exactly what the two-step one did,
     /// including the Greek sigma that changes shape at the end of a word.
