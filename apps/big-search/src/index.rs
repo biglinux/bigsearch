@@ -5,7 +5,9 @@ use crate::state::State;
 use anyhow::{Context, Result};
 use std::path::Path;
 use tantivy::indexer::IndexWriterOptions;
-use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value};
+use tantivy::schema::{
+    Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
+};
 use tantivy::tokenizer::{
     AsciiFoldingFilter, LowerCaser, NgramTokenizer, RemoveLongFilter, TextAnalyzer,
 };
@@ -60,6 +62,10 @@ fn build_name_schema() -> Schema {
     // The media type (see `mime`), then its `major/*` group: "every video" is
     // one term, extension or not. Stored for the hits to carry.
     sb.add_text_field("mime", raw_identifier_options(true));
+    // The day the file last changed, for ranking recent files first among
+    // equal matches. A day and not the second, so saving a file again the same
+    // day leaves its name document alone (see `scan::name_doc_stale`).
+    sb.add_u64_field("mtime_day", NumericOptions::default().set_fast());
     sb.build()
 }
 
@@ -179,6 +185,7 @@ pub struct Fields {
     pub dir: Field,
     pub ext: Field,
     pub mime: Field,
+    pub mtime_day: Field,
 }
 
 /// Resolved field handles for the content index schema.
@@ -196,6 +203,7 @@ pub fn fields(index: &Index) -> Result<Fields> {
         dir: schema.get_field("dir").context("field dir")?,
         ext: schema.get_field("ext").context("field ext")?,
         mime: schema.get_field("mime").context("field mime")?,
+        mtime_day: schema.get_field("mtime_day").context("field mtime_day")?,
     })
 }
 

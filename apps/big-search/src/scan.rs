@@ -260,6 +260,15 @@ pub fn add_name_only(
         if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
             document.add_text(f.ext, ext.to_lowercase());
         }
+        let modified = metadata
+            .map(state::meta_pair)
+            .or_else(|| {
+                std::fs::symlink_metadata(path)
+                    .ok()
+                    .map(|m| state::meta_pair(&m))
+            })
+            .map_or(0, |(mtime, _)| mtime);
+        document.add_u64(f.mtime_day, mtime_day(modified));
         if let Some(mime) = crate::mime::of(path, metadata) {
             // The exact type first: it is the stored value a hit reads.
             document.add_text(f.mime, &mime);
@@ -270,6 +279,19 @@ pub fn add_name_only(
         writer.add_document(document)?;
     }
     Ok(())
+}
+
+/// The day (since the epoch, UTC) a modification time falls on.
+pub fn mtime_day(mtime_secs: i64) -> u64 {
+    u64::try_from(mtime_secs.div_euclid(86_400)).unwrap_or(0)
+}
+
+/// Whether the name document of a path needs writing: the path is new, or it
+/// changed on another day than the one its document records. A name document
+/// holds the name, the folders, the type and the day of the last change, so a
+/// file saved again the same day keeps it and costs the name index nothing.
+pub fn name_doc_stale(recorded: Option<(i64, u64)>, mtime: i64) -> bool {
+    recorded.is_none_or(|(old, _)| mtime_day(old) != mtime_day(mtime))
 }
 
 /// Drop any document for `path` (the `path` field is a single raw token).
@@ -294,10 +316,9 @@ pub fn path_term(f: &Fields, path: &Path) -> Term {
     Term::from_field_text(f.path, &path.to_string_lossy())
 }
 
-/// What a cache-aware reconcile actually touched. A name document only holds
-/// `path`/`name`/`source`, so a metadata-only change (same path, new
-/// mtime/size) updates the state cache and schedules content work without
-/// rewriting the name index at all — `index_changed` demands a Tantivy commit,
+/// What a cache-aware reconcile actually touched. A metadata-only change (same
+/// path, new mtime/size, same day) updates the state cache and schedules
+/// content work without rewriting the name index at all — `index_changed` demands a Tantivy commit,
 /// `state_changed` a state persist + content backfill.
 #[derive(Clone, Copy, Default)]
 pub struct ReconcileOutcome {
@@ -356,7 +377,7 @@ pub fn reconcile_subtree_inline(
         if recorded == Some((mtime, size)) {
             continue;
         }
-        if recorded.is_none() {
+        if name_doc_stale(recorded, mtime) {
             upsert_path(writer, f, path, Some(&md))?;
             outcome.index_changed = true;
         }
@@ -406,9 +427,9 @@ pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncO
             if recorded == Some((mtime, size)) {
                 continue; // doc (and body) already current
             }
-            if recorded.is_none() {
-                // New path → index its name. A known path with new mtime/size
-                // keeps its identical name doc; only content work is scheduled.
+            if name_doc_stale(recorded, mtime) {
+                // A new path, or one changed on another day: (re)index its name.
+                // Otherwise only content work is scheduled.
                 delete_path(&writer, &f, path);
                 add_name_only(&writer, &f, path, Some(&md))?;
             }
@@ -476,7 +497,7 @@ pub fn reconcile_inline(
             if recorded == Some((mtime, size)) {
                 continue;
             }
-            if recorded.is_none() {
+            if name_doc_stale(recorded, mtime) {
                 upsert_path(writer, f, path, Some(&md))?;
                 outcome.index_changed = true;
             }

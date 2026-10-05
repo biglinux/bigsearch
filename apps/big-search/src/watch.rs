@@ -937,10 +937,10 @@ fn reconcile(
             if recorded == Some((mtime, size)) {
                 continue; // metadata-only event (e.g. ATTRIB) → nothing to reindex
             }
-            if recorded.is_none() {
-                // New path → index its name. A known path that merely grew or
-                // was rewritten keeps its identical name doc (content work is
-                // scheduled through the state change below).
+            if scan::name_doc_stale(recorded, mtime) {
+                // A new path, or one changed on another day: (re)index its name.
+                // A file rewritten the same day keeps its name doc (content
+                // work is scheduled through the state change below).
                 scan::upsert_path(writer, f, &path, Some(&metadata))?;
                 outcome.index_changed = true;
             }

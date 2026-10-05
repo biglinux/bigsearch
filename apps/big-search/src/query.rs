@@ -276,14 +276,29 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
     // Over-fetch for the post-filter, but cap the candidate pool so a huge
     // `limit` (e.g. -a) doesn't allocate an enormous TopDocs heap.
     let candidate_limit = limit.saturating_mul(4).clamp(40, 50_000);
+    // The day of the last change breaks ties, and only ties: among equal
+    // matches — the hundreds of "1.png" — the newest first instead of the
+    // index's order. Measured as a stronger factor on 165 known-item queries
+    // it moved 42 of them, as many down as up.
     let candidates = searcher.search(
         &query,
-        &TopDocs::with_limit(candidate_limit).order_by_score(),
+        &TopDocs::with_limit(candidate_limit).tweak_score(
+            move |segment: &tantivy::SegmentReader| {
+                let days = segment
+                    .fast_fields()
+                    .u64("mtime_day")
+                    .ok()
+                    .map(|column| column.first_or_default_col(0));
+                move |doc: tantivy::DocId, score: tantivy::Score| {
+                    (score, days.as_ref().map_or(0, |days| days.get_val(doc)))
+                }
+            },
+        ),
     )?;
 
     let mut ranked: Vec<(NameMatch, Hit)> = Vec::with_capacity(limit.min(1024));
     let mut seen_paths = HashSet::with_capacity(limit.min(1024));
-    for (score, addr) in candidates {
+    for ((score, _), addr) in candidates {
         let doc: TantivyDocument = searcher.doc(addr)?;
         let Some(path) = doc.get_first(f.path).and_then(|v| v.as_str()) else {
             continue;
@@ -1027,6 +1042,35 @@ mod tests {
                 "xrelatoriox.txt"
             ]
         );
+    }
+
+    /// Among names that match equally, the one changed most recently first.
+    #[test]
+    fn equal_names_rank_newest_first() {
+        let dir = std::env::temp_dir().join(format!("lsearch-recent-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let day = std::time::Duration::from_secs(86_400);
+        let now = std::time::SystemTime::now();
+        let mut paths = Vec::new();
+        for (folder, age_days) in [("old", 400), ("new", 1), ("mid", 30)] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+            let path = dir.join(folder).join("1.png");
+            let file = std::fs::File::create(&path).unwrap();
+            file.set_modified(now - day * age_days).unwrap();
+            paths.push(path.to_string_lossy().into_owned());
+        }
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let index = index_with("recent", &refs);
+        let found: Vec<String> = search(&index, "1", &Filter::default(), 10)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        assert_eq!(
+            found,
+            [paths[1].clone(), paths[2].clone(), paths[0].clone()]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
