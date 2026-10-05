@@ -146,8 +146,17 @@ the name index: the content rows stay unless the content index is empty.
 so far (`query::last_word_query`): it also matches the indexed words it begins,
 most frequent first, within 32 words and 50 000 documents, the exact word boosted
 — as-you-type, and Portuguese/Russian suffixes ("relatorio" → "relatorios",
-"квартал" → "квартале"). It does not cover the reverse (a plural query, a
-singular document); that is the stem study still to do. On the i3's 5400 rpm disk
+"квартал" → "квартале"). Every word, wherever it stands, also matches its plural
+or singular by suffix rules on folded words (`query::inflections`: pt/es -ões,
+-ais, -eis, -ns, -res, -zes and -s, en -es after x/ch/sh), ranked below the word
+as typed. Snowball was measured on this index's own 5.5 million-term vocabulary
+first: on folded words it joined none of 670 -ões, 421 -ais, 261 -eis and 194
+-ns pairs to their singulars, merged "casa" with "caso", "casado" and "case",
+and in Russian did not even join "квартал" to "квартале"; the rules joined every
+such pair, in both directions. Totals went from 363 to the ceiling for
+"relatorios", 898 to 1509 for "acoes", 367 to 764 for "responsaveis", with no
+change in latency. Russian inflection beyond the last-word prefix ("кварталы" →
+"квартале") is not covered. On the i3's 5400 rpm disk
 the expansion cost nothing measurable cold ("zz relatorio" 1013 ms against
 "relatorio zz" 1019 ms, both dominated by opening the indexes), and a tighter
 budget (16/10 000) changed no timing while dropping Portuguese words from short
