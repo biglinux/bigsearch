@@ -125,7 +125,7 @@ static ARTICLE_TYPE: LazyLock<Regex> = LazyLock::new(|| {
         r"|clinical trials?(?: and observations)?|abstract|open access|type \w+|original paper",
         r"|clinical guidelines|check for updates|contents lists available.*|articles? in press",
         r"|original (?:research|investigation)|research paper|methodological article|state of the art",
-        r"|isth ssc communication|add your logos here",
+        r"|isth ssc communication|add your logos here|(?:poster |your )?title goes her\s?e|insert (?:your )?title(?: here)?",
         r"|(?:\w+ )?investiga(?:tion|[cç][aã]o|ci[oó]n)(?: \w+)?",
         // a few words ending on the kind of piece: "Policy Brief", "Spotlight Review
         // Article", "Original Clinical Research Report" (an audit report is a report)
@@ -275,13 +275,23 @@ pub fn title(text: &str, prominent: &[String]) -> Option<String> {
         return Some(lines[at].to_owned());
     }
     // The largest words on the page are the title a reader sees — when they
-    // read as one. A decorative initial ("C") is not words; past the largest,
-    // smaller type is section headings, and position decides instead.
+    // read as one. Past a decorative initial ("C") or a journal's label, name or
+    // banner set larger, the next size; past anything else, smaller type is
+    // section headings and authors.
     if let Some(line) = prominent
         .iter()
-        .find(|line| line.chars().filter(|c| c.is_alphabetic()).count() >= 2)
         // a section label set as large as the title, on the same line
         .map(|line| without_article_type(line))
+        // Past what a journal or a translator sets above an article's title; a
+        // letterhead or a poster's section headings set largest mean the title
+        // is not the largest type, and position decides.
+        .find(|line| {
+            line.chars().filter(|c| c.is_alphabetic()).count() >= 2
+                && !ARTICLE_TYPE.is_match(line)
+                && !MASTHEAD.is_match(line)
+                && !TRANSLATION_BANNER.is_match(line)
+                && !is_letter_spaced(line)
+        })
         .filter(|line| {
             // words, not a figure ("94 KB")
             (line
@@ -349,6 +359,13 @@ fn continuation<'a>(lines: &[&'a str], at: usize) -> Option<&'a str> {
 
 /// The sections of a paper or poster, in the languages read here.
 const SECTION_WORDS: &[&str] = &[
+    "population",
+    "patients",
+    "interpretation",
+    "summary",
+    "limitations",
+    "acknowledgements",
+    "acknowledgments",
     "introduction",
     "background",
     "aim",
@@ -386,6 +403,12 @@ const JOINING: &[&str] = &[
     "los", "na", "nas", "no", "nos", "o", "of", "on", "or", "os", "ou", "para", "por", "the", "to",
     "und", "von", "y", "zu",
 ];
+
+/// Whether what follows the first colon starts in lower case, as a subtitle does.
+fn subtitled(line: &str) -> bool {
+    line.split_once(':')
+        .is_some_and(|(_, rest)| rest.trim_start().starts_with(char::is_lowercase))
+}
 
 /// A word set in spaced capitals, "EDI T OR I A L": words of a letter or two.
 fn is_letter_spaced(line: &str) -> bool {
@@ -482,6 +505,14 @@ fn without_article_type(line: &str) -> &str {
 /// What a journal prints above a title — its section, its name — a lone
 /// capitalized word ("TRANSPLANTATION"), and a poster's section headings set
 /// side by side ("Introduction Results").
+/// Section headings side by side: "Introduction Results", "Population and Methods".
+fn is_section_heading(line: &str) -> bool {
+    line.split_whitespace().all(|word| {
+        SECTION_WORDS
+            .contains(&fold_lower(word.trim_matches(|c: char| !c.is_alphanumeric())).as_str())
+    })
+}
+
 fn is_above_title(line: &str) -> bool {
     // A letterhead, in capitals or short, names the issuer, not the document.
     let cased_lower = line
@@ -490,10 +521,8 @@ fn is_above_title(line: &str) -> bool {
     if LETTERHEAD.is_match(&norm(line)) && (!cased_lower || word_count(line) <= 6) {
         return true;
     }
-    line.split_whitespace().all(|word| {
-        SECTION_WORDS
-            .contains(&fold_lower(word.trim_matches(|c: char| !c.is_alphanumeric())).as_str())
-    }) || ARTICLE_TYPE.is_match(line)
+    is_section_heading(line)
+        || ARTICLE_TYPE.is_match(line)
         || MASTHEAD.is_match(line)
         || (word_count(line) == 1
             && line.chars().any(char::is_uppercase)
@@ -568,7 +597,9 @@ fn looks_like_title(line: &str, at_top: bool) -> bool {
         && !is_author_line(line)
         // a long line has to read as a title from its first letter
         && (word_count(line) <= 15 || line.starts_with(char::is_uppercase))
-        && !FIELD.is_match(line)
+        // "Nome: Maria" is a field; "Consultative hematology 1: perioperative
+        // management concepts" a title and its subtitle.
+        && (!FIELD.is_match(line) || subtitled(line))
         && !TWO_SENTENCES.is_match(line)
         && !CODE.is_match(line)
         && !CITATION.is_match(line)

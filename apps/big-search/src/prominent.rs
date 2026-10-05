@@ -32,8 +32,13 @@ pub fn prominent_lines(path: &Path, ext: &str) -> Vec<String> {
         "pdf" => crate::extract_pdf::read_pdf_first_page_layout(path)
             .map(|xhtml| ranked(pdf_lines(&xhtml), true))
             .unwrap_or_default(),
-        "odt" => ranked(odf_lines(path), false),
-        "docx" => ranked(docx_lines(path), false),
+        // Below an office document's largest type come its section headings
+        // ("QUADRO RESUMO", "Introdução"): only the largest is a title there.
+        "odt" => ranked(odf_lines(path), false).into_iter().take(1).collect(),
+        "docx" => ranked(docx_lines(path), false)
+            .into_iter()
+            .take(1)
+            .collect(),
         "pptx" => pptx_title(path).into_iter().collect(),
         "odp" => odp_title(path).into_iter().collect(),
         _ => Vec::new(),
@@ -42,7 +47,8 @@ pub fn prominent_lines(path: &Path, ext: &str) -> Vec<String> {
 
 /// Runs of consecutive lines in one size (with `join`; otherwise each line is
 /// its own run), kept when set larger than the body — the size that carries
-/// the most characters. When large type is no small part of the opening
+/// the most characters. A largest size shared by three runs or more marks
+/// section headings, and then nothing is kept. When large type is no small part of the opening
 /// (scanned pages, slides saved as text), no size stands out and none is kept.
 fn ranked(lines: Vec<(String, f32)>, join: bool) -> Vec<String> {
     let same = |a: f32, b: f32| (a - b).abs() <= a.max(b) * 0.03;
@@ -61,15 +67,6 @@ fn ranked(lines: Vec<(String, f32)>, join: bool) -> Vec<String> {
     let Some(&(body, _)) = weights.iter().max_by_key(|(_, chars)| *chars) else {
         return Vec::new();
     };
-    let total: usize = weights.iter().map(|(_, chars)| chars).sum();
-    let large: usize = weights
-        .iter()
-        .filter(|(size, _)| *size >= body * PROMINENT)
-        .map(|(_, chars)| chars)
-        .sum();
-    if large * 5 > total {
-        return Vec::new();
-    }
     let mut runs: Vec<(String, f32)> = Vec::new();
     for (text, size) in lines {
         match runs.last_mut() {
@@ -88,6 +85,17 @@ fn ranked(lines: Vec<(String, f32)>, join: bool) -> Vec<String> {
         .collect();
     // Stable: among equal sizes the earlier run stays first.
     prominent.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // The largest size set three times or more is the style of section
+    // headings ("OBJETO", "APRESENTAÇÃO", "Introduction", "Results"), not a title.
+    let top = prominent.first().map_or(0.0, |(_, size)| *size);
+    if prominent
+        .iter()
+        .filter(|(_, size)| same(*size, top))
+        .count()
+        >= 3
+    {
+        return Vec::new();
+    }
     prominent
         .into_iter()
         .take(MAX_RUNS)
@@ -604,17 +612,13 @@ mod tests {
             ranked(lines, true),
             ["Early mobilization after cardiac surgery and length of hospital stay"]
         );
-        // Large type everywhere stands out from nothing.
-        assert!(
-            ranked(
-                vec![
-                    ("Big slide text".to_owned(), 30.0),
-                    ("small".to_owned(), 10.0)
-                ],
-                true
-            )
-            .is_empty()
-        );
+        // Section headings in the largest size: no title stands out.
+        let sections = ["OBJETO", "APRESENTAÇÃO", "ACOMPANHAMENTO"]
+            .iter()
+            .map(|h| ((*h).to_owned(), 14.0))
+            .chain((0..6).map(|i| (format!("Corpo do plano de trabalho, parágrafo {i}."), 10.0)))
+            .collect();
+        assert!(ranked(sections, false).is_empty());
         // One size throughout: nothing stands out.
         assert!(
             ranked(

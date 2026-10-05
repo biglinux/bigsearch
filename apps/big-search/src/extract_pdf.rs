@@ -2,8 +2,9 @@
     clippy::disallowed_methods,
     clippy::disallowed_types,
     reason = "PDF text extraction is the one place the daemon runs another program: \
-              pdftotext under a wall-clock timeout, with RLIMIT_AS set in pre_exec and \
-              its stdout read through a hard cap (see pdftotext_capped)"
+              pdftotext (and, for big-docinfo, pdfinfo) under a wall-clock timeout, with \
+              RLIMIT_AS set in pre_exec and its stdout read through a hard cap \
+              (see poppler_capped)"
 )]
 
 use std::io::Read;
@@ -31,20 +32,48 @@ pub(crate) fn read_pdf(path: &Path) -> Option<String> {
     text_layer(text, cap)
 }
 
-/// Pages read to describe a PDF. Its title, kind and date are in its opening:
+/// Pages read to describe a PDF. Its title, kind and date are in its opening —
 /// on the evaluation corpus ten pages give the answers the whole text gives,
-/// and a 738-page book is read in 74 ms instead of 6 s.
-const DESCRIBED_PAGES: &str = "10";
+/// and a 738-page book is read in 74 ms instead of 6 s — and, past them, a
+/// signature on its last pages ("Goiânia, 06 de janeiro de 2026", page 26).
+const DESCRIBED_PAGES: u32 = 10;
+const CLOSING_PAGES: u32 = 2;
 
 /// The opening pages of a PDF, as [`read_pdf`] reads the whole, plus the title
 /// it declares in its metadata, from the same `pdftotext` run: `-htmlmeta` puts
 /// the metadata in an HTML head (escaped) and the text, unchanged, in a `<pre>`.
 pub(crate) fn read_pdf_titled(path: &Path) -> Option<(String, Option<String>)> {
     let cap = crate::extract::max_extract_bytes();
-    let bytes = pdftotext_capped(path, cap, &["-htmlmeta", "-l", DESCRIBED_PAGES])?;
+    let opening = DESCRIBED_PAGES.to_string();
+    let bytes = pdftotext_capped(path, cap, &["-htmlmeta", "-l", &opening])?;
     let html = String::from_utf8_lossy(&bytes);
     let (title, body) = split_html_meta(&html);
-    Some((text_layer(body.to_owned(), cap)?, title))
+    let mut text = body.to_owned();
+    // pdftotext ends every page with a form feed: as many as the pages read
+    // means there may be more, and only then is the page count worth a process.
+    let read = u32::try_from(text.matches('\u{000C}').count()).unwrap_or(u32::MAX);
+    if read >= DESCRIBED_PAGES
+        && let Some(pages) = page_count(path)
+        && pages > DESCRIBED_PAGES
+    {
+        let first = (pages - CLOSING_PAGES + 1)
+            .max(DESCRIBED_PAGES + 1)
+            .to_string();
+        let last = pages.to_string();
+        if let Some(closing) = pdftotext_capped(path, cap, &["-f", &first, "-l", &last]) {
+            text.push_str(&String::from_utf8_lossy(&closing));
+        }
+    }
+    Some((text_layer(text, cap)?, title))
+}
+
+/// The number of pages `pdfinfo` reports.
+fn page_count(path: &Path) -> Option<u32> {
+    let info = poppler_capped("pdfinfo", path, 64 * 1024, &[])?;
+    String::from_utf8_lossy(&info)
+        .lines()
+        .find_map(|line| line.strip_prefix("Pages:"))
+        .and_then(|n| n.trim().parse().ok())
 }
 
 /// Page 1 as `pdftotext -bbox-layout` lays it out: XHTML with a box for every
@@ -89,6 +118,17 @@ fn text_layer(mut text: String, cap: usize) -> Option<String> {
 }
 
 fn pdftotext_capped(path: &Path, max_bytes: usize, options: &[&str]) -> Option<Vec<u8>> {
+    poppler_capped("pdftotext", path, max_bytes, options)
+}
+
+/// Runs one of the two poppler tools on `path` — `pdftotext` (to stdout) or
+/// `pdfinfo` — with a deadline, an address-space limit and capped output.
+fn poppler_capped(
+    program: &'static str,
+    path: &Path,
+    max_bytes: usize,
+    options: &[&str],
+) -> Option<Vec<u8>> {
     if exceeds_pdf_input_cap(path) {
         return None;
     }
@@ -99,14 +139,14 @@ fn pdftotext_capped(path: &Path, max_bytes: usize, options: &[&str]) -> Option<V
     // case, kill and reap the unguarded child before respawning through
     // timeout(1), so every successful spawn has a wall-clock deadline.
     let use_watchdog = pidfd_supported();
-    let mut child = spawn_pdftotext(path, !use_watchdog, options)?;
+    let mut child = spawn_poppler(program, path, !use_watchdog, options)?;
     let watchdog = if use_watchdog {
         match SubprocessDeadline::arm(&child, Duration::from_secs(pdf_timeout_secs())) {
             Some(watchdog) => Some(watchdog),
             None => {
                 kill_child_tree(&mut child);
                 let _ = child.wait();
-                child = spawn_pdftotext(path, true, options)?;
+                child = spawn_poppler(program, path, true, options)?;
                 None
             }
         }
@@ -165,20 +205,30 @@ fn pdftotext_capped(path: &Path, max_bytes: usize, options: &[&str]) -> Option<V
     Some(bytes)
 }
 
-/// `options` are fixed flags from this file, never caller input.
-fn spawn_pdftotext(path: &Path, use_timeout_wrapper: bool, options: &[&str]) -> Option<Child> {
+/// `program` and `options` are fixed strings from this file, never caller input;
+/// `path` follows `--`, so a file named "-f" stays a file.
+fn spawn_poppler(
+    program: &'static str,
+    path: &Path,
+    use_timeout_wrapper: bool,
+    options: &[&str],
+) -> Option<Child> {
     let mut command = if use_timeout_wrapper {
         let mut wrapped = Command::new("timeout");
-        wrapped.arg(pdf_timeout_secs().to_string()).arg("pdftotext");
+        wrapped.arg(pdf_timeout_secs().to_string()).arg(program);
         wrapped
     } else {
-        Command::new("pdftotext")
+        Command::new(program)
     };
-    command.arg("-q").args(options);
+    let to_stdout = program == "pdftotext";
+    if to_stdout {
+        command.arg("-q");
+    }
+    command.args(options).arg("--").arg(path);
+    if to_stdout {
+        command.arg("-");
+    }
     command
-        .arg("--")
-        .arg(path)
-        .arg("-")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null());

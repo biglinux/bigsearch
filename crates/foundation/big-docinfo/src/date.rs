@@ -144,7 +144,8 @@ static SIGNATURE_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         // Place length is checked in code (`signature_line`): a counted repeat of
         // a Unicode class compiles into that many copies of it.
-        r"^\s*(?:\p{Lu}[\p{L}\p{M} .'/-]{2,},",
+        // "Porto Alegre, ", "Goiânia, GO, " (a state's two letters may follow the city)
+        r"^\s*(?:\p{Lu}[\p{L}\p{M} .'/-]{2,}(?:,\s*[A-Z]{2})?,",
         r"|[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}\p{Hebrew}][\p{L}\p{M} ]*[,，、])",
         r"\s*((em|le|den|am|el|on|the|a)\s+)?$"
     ))
@@ -571,6 +572,7 @@ mod tests {
     fn written_dates_in_shipped_languages() {
         for (text, iso) in [
             ("Porto Alegre, 22 de abril de 2026.", "2026-04-22"),
+            ("Goiânia, GO, 06 de janeiro de 2026.", "2026-01-06"),
             ("Boston, October 4, 2026", "2026-10-04"),
             ("Gdańsk, 4 października 2026", "2026-10-04"),
             ("Москва, 4 октября 2026 г.", "2026-10-04"),
