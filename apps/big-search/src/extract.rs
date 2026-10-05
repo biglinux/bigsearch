@@ -670,8 +670,9 @@ pub(crate) fn compose(text: &str) -> std::borrow::Cow<'_, str> {
 /// The folding of lowercase text that `AsciiFoldingFilter` leaves to others:
 /// combining marks dropped; Russian "ё" written "е", as it mostly is; Greek
 /// without its accents and with final "ς" as "σ"; Arabic alef without hamza,
-/// "ى" as "ي", and no vowel signs or tatweel; traditional Chinese characters
-/// as their simplified forms ("會議" is "会议").
+/// "ى" and Persian "ی" as "ي", Persian "ک" as "ك", "ة" as "ه" (each typed for
+/// the other, by keyboard or by habit), and no vowel signs or tatweel;
+/// traditional Chinese characters as their simplified forms ("會議" is "会议").
 pub(crate) fn fold_script_into(lowered: &str, out: &mut String) {
     for c in lowered.chars() {
         match c {
@@ -686,7 +687,9 @@ pub(crate) fn fold_script_into(lowered: &str, out: &mut String) {
             'ύ' | 'ϋ' | 'ΰ' => out.push('υ'),
             'ώ' => out.push('ω'),
             'أ' | 'إ' | 'آ' | 'ٱ' => out.push('ا'),
-            'ى' => out.push('ي'),
+            'ى' | 'ی' => out.push('ي'),
+            'ک' => out.push('ك'),
+            'ة' => out.push('ه'),
             c => out.push(crate::simplified_chinese::simplified(c)),
         }
     }
@@ -1052,6 +1055,7 @@ mod tests {
             ("Отчёт ЁЛКА", "отчет елка"),
             ("Αναφορά ΟΔΟΣ οδός", "αναφορα οδοσ οδοσ"),
             ("أحمد مُحَمَّد مستشفى", "احمد محمد مستشفي"),
+            ("مدرسة کتاب فارسی", "مدرسه كتاب فارسي"),
             ("中文内容 ABC", "中文内容 abc"),
             ("會議記錄 资料庫", "会议记录 资料库"),
             ("\u{1112}\u{1161}\u{11AB}\u{1100}\u{116E}\u{11A8}", "한국"),

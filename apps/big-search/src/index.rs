@@ -275,6 +275,9 @@ fn register_body_tokenizer(index: &Index) {
 #[derive(Clone)]
 pub struct ScriptFold;
 
+/// The Arabic article and the prepositions that fuse with it, longest first.
+pub(crate) const ARABIC_ARTICLES: &[&str] = &["وال", "بال", "كال", "فال", "ال", "لل"];
+
 impl TokenFilter for ScriptFold {
     type Tokenizer<T: Tokenizer> = ScriptFoldFilter<T>;
 
@@ -322,7 +325,7 @@ impl<T: TokenStream> TokenStream for ScriptFoldStream<'_, T> {
         if self
             .buffer
             .starts_with(|c: char| ('\u{0600}'..='\u{06FF}').contains(&c))
-            && let Some(rest) = ["وال", "بال", "كال", "فال", "ال", "لل"]
+            && let Some(rest) = ARABIC_ARTICLES
                 .iter()
                 .find_map(|article| self.buffer.strip_prefix(article))
                 .filter(|rest| rest.chars().count() >= 3)

@@ -164,8 +164,9 @@ lemma went from 50 % to 94 % found, with 0.33 other documents per query
 instead of 0.15, mostly kin ("фотограф" finding "фотографии"). Stems that
 change inside ("щелчок", "щелчком") stay apart. Content words are folded at index time like names
 (`index::ScriptFold` over `extract::fold_script_into`, then ASCII folding:
-combining marks, ё, Greek accents and ς, Arabic hamza alef, alef maqsura, vowel
-signs, tatweel and article), and the tokenizer keeps combining marks inside a
+combining marks, ё, Greek accents and ς, Arabic hamza alef, alef maqsura and
+Persian yeh, Persian kaf, ta marbuta as heh, vowel signs, tatweel and article),
+and the tokenizer keeps combining marks inside a
 word so a decomposed accent no longer splits it. A query-time variant scheme was built
 first to spare installed machines a re-index; the program is not installed
 anywhere yet, so the one-time re-index won (88 055 documents in about 13 minutes
@@ -204,6 +205,10 @@ zh_CN/zh_TW message pairs that differ only in characters, 0 % were found
 across scripts before and 100 % after. Pairs whose words differ by region
 (文档/文件, 打印/列印, 音频/音訊) went from 9 % to 24 %; joining those needs a
 phrase list, which this does not attempt. Japanese results did not change.
+
+An Arabic word still being typed keeps the article the index dropped, so the
+last word also begins words without it ("اعادة الات" finds "إعادة الاتصال",
+indexed as "اتصال"): Arabic as-you-type queries went from 42 % to 100 %.
 
 The backfill's duty cycle follows the CPU time the service used in a batch, not
 the batch's wall time: at idle priority on a busy machine a 250-file batch took

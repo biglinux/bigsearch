@@ -743,6 +743,16 @@ fn word_query(
         forms.extend(words_beginning(searcher, field, word, |rest| {
             !rest.is_empty()
         })?);
+        // Indexed Arabic words lost their article (`index::ScriptFold`), which
+        // a word still being typed keeps: "الات" is on its way to "الاتصال",
+        // indexed as "اتصال".
+        if let Some(rest) = crate::index::ARABIC_ARTICLES
+            .iter()
+            .find_map(|article| word.strip_prefix(article))
+            .filter(|rest| rest.chars().count() >= 2)
+        {
+            forms.extend(words_beginning(searcher, field, rest, |_| true)?);
+        }
     }
     Ok(with_forms(exact, forms, field, record))
 }
@@ -2077,6 +2087,24 @@ mod tests {
                 .collect();
             got.sort();
             assert_eq!(got, expected, "query {query:?}");
+        }
+    }
+
+    /// An Arabic word typed so far, article included, finds the indexed word
+    /// that lost its article.
+    #[test]
+    fn an_arabic_word_being_typed_keeps_its_article() {
+        let content = content_index_with(
+            "arabic-typing",
+            &[("/h/a.txt", "إعادة الاتصال"), ("/h/b.txt", "مدرسة")],
+        );
+        for (query, expected) in [("اعادة الات", "/h/a.txt"), ("مدرسه", "/h/b.txt")] {
+            let got: Vec<String> = search_content(&content, query, 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect();
+            assert_eq!(got, [expected], "query {query:?}");
         }
     }
 
