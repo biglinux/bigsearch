@@ -16,8 +16,10 @@ const MAX_NAME: usize = 70;
 const LINKING: &[&str] = &["de", "da", "do", "das", "dos", "del", "of"];
 
 /// Lowercased words of `s`, everything that is not a letter or a digit dropped.
+/// Invisible hyphenation points (U+00AD, "rec­om­men­da­tion") join, not split.
 fn words(s: &str) -> Vec<String> {
     s.to_lowercase()
+        .replace(['\u{AD}', '\u{200B}', '\u{2060}'], "")
         .split(|c: char| !is_word(c))
         .filter(|w| !w.is_empty())
         .map(str::to_owned)

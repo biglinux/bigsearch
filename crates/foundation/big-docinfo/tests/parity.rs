@@ -34,7 +34,7 @@ fn bless(docs: &Path, expected: &Path) {
             .as_str()
             .expect("id")
             .to_owned();
-        let got = analyze(&read_doc(&docs.join(format!("{id}.txt"))), "pdf");
+        let got = analyze(&read_doc(&docs.join(format!("{id}.txt"))), "pdf", None);
         let row = serde_json::json!({
             "id": id, "kind": got.kind, "date": got.date, "entity": got.entity,
             "title": got.title, "highlights": got.highlights, "name": got.suggested_name,
@@ -56,7 +56,7 @@ fn mismatches(docs: &Path, expected: &Path) -> (usize, String) {
     for line in lines.lines() {
         let want: Value = serde_json::from_str(line).expect("reference lines are JSON");
         let id = want["id"].as_str().expect("id is a string");
-        let got = analyze(&read_doc(&docs.join(format!("{id}.txt"))), "pdf");
+        let got = analyze(&read_doc(&docs.join(format!("{id}.txt"))), "pdf", None);
         let fields = [
             ("kind", got.kind.map(str::to_owned)),
             ("date", got.date),

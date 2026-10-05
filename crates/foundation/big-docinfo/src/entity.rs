@@ -65,28 +65,70 @@ const PARTY_LINES: usize = 40;
 const HEADER_LINES: usize = 15;
 const TITLE_LINES: usize = 12;
 const FALLBACK_TITLE_LINES: usize = 8;
+/// Lines read for a heading, the bare ones between them included.
+const OPENING_LINES: usize = 30;
+/// How much of the text must bear out a declared title: its first page or so.
+const DECLARED_TITLE_CHARS: usize = 8_000;
 /// "CPF:179…", "Local de pagamento: …" — up to three words and a colon open a
 /// field, not a title ("Compressão zstd em Btrfs: impacto…" is a title).
 /// "…ao todo. Alguém lembrou…", "…disseram na época." — a sentence ends inside or
 /// at the end of the line: running text ("S.A." at the end is still a name).
 static TWO_SENTENCES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[.!?] [A-ZÀ-Ý]|[a-zà-ÿ]\.$").expect("valid"));
+/// A reference to a journal issue: "2021; 66:e025", "2018 mar;39(2):134",
+/// "Haemophilia (2017), 1–6".
+static CITATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r";\s*\d+\s*[:(]|\(\d{4}\)\s*,?\s*\d").expect("valid"));
+/// An article's history: "Received 14 June 2024", "Recebido em…", "Aceito em…".
+static HISTORY_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:received|recebido|recibido|accepted|aceito|aceptado|submitted|submetido|revised|revisado|published|publicado)")
+        .expect("valid")
+});
+/// A copyright or licence notice: "© 2016 … published by John Wiley & Sons Ltd".
+static COPYRIGHT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)©|\bcopyright\b|published by|all rights reserved|todos os direitos")
+        .expect("valid")
+});
 /// A filing or billing code ("6730–02–P", "1–13–25"): number, dash, number, dash.
 static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+[-–]\d+[-–]\w").expect("valid"));
 static FIELD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\S+\s+){0,2}\S+:\s*\S").expect("valid"));
-/// What a journal prints above an article's title: its type ("Original Article",
-/// "Artigo de revisão", "Perspectiva") or its own name ("The Joint Commission
-/// Journal on…", "Revista de Dermatologia…").
-static ABOVE_ARTICLE: LazyLock<Regex> = LazyLock::new(|| {
+/// The type of article a journal prints above its title, in the original or
+/// translated: "Original Article", "Relatório especial", "Carta al editor".
+/// Alone on its line, or glued to the next word by the extraction
+/// ("revisãoAcesso aberto").
+static ARTICLE_TYPE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?i)^(?:(?:original|regular|review|research|special|accepted) article|(?:artigo|art[ií]culo) (?:original|regular|de revis[aã]o|de revisi[oó]n|de pesquisa)",
-        r"|perspective|perspectiva|editorial|commentary|coment[aá]rio|case report|relato de caso|brief report|clinical trial",
-        // alone on its line, or glued to the next word by the extraction ("revisãoAcesso")
-        r"|abstract|resumo|resumen|open access|acesso aberto|acceso abierto)(?:$|(?-i:\p{Lu}))",
-        r"|\b(?:journal|jornal|revista|peri[oó]dico|gazette|gaceta|bulletin|boletim)\b"
+        r"(?i)^(?:(?:original|regular|review|research|special|accepted|supplement) article",
+        r"|(?:brief|special|case) report|research letter|letters? to the editor|correspondence",
+        r"|editorial|commentary|perspective|viewpoint|(?:systematic|narrative|mini|illustrated) review",
+        r"|clinical trials?(?: and observations)?|abstract|open access|type \w+|original paper",
+        r"|clinical guidelines|check for updates|contents lists available.*|articles? in press",
+        r"|original (?:research|investigation)|research paper|methodological article|state of the art",
+        r"|isth ssc communication|add your logos here",
+        r"|pesquisa original|artigo metodol[oó]gico|estado da arte|estado do cora[cç][aã]o",
+        // the first section of a paper, when its title was not found above it
+        r"|(?:introduction|introdu[cç][aã]o|introducci[oó]n|background)(?: and \w+)?",
+        r"|papel original|diretrizes cl[ií]nicas|verifique se h[aá] atualiza[cç][oõ]es|listas de conte[uú]do.*",
+        r"|artigos? na imprensa|art[ií]culos? en prensa",
+        r"|artigo (?:original|regular|de revis[aã]o|de pesquisa|especial|suplementar)",
+        r"|relat[oó]rio (?:especial|breve)|relato (?:de caso|breve)|carta (?:de pesquisa|ao editor|para o editor)",
+        r"|ponto de vista|perspectiva|coment[aá]rio|revis[aã]o(?: sistem[aá]tica| narrativa)?|resumo",
+        r"|manuscrito original|acesso aberto",
+        r"|art[ií]culo (?:original|de revisi[oó]n|especial)|carta al editor|caso cl[ií]nico|reporte de caso",
+        r"|revisi[oó]n sistem[aá]tica|resumen|acceso abierto|punto de vista)(?:$|(?-i:\p{Lu}))"
     ))
     .expect("valid")
+});
+/// Whether `line` is the type of article a journal prints above its title.
+pub(crate) fn is_article_type(line: &str) -> bool {
+    ARTICLE_TYPE.is_match(line)
+}
+
+/// A journal's own name above an article: "The Joint Commission Journal on…",
+/// "Revista de Dermatologia…", "O Novo Jornal de Medicina da Inglaterra".
+static MASTHEAD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:journal|jornal|revista|peri[oó]dico|gazette|gaceta|federal register|di[aá]rio oficial|bolet[ií]n oficial)\b").expect("valid")
 });
 /// The banner a translation service stamps on top of every page it returns.
 static TRANSLATION_BANNER: LazyLock<Regex> = LazyLock::new(|| {
@@ -136,12 +178,56 @@ pub fn main_entity(text: &str, kind: Option<&str>) -> Option<String> {
     None
 }
 
-pub fn title(text: &str) -> Option<String> {
-    let lines: Vec<&str> = content_lines(first_chars(text, HEAD_CHARS))
-        .into_iter()
-        .take(TITLE_LINES)
+/// The title a file declares in its metadata, when the opening of its text
+/// bears it out: most of its words are there. That leaves out what tools write
+/// in that field ("Microsoft Word - doc1.docx", "untitled", a file name) and the
+/// original title of a translated copy.
+pub fn declared_title(declared: &str, text: &str) -> Option<String> {
+    let declared = declared.trim();
+    // A page saved from the web: "Recommendations for Women | NBDF"; a file
+    // name kept by the tool that made the PDF: "Microsoft Word - Ata.docx".
+    let declared = match declared.rsplit_once(" | ") {
+        Some((title, site)) if word_count(site) <= 4 => title.trim(),
+        _ => declared,
+    };
+    let declared = declared
+        .strip_prefix("Microsoft Word - ")
+        .unwrap_or(declared);
+    let declared = declared
+        .rsplit_once('.')
+        .filter(|(_, ext)| {
+            [
+                "doc", "docx", "odt", "xls", "xlsx", "ods", "ppt", "pptx", "pdf", "txt",
+            ]
+            .contains(&ext.to_ascii_lowercase().as_str())
+        })
+        .map_or(declared, |(stem, _)| stem.trim());
+    // One token ("doi:10.1182/blood-2021-153527", "-PO_48_WFH2024") is an identifier;
+    // "Clinical Guidelines" is the section, not the article.
+    if word_count(declared) < 2 || ARTICLE_TYPE.is_match(declared) {
+        return None;
+    }
+    let words: Vec<String> = norm(declared)
+        .split(' ')
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_owned)
         .collect();
-    for line in &lines {
+    if words.len() < 2 || declared.chars().count() > 250 {
+        return None;
+    }
+    let head = norm(first_chars(text, DECLARED_TITLE_CHARS));
+    let head: std::collections::HashSet<&str> = head.split(' ').collect();
+    let found = words.iter().filter(|w| head.contains(w.as_str())).count();
+    (found * 5 >= words.len() * 4).then(|| declared.to_owned())
+}
+
+pub fn title(text: &str) -> Option<String> {
+    let opening: Vec<&str> = content_lines(first_chars(text, HEAD_CHARS))
+        .into_iter()
+        .take(OPENING_LINES)
+        .collect();
+    let lines = &opening[..opening.len().min(TITLE_LINES)];
+    for line in lines {
         if let Some(c) = SUBJECT.captures(line) {
             let subject = norm(&c[1]);
             return (!subject.is_empty()
@@ -149,18 +235,31 @@ pub fn title(text: &str) -> Option<String> {
             .then(|| c[1].trim().to_owned());
         }
     }
-    let kind_line = lines.iter().position(|line| {
-        line.chars().count() <= 140 && !line.ends_with([':', ',']) && names_a_kind(&norm(line))
+    let kind_line = (0..lines.len()).find(|&at| {
+        let line = lines[at];
+        line.chars().count() <= 140
+            && !line.ends_with([':', ','])
+            && !continues_sentence(lines, at)
+            && !ARTICLE_TYPE.is_match(line)
+            && names_a_kind(&norm(line))
     });
     // A kind named only in passing leaves the title to the heading above it.
-    if let Some(at) = kind_line.filter(|&at| !in_passing(&lines, at)) {
+    if let Some(at) = kind_line.filter(|&at| !in_passing(lines, at)) {
         return Some(lines[at].to_owned());
     }
-    let at = heading(&lines)?;
-    Some(match continuation(&lines, at) {
-        Some(next) => format!("{} {next}", lines[at]),
-        None => lines[at].to_owned(),
+    let at = heading(&opening)?;
+    Some(match continuation(&opening, at) {
+        Some(next) => format!("{} {next}", opening[at]),
+        None => opening[at].to_owned(),
     })
+}
+
+/// Whether line `at` carries on a sentence from the line above: "…em risco
+/// após o" / "de TEV recorrente… para orientar…" is prose, whatever it matches.
+fn continues_sentence(lines: &[&str], at: usize) -> bool {
+    at > 0
+        && lines[at - 1].ends_with(|c: char| c.is_lowercase() || c == ',')
+        && lines[at].starts_with(char::is_lowercase)
 }
 
 /// The next line when line `at` is a title wrapped mid-phrase ("…gene therapy,
@@ -170,7 +269,8 @@ fn continuation<'a>(lines: &[&'a str], at: usize) -> Option<&'a str> {
     let line = lines[at];
     // Lower case on both sides of the break, or a line that ends on a joining
     // word ("The Urgent Need to" / "Implement…", "IMPLEMENTAÇÃO DO" / …).
-    let mid_phrase = (line.ends_with(char::is_lowercase) && next.starts_with(char::is_lowercase))
+    let mid_phrase = (line.ends_with(|c: char| c.is_lowercase() || c == ':')
+        && next.starts_with(char::is_lowercase))
         || (line
             .rsplit(' ')
             .next()
@@ -197,27 +297,56 @@ fn is_letter_spaced(line: &str) -> bool {
 /// The heading among the opening lines: a text that is not a known kind of
 /// document usually opens with its title (an article, a chapter, a review).
 /// What a journal prints above the title, and a lone capitalized word
-/// ("TRANSPLANTATION"), give way to a heading below them.
+/// ("TRANSPLANTATION"), are never the title. Only lines of words count toward
+/// the opening: "-", "2.12.008" and a bare link do not push the title out of it.
 fn heading(lines: &[&str]) -> Option<usize> {
-    let headings: Vec<usize> = (0..lines.len().min(FALLBACK_TITLE_LINES))
-        .filter(|&at| {
-            !(at > 0 && continuation(lines, at - 1).is_some())
-                && looks_like_title(lines[at])
-                && !is_date_line(lines[at])
-                && !has_glued_words(lines[at])
-        })
-        .collect();
-    let above_title = |at: usize| {
-        let line = lines[at];
-        ABOVE_ARTICLE.is_match(line)
-            || (word_count(line) == 1 && !line.chars().any(char::is_lowercase))
+    let above_title = |line: &str| {
+        ARTICLE_TYPE.is_match(line)
+            || MASTHEAD.is_match(line)
+            || (word_count(line) == 1
+                && line.chars().any(char::is_uppercase)
+                && !line.chars().any(char::is_lowercase))
             || is_letter_spaced(line)
     };
-    headings
-        .iter()
-        .copied()
-        .find(|&at| !above_title(at))
-        .or(headings.first().copied())
+    let mut seen = 0;
+    for (at, &line) in lines.iter().enumerate() {
+        if word_count(line) < 2 && !line.chars().any(is_cjk) {
+            continue;
+        }
+        if seen == FALLBACK_TITLE_LINES {
+            break;
+        }
+        let at_top = seen < 3;
+        seen += 1;
+        if continues_sentence(lines, at) {
+            continue;
+        }
+        // A title wrapped at its colon is judged whole ("…for sickle cell
+        // disease:" / "transfusion support").
+        let titled = looks_like_title(line, at_top)
+            || continuation(lines, at)
+                .is_some_and(|next| looks_like_title(&format!("{line} {next}"), true));
+        // A label alone is no title: the file keeps the name it has.
+        if titled && !is_date_line(line) && !has_glued_words(line) && !above_title(line) {
+            return Some(at);
+        }
+    }
+    None
+}
+
+/// Authors with their affiliation numbers: "Manoj Verma1Swati Pandey2, Bina Gidwani3".
+fn is_author_line(line: &str) -> bool {
+    line.split_whitespace()
+        .filter(|word| {
+            let mut chars = word.chars();
+            chars.next().is_some_and(char::is_uppercase) && {
+                let rest: String = chars.collect();
+                rest.find(|c: char| c.is_ascii_digit())
+                    .is_some_and(|at| at > 0 && rest[..at].chars().all(char::is_lowercase))
+            }
+        })
+        .count()
+        >= 2
 }
 
 /// Words run together by a broken extraction: "INGLATERRAdeMEDICAMENTO", capitals,
@@ -248,7 +377,8 @@ pub(crate) fn in_passing(lines: &[&str], at: usize) -> bool {
 }
 
 /// A short line of words that is not a field, a greeting, a placeholder or an address.
-fn looks_like_title(line: &str) -> bool {
+/// At the very top of a text a title may run long (`at_top`): up to 25 words.
+fn looks_like_title(line: &str, at_top: bool) -> bool {
     let visible: Vec<char> = line.chars().filter(|c| !c.is_whitespace()).collect();
     let letters = visible.iter().filter(|c| c.is_alphabetic()).count();
     // Chinese and Japanese put no spaces between words: there the length is
@@ -256,16 +386,23 @@ fn looks_like_title(line: &str) -> bool {
     let length_ok = if visible.iter().any(|&c| is_cjk(c)) {
         (2..=40).contains(&visible.len()) && !line.contains('。')
     } else {
-        (2..=15).contains(&word_count(line))
+        (2..=if at_top { 25 } else { 15 }).contains(&word_count(line))
     };
     length_ok
-        && line.chars().count() <= 120
+        && line.chars().count() <= if at_top { 200 } else { 120 }
         && letters * 2 >= visible.len()
         && !line.ends_with([',', ';', ':'])
-        && !line.starts_with(['[', '(', '{', '<', '.', '…'])
+        && !line.starts_with(['[', '(', '{', '<', '.', '…', '•', '▪', '◦', '-', '–', '*'])
+        && !line.contains(" = ")
+        && !COPYRIGHT.is_match(line)
+        && !is_author_line(line)
+        // a long line has to read as a title from its first letter
+        && (word_count(line) <= 15 || line.starts_with(char::is_uppercase))
         && !FIELD.is_match(line)
         && !TWO_SENTENCES.is_match(line)
         && !CODE.is_match(line)
+        && !CITATION.is_match(line)
+        && !HISTORY_LINE.is_match(line)
         // a fragment of running prose, cut on both ends
         && !(line.starts_with(char::is_lowercase) && line.ends_with(char::is_lowercase))
         && !line.contains('@')
@@ -301,4 +438,35 @@ fn is_cjk(c: char) -> bool {
     matches!(c,
         '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}'
         | '\u{F900}'..='\u{FAFF}' | '\u{20000}'..='\u{2FA1F}')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ARTICLE: &str = "Special Report\nMoving toward disease modification in polycythemia vera\nJ. P. Bewersdorf, J. How\nPolycythemia vera belongs to the myeloproliferative neoplasms.";
+
+    #[test]
+    fn a_declared_title_the_text_bears_out_is_kept() {
+        let declared = "Moving toward disease modification in polycythemia vera";
+        assert_eq!(declared_title(declared, ARTICLE).as_deref(), Some(declared));
+        let web = "Moving toward disease modification in polycythemia vera | NBDF";
+        assert_eq!(declared_title(web, ARTICLE).as_deref(), Some(declared));
+    }
+
+    #[test]
+    fn what_tools_write_in_the_title_field_is_not_a_title() {
+        let translated =
+            "Relatório especial\nAvançando em direção à modificação da doença na policitemia vera";
+        let original = "Moving toward disease modification in polycythemia vera";
+        assert_eq!(declared_title(original, translated), None);
+        for junk in [
+            "doi:10.1182/blood-2021-153527",
+            "-PO_48_WFH2024",
+            "Special Report",
+            "Microsoft Word - vera.docx",
+        ] {
+            assert_eq!(declared_title(junk, ARTICLE), None, "{junk}");
+        }
+    }
 }

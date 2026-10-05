@@ -56,13 +56,20 @@ pub struct DocInfo {
 }
 
 /// Reads `text` (the extracted content of a file whose extension is `ext`).
+/// `declared_title` is the title the file's metadata claims, if any; it is used
+/// only when the text bears it out.
 #[must_use]
-pub fn analyze(text: &str, ext: &str) -> DocInfo {
+pub fn analyze(text: &str, ext: &str, declared_title: Option<&str>) -> DocInfo {
     let found = kind::by_rules(text);
     let kind = found.map(|(kind, _)| kind);
     let word = found.and_then(|(kind, lang)| kind::word(kind, lang));
     let date = date::document_date(text);
-    let title = entity::title(text);
+    // A title shows as written, without the invisible hyphenation points
+    // ("rec\u{AD}om\u{AD}men\u{AD}da\u{AD}tion") typeset books leave in their text.
+    let title = declared_title
+        .and_then(|declared| entity::declared_title(declared, text))
+        .or_else(|| entity::title(text))
+        .map(|title| title.replace('\u{AD}', ""));
     DocInfo {
         kind,
         entity: entity::main_entity(text, kind),

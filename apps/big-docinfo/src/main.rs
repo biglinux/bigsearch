@@ -56,11 +56,11 @@ enum Output {
 }
 
 fn describe(path: &Path, output: Output) -> Result<()> {
-    let text = big_search::extract::content_with_lines(path).context(
+    let (text, declared_title) = big_search::extract::content_with_lines_and_title(path).context(
         "Este arquivo não tem texto legível: o tipo não é suportado ou é um PDF escaneado.",
     )?;
     let ext = extension(path);
-    let info = analyze(&text, ext);
+    let info = analyze(&text, ext, declared_title.as_deref());
     // With neither a kind nor a title the suggestion would say less than the
     // current name ("documento.odt"), so the current name stays.
     let kept = info.kind.is_none() && info.title.is_none();

@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::entity::in_passing;
+use crate::entity::{in_passing, is_article_type};
 use crate::text::{content_lines, first_chars, norm};
 
 const HEAD_CHARS: usize = 600;
@@ -216,7 +216,8 @@ static COMBINED: LazyLock<Regex> = LazyLock::new(|| {
 
 /// The kind named earliest in the document's head, with the language that named
 /// it. A kind named only in passing, in prose below a heading, is skipped: a
-/// checklist that cites "the annual Network Threat Report" is not a report.
+/// checklist that cites "the annual Network Threat Report" is not a report; and
+/// a "Case Report" is an article.
 pub fn by_rules(text: &str) -> Option<(&'static str, &'static str)> {
     let lines = content_lines(first_chars(text, HEAD_CHARS));
     // The normalized head, line by line: `norm` turns a line break into one
@@ -239,7 +240,15 @@ pub fn by_rules(text: &str) -> Option<(&'static str, &'static str)> {
             return None;
         }
         let rule = (1..captures.len()).find(|&i| captures.get(i).is_some())?;
-        RULES.get(rule - 1).map(|&(lang, kind, _)| (kind, lang))
+        let &(lang, kind, _) = RULES.get(rule - 1)?;
+        // A journal's section ("Case Report", "Relatório especial") above the
+        // title says the document is an article, whatever kind the words name.
+        let kind = if is_article_type(lines[line]) {
+            "artigo"
+        } else {
+            kind
+        };
+        Some((kind, lang))
     })
 }
 

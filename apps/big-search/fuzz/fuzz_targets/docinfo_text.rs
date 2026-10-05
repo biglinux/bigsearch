@@ -7,7 +7,8 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
-    let info = big_docinfo::analyze(text, "pdf");
+    // The first line doubles as the title a PDF declares, as untrusted as the rest.
+    let info = big_docinfo::analyze(text, "pdf", text.lines().next());
     let name = &info.suggested_name;
     assert!(!name.contains(['/', '\0']), "unsafe name {name:?}");
     assert!(name.ends_with(".pdf") && name.len() > ".pdf".len(), "extension lost in {name:?}");
