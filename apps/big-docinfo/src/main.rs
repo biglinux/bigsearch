@@ -20,7 +20,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use big_docinfo::analyze;
+use big_docinfo::{Hints, analyze};
 
 const USAGE: &str = "usage: big-docinfo [--json | --name] FILE | big-docinfo rename FILE NAME";
 /// Longest file name most Linux file systems accept, in bytes.
@@ -56,11 +56,15 @@ enum Output {
 }
 
 fn describe(path: &Path, output: Output) -> Result<()> {
-    let (text, declared_title) = big_search::extract::content_with_lines_and_title(path).context(
+    let file = big_search::extract::described(path).context(
         "Este arquivo não tem texto legível: o tipo não é suportado ou é um PDF escaneado.",
     )?;
     let ext = extension(path);
-    let info = analyze(&text, ext, declared_title.as_deref());
+    let hints = Hints {
+        declared_title: file.declared_title.as_deref(),
+        prominent: &file.prominent,
+    };
+    let info = analyze(&file.text, ext, &hints);
     // With neither a kind nor a title the suggestion would say less than the
     // current name ("documento.odt"), so the current name stays.
     let kept = info.kind.is_none() && info.title.is_none();

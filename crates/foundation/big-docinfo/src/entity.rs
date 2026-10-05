@@ -89,6 +89,15 @@ static COPYRIGHT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)©|\bcopyright\b|published by|all rights reserved|todos os direitos")
         .expect("valid")
 });
+/// A lettered section: "A - QUALIFICAÇÃO DAS PARTES", "B1 - Origem", "IV - DO OBJETO".
+/// ("2.1 O que são diretórios" heads a chapter file and stays a title.)
+static SECTION_NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:[A-Z]\d?|[IVX]+)\s*[-–.)]\s").expect("valid"));
+/// An author's affiliation: "From the Department of Laboratory Medicine…".
+static AFFILIATION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:from the )?(?:department|division) of\b|^(?:departamento|divis[aã]o) de\b")
+        .expect("valid")
+});
 /// A filing or billing code ("6730–02–P", "1–13–25"): number, dash, number, dash.
 static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+[-–]\d+[-–]\w").expect("valid"));
 static FIELD: LazyLock<Regex> =
@@ -106,6 +115,7 @@ static ARTICLE_TYPE: LazyLock<Regex> = LazyLock::new(|| {
         r"|clinical guidelines|check for updates|contents lists available.*|articles? in press",
         r"|original (?:research|investigation)|research paper|methodological article|state of the art",
         r"|isth ssc communication|add your logos here",
+        r"|(?:\w+ )?investiga(?:tion|[cç][aã]o|ci[oó]n)(?: \w+)?",
         r"|pesquisa original|artigo metodol[oó]gico|estado da arte|estado do cora[cç][aã]o",
         // the first section of a paper, when its title was not found above it
         r"|(?:introduction|introdu[cç][aã]o|introducci[oó]n|background)(?: and \w+)?",
@@ -184,12 +194,14 @@ pub fn main_entity(text: &str, kind: Option<&str>) -> Option<String> {
 /// original title of a translated copy.
 pub fn declared_title(declared: &str, text: &str) -> Option<String> {
     let declared = declared.trim();
-    // A page saved from the web: "Recommendations for Women | NBDF"; a file
+    // A page saved from the web: "Recommendations for Women | NBDF",
+    // "Shader Debugger Setup — Nsight Graphics"; a file
     // name kept by the tool that made the PDF: "Microsoft Word - Ata.docx".
-    let declared = match declared.rsplit_once(" | ") {
-        Some((title, site)) if word_count(site) <= 4 => title.trim(),
-        _ => declared,
-    };
+    let declared = [" | ", " — ", " – "]
+        .iter()
+        .find_map(|bar| declared.rsplit_once(bar))
+        .filter(|(_, site)| word_count(site) <= 4)
+        .map_or(declared, |(title, _)| title.trim());
     let declared = declared
         .strip_prefix("Microsoft Word - ")
         .unwrap_or(declared);
@@ -221,7 +233,8 @@ pub fn declared_title(declared: &str, text: &str) -> Option<String> {
     (found * 5 >= words.len() * 4).then(|| declared.to_owned())
 }
 
-pub fn title(text: &str) -> Option<String> {
+/// The title of `text`; `prominent` are the lines its file sets in large type.
+pub fn title(text: &str, prominent: &[String]) -> Option<String> {
     let opening: Vec<&str> = content_lines(first_chars(text, HEAD_CHARS))
         .into_iter()
         .take(OPENING_LINES)
@@ -246,6 +259,30 @@ pub fn title(text: &str) -> Option<String> {
     // A kind named only in passing leaves the title to the heading above it.
     if let Some(at) = kind_line.filter(|&at| !in_passing(lines, at)) {
         return Some(lines[at].to_owned());
+    }
+    // The largest words on the page are the title a reader sees — when they
+    // read as one. A decorative initial ("C") is not words; past the largest,
+    // smaller type is section headings, and position decides instead.
+    if let Some(line) = prominent
+        .iter()
+        .find(|line| line.chars().filter(|c| c.is_alphabetic()).count() >= 2)
+        // a section label set as large as the title, on the same line
+        .map(|line| without_article_type(line))
+        .filter(|line| {
+            // words, not a figure ("94 KB")
+            (line
+                .split_whitespace()
+                .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 3)
+                .count()
+                >= 2
+                || line.chars().any(is_cjk))
+                && looks_like_title(line, true)
+                && !is_above_title(line)
+                && !is_date_line(line)
+                && !has_glued_words(line)
+        })
+    {
+        return Some(line.to_owned());
     }
     let at = heading(&opening)?;
     Some(match continuation(&opening, at) {
@@ -280,6 +317,38 @@ fn continuation<'a>(lines: &[&'a str], at: usize) -> Option<&'a str> {
         .then_some(*next)
 }
 
+/// The sections of a paper or poster, in the languages read here.
+const SECTION_WORDS: &[&str] = &[
+    "introduction",
+    "background",
+    "aim",
+    "aims",
+    "objective",
+    "objectives",
+    "methods",
+    "results",
+    "discussion",
+    "conclusion",
+    "conclusions",
+    "references",
+    "and",
+    "e",
+    "y",
+    "introducao",
+    "objetivo",
+    "objetivos",
+    "metodos",
+    "metodologia",
+    "resultados",
+    "discussao",
+    "conclusao",
+    "conclusoes",
+    "referencias",
+    "introduccion",
+    "discusion",
+    "conclusiones",
+];
+
 /// Words a title does not end on: a line ending on one continues below.
 const JOINING: &[&str] = &[
     "a", "an", "and", "as", "at", "by", "com", "con", "da", "das", "de", "del", "der", "des",
@@ -300,14 +369,6 @@ fn is_letter_spaced(line: &str) -> bool {
 /// ("TRANSPLANTATION"), are never the title. Only lines of words count toward
 /// the opening: "-", "2.12.008" and a bare link do not push the title out of it.
 fn heading(lines: &[&str]) -> Option<usize> {
-    let above_title = |line: &str| {
-        ARTICLE_TYPE.is_match(line)
-            || MASTHEAD.is_match(line)
-            || (word_count(line) == 1
-                && line.chars().any(char::is_uppercase)
-                && !line.chars().any(char::is_lowercase))
-            || is_letter_spaced(line)
-    };
     let mut seen = 0;
     for (at, &line) in lines.iter().enumerate() {
         if word_count(line) < 2 && !line.chars().any(is_cjk) {
@@ -327,11 +388,58 @@ fn heading(lines: &[&str]) -> Option<usize> {
             || continuation(lines, at)
                 .is_some_and(|next| looks_like_title(&format!("{line} {next}"), true));
         // A label alone is no title: the file keeps the name it has.
-        if titled && !is_date_line(line) && !has_glued_words(line) && !above_title(line) {
+        if titled && !is_date_line(line) && !has_glued_words(line) && !is_above_title(line) {
             return Some(at);
         }
     }
     None
+}
+
+/// `line` without a section label it opens with: "Relatório especial Avançando
+/// em direção…" → "Avançando em direção…".
+fn without_article_type(line: &str) -> &str {
+    // A label set in spaced letters first: "Edi t or i a l Advanced therapy…" —
+    // fragments of a few letters, three or more of them single letters.
+    let (mut end, mut fragments, mut single) = (0, 0, 0);
+    for word in line.split_whitespace() {
+        if word.chars().count() > 3 {
+            break;
+        }
+        fragments += 1;
+        single += usize::from(word.chars().count() == 1);
+        end = line[end..]
+            .find(word)
+            .map_or(end, |at| end + at + word.len());
+    }
+    let line = if fragments >= 4 && single >= 3 {
+        line[end..].trim_start()
+    } else {
+        line
+    };
+    line.char_indices()
+        .filter(|&(_, c)| c == ' ')
+        .take(4)
+        .find(|&(at, _)| {
+            ARTICLE_TYPE
+                .find(&line[..at])
+                .is_some_and(|m| m.end() == at)
+        })
+        .map_or(line, |(at, _)| line[at..].trim_start())
+}
+
+/// What a journal prints above a title — its section, its name — a lone
+/// capitalized word ("TRANSPLANTATION"), and a poster's section headings set
+/// side by side ("Introduction Results").
+fn is_above_title(line: &str) -> bool {
+    line.split_whitespace().all(|word| {
+        SECTION_WORDS
+            .contains(&fold_lower(word.trim_matches(|c: char| !c.is_alphanumeric())).as_str())
+    }) || ARTICLE_TYPE.is_match(line)
+        || MASTHEAD.is_match(line)
+        || (word_count(line) == 1
+            && line.chars().any(char::is_uppercase)
+            && !line.chars().any(char::is_lowercase))
+        || is_letter_spaced(line)
 }
 
 /// Authors with their affiliation numbers: "Manoj Verma1Swati Pandey2, Bina Gidwani3".
@@ -402,6 +510,8 @@ fn looks_like_title(line: &str, at_top: bool) -> bool {
         && !TWO_SENTENCES.is_match(line)
         && !CODE.is_match(line)
         && !CITATION.is_match(line)
+        && !SECTION_NUMBER.is_match(line)
+        && !AFFILIATION.is_match(line)
         && !HISTORY_LINE.is_match(line)
         // a fragment of running prose, cut on both ends
         && !(line.starts_with(char::is_lowercase) && line.ends_with(char::is_lowercase))

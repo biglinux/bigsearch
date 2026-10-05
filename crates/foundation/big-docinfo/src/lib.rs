@@ -55,20 +55,30 @@ pub struct DocInfo {
     pub suggested_name: String,
 }
 
+/// What a file says about itself besides its text. Both are hints: the title
+/// the metadata declares counts only when the text bears it out, and a
+/// prominent line only when it reads as a title.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Hints<'a> {
+    /// The title the file's metadata declares.
+    pub declared_title: Option<&'a str>,
+    /// Lines set in large type at the opening, largest first.
+    pub prominent: &'a [String],
+}
+
 /// Reads `text` (the extracted content of a file whose extension is `ext`).
-/// `declared_title` is the title the file's metadata claims, if any; it is used
-/// only when the text bears it out.
 #[must_use]
-pub fn analyze(text: &str, ext: &str, declared_title: Option<&str>) -> DocInfo {
+pub fn analyze(text: &str, ext: &str, hints: &Hints<'_>) -> DocInfo {
     let found = kind::by_rules(text);
     let kind = found.map(|(kind, _)| kind);
     let word = found.and_then(|(kind, lang)| kind::word(kind, lang));
     let date = date::document_date(text);
     // A title shows as written, without the invisible hyphenation points
     // ("rec\u{AD}om\u{AD}men\u{AD}da\u{AD}tion") typeset books leave in their text.
-    let title = declared_title
+    let title = hints
+        .declared_title
         .and_then(|declared| entity::declared_title(declared, text))
-        .or_else(|| entity::title(text))
+        .or_else(|| entity::title(text, hints.prominent))
         .map(|title| title.replace('\u{AD}', ""));
     DocInfo {
         kind,
