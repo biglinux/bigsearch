@@ -277,7 +277,10 @@ lowest `cpu.weight` before Linux 5.15). Measured with it: with 16 saturated
 CPUs the same queries take what they take on an idle machine (77–83 ms by name,
 14–15 ms by content), and `pdftotext` starts in `main/index`. Without
 delegation (started from a terminal) the daemon leaves cgroups alone and the
-thread policies still apply. No policy helps against the SMT sibling — the two
+thread policies still apply. On every stop systemd logs "Failed to kill control
+group …, ignoring: Operation not supported": the kernel refuses `cgroup.kill`
+and process listing in a threaded group. It is noise — measured with a child
+process placed in `main/index`, the unit still stopped and the child died. No policy helps against the SMT sibling — the two
 share one core — which is what the backfill's pacing (`backfill_pace`) is still
 for.
 
