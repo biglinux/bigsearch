@@ -532,8 +532,17 @@ fn open_reader(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// How long a writer waits for another writer's transaction. Two write here:
+/// the watcher, at idle priority, and the connection threads that register
+/// what desktop apps report. On a busy machine the scheduler can leave an
+/// idle-priority thread off the CPU for a second in the middle of its
+/// transaction, and a 25 ms wait then failed the app's registration
+/// ("database is locked"), losing the origin. Each connection has its own
+/// thread, so waiting holds up only the app that asked.
+const WRITER_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn configure_connection(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(std::time::Duration::from_millis(25))?;
+    conn.busy_timeout(WRITER_BUSY_TIMEOUT)?;
     conn.execute_batch(
         "
         PRAGMA journal_mode = WAL;
@@ -947,6 +956,26 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("origin.sqlite")
+    }
+
+    /// Another writer holding the lock for a while — the watcher set aside by
+    /// the scheduler mid-transaction — delays a writer instead of failing it.
+    /// Opening writes (the schema), and it is where the daemon's IPC test
+    /// failed with "database is locked" under load.
+    #[test]
+    fn a_writer_waits_out_another_writers_transaction() {
+        let db = temporary_origin_path("busy");
+        drop(OriginWriter::open(db.clone()).unwrap());
+        let holder = Connection::open(&db).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            holder.execute_batch("COMMIT").unwrap();
+        });
+        let writer = OriginWriter::open(db.clone()).unwrap();
+        release.join().unwrap();
+        assert!(writer.origin(Path::new("/missing")).unwrap().is_none());
+        std::fs::remove_dir_all(db.parent().unwrap()).ok();
     }
 
     #[test]
