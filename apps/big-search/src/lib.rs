@@ -16,6 +16,7 @@ pub mod mime;
 mod mounts;
 mod nosync_dir;
 pub mod origin;
+pub mod prominent;
 pub mod query;
 pub mod scan;
 pub mod scan_roots;

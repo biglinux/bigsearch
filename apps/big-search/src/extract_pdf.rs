@@ -20,7 +20,7 @@ use std::time::Duration;
 /// a deployment explicitly wants to skip very large PDF inputs.
 pub(crate) fn read_pdf(path: &Path) -> Option<String> {
     let cap = crate::extract::max_extract_bytes();
-    let bytes = pdftotext_capped(path, cap, false)?;
+    let bytes = pdftotext_capped(path, cap, &[])?;
     // The bytes become the string when they are valid UTF-8, which they are for
     // every ordinary PDF: `from_utf8_lossy(&bytes).into_owned()` copied the whole
     // text layer a second time.
@@ -36,10 +36,17 @@ pub(crate) fn read_pdf(path: &Path) -> Option<String> {
 /// and the text, unchanged, in a `<pre>` block.
 pub(crate) fn read_pdf_titled(path: &Path) -> Option<(String, Option<String>)> {
     let cap = crate::extract::max_extract_bytes();
-    let bytes = pdftotext_capped(path, cap, true)?;
+    let bytes = pdftotext_capped(path, cap, &["-htmlmeta"])?;
     let html = String::from_utf8_lossy(&bytes);
     let (title, body) = split_html_meta(&html);
     Some((text_layer(body.to_owned(), cap)?, title))
+}
+
+/// Page 1 as `pdftotext -bbox-layout` lays it out: XHTML with a box for every
+/// line and word, from which `prominent` reads type sizes. Capped like the text.
+pub(crate) fn read_pdf_first_page_layout(path: &Path) -> Option<Vec<u8>> {
+    let cap = crate::extract::max_extract_bytes();
+    pdftotext_capped(path, cap, &["-f", "1", "-l", "1", "-bbox-layout"])
 }
 
 /// The metadata title and the text of `pdftotext -htmlmeta` output.
@@ -76,7 +83,7 @@ fn text_layer(mut text: String, cap: usize) -> Option<String> {
     }
 }
 
-fn pdftotext_capped(path: &Path, max_bytes: usize, html_meta: bool) -> Option<Vec<u8>> {
+fn pdftotext_capped(path: &Path, max_bytes: usize, options: &[&str]) -> Option<Vec<u8>> {
     if exceeds_pdf_input_cap(path) {
         return None;
     }
@@ -87,14 +94,14 @@ fn pdftotext_capped(path: &Path, max_bytes: usize, html_meta: bool) -> Option<Ve
     // case, kill and reap the unguarded child before respawning through
     // timeout(1), so every successful spawn has a wall-clock deadline.
     let use_watchdog = pidfd_supported();
-    let mut child = spawn_pdftotext(path, !use_watchdog, html_meta)?;
+    let mut child = spawn_pdftotext(path, !use_watchdog, options)?;
     let watchdog = if use_watchdog {
         match SubprocessDeadline::arm(&child, Duration::from_secs(pdf_timeout_secs())) {
             Some(watchdog) => Some(watchdog),
             None => {
                 kill_child_tree(&mut child);
                 let _ = child.wait();
-                child = spawn_pdftotext(path, true, html_meta)?;
+                child = spawn_pdftotext(path, true, options)?;
                 None
             }
         }
@@ -153,7 +160,8 @@ fn pdftotext_capped(path: &Path, max_bytes: usize, html_meta: bool) -> Option<Ve
     Some(bytes)
 }
 
-fn spawn_pdftotext(path: &Path, use_timeout_wrapper: bool, html_meta: bool) -> Option<Child> {
+/// `options` are fixed flags from this file, never caller input.
+fn spawn_pdftotext(path: &Path, use_timeout_wrapper: bool, options: &[&str]) -> Option<Child> {
     let mut command = if use_timeout_wrapper {
         let mut wrapped = Command::new("timeout");
         wrapped.arg(pdf_timeout_secs().to_string()).arg("pdftotext");
@@ -161,10 +169,7 @@ fn spawn_pdftotext(path: &Path, use_timeout_wrapper: bool, html_meta: bool) -> O
     } else {
         Command::new("pdftotext")
     };
-    command.arg("-q");
-    if html_meta {
-        command.arg("-htmlmeta");
-    }
+    command.arg("-q").args(options);
     command
         .arg("--")
         .arg(path)
@@ -353,7 +358,7 @@ fn pdf_timeout_secs() -> u64 {
 /// it, for an answer that is a handful of page numbers.
 pub(crate) fn for_each_pdf_page(path: &Path, on_page: &mut dyn FnMut(&str)) {
     let cap = crate::extract::max_extract_bytes();
-    let Some(bytes) = pdftotext_capped(path, cap, false) else {
+    let Some(bytes) = pdftotext_capped(path, cap, &[]) else {
         return;
     };
     for page in String::from_utf8_lossy(&bytes).split('\u{000C}') {

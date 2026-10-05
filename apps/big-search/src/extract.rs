@@ -79,14 +79,154 @@ pub fn content_with_lines(path: &Path) -> Option<String> {
     }
 }
 
-/// [`content_with_lines`] plus the title the file declares in its metadata, when
-/// it is a PDF that declares one. `big-docinfo` weighs that title against the text.
-pub fn content_with_lines_and_title(path: &Path) -> Option<(String, Option<String>)> {
-    if ext_of(path).as_deref() == Some("pdf") {
-        crate::extract_pdf::read_pdf_titled(path)
-    } else {
-        content_with_lines(path).map(|text| (text, None))
+/// What `big-docinfo` reads from a file: its text with paragraphs as lines, the
+/// title its metadata declares, and the lines it sets in large type.
+pub struct Described {
+    pub text: String,
+    pub declared_title: Option<String>,
+    /// Largest type first; see [`crate::prominent`].
+    pub prominent: Vec<String>,
+}
+
+/// [`content_with_lines`], with what the file says about its own title.
+pub fn described(path: &Path) -> Option<Described> {
+    let ext = ext_of(path)?;
+    let (text, declared_title) = match ext.as_str() {
+        "pdf" => crate::extract_pdf::read_pdf_titled(path)?,
+        "html" | "htm" | "xhtml" => {
+            let html = content(path)?;
+            (html_text(&html), html_element(&html, "title"))
+        }
+        _ => (content_with_lines(path)?, office_declared_title(path, &ext)),
+    };
+    let prominent = match ext.as_str() {
+        "md" | "markdown" => markdown_headings(&text),
+        "html" | "htm" | "xhtml" => content(path)
+            .map(|html| html_element(&html, "h1").into_iter().collect())
+            .unwrap_or_default(),
+        _ => crate::prominent::prominent_lines(path, &ext),
+    };
+    Some(Described {
+        text,
+        declared_title,
+        prominent,
+    })
+}
+
+/// The `dc:title` an office document's metadata part declares.
+fn office_declared_title(path: &Path, ext: &str) -> Option<String> {
+    let part = match ext {
+        "odt" | "ods" | "odp" => "meta.xml",
+        "docx" | "xlsx" | "pptx" => "docProps/core.xml",
+        _ => return None,
+    };
+    let xml = zip_entry_bytes(path, part)?;
+    let xml = String::from_utf8_lossy(&xml);
+    let (_, rest) = xml.split_once("<dc:title>")?;
+    let (title, _) = rest.split_once("</dc:title>")?;
+    let mut out = String::new();
+    xml_text_lines(format!("<t>{title}</t>").as_bytes(), &mut out);
+    let title = out.trim().to_owned();
+    (!title.is_empty()).then_some(title)
+}
+
+/// ATX headings of a Markdown text, first level before second: "# Title".
+fn markdown_headings(text: &str) -> Vec<String> {
+    let level = |n: usize| {
+        text.lines()
+            .filter_map(move |line| {
+                let rest = line.strip_prefix(&"#".repeat(n))?.strip_prefix(' ')?;
+                let heading = rest.trim().trim_end_matches('#').trim();
+                (!heading.is_empty()).then(|| heading.to_owned())
+            })
+            .take(3)
+    };
+    level(1).chain(level(2)).collect()
+}
+
+/// The text of the first `<tag>…</tag>` of an HTML page, tags inside removed.
+fn html_element(html: &str, tag: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find(&format!("<{tag}"))?;
+    let start = open + lower[open..].find('>')? + 1;
+    let end = start + lower[start..].find(&format!("</{tag}"))?;
+    let text = html_text(&html[start..end]);
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then_some(text)
+}
+
+/// The readable text of HTML: scripts and styles dropped, block elements as
+/// line breaks, the common entities decoded. Enough to read a saved page's
+/// title and dates, not a renderer.
+fn html_text(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut at = 0;
+    while let Some(open) = lower[at..].find('<').map(|i| at + i) {
+        out.push_str(&html[at..open]);
+        let tag_end = lower[open..].find('>').map_or(html.len(), |i| open + i + 1);
+        let tag = &lower[open..tag_end];
+        let skip_to = ["script", "style"].iter().find_map(|name| {
+            tag.starts_with(&format!("<{name}"))
+                .then(|| {
+                    lower[tag_end..]
+                        .find(&format!("</{name}"))
+                        .map(|i| tag_end + i)
+                })
+                .flatten()
+        });
+        let block = [
+            "<p", "</p", "<br", "<div", "</div", "<h", "</h", "<li", "<tr", "<title", "</title",
+        ]
+        .iter()
+        .any(|b| tag.starts_with(b));
+        if block {
+            out.push('\n');
+        }
+        at = skip_to.unwrap_or(tag_end).min(html.len());
     }
+    out.push_str(&html[at.min(html.len())..]);
+    decode_entities(&out)
+}
+
+/// `&amp;`, `&nbsp;`, `&#8212;`, `&#x2014;` and the like as characters.
+fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let entity = rest[1..]
+            .find(';')
+            .filter(|&end| end <= 10)
+            .map(|end| &rest[1..=end]);
+        let decoded = entity.and_then(|e| match e {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            _ => e
+                .strip_prefix("#x")
+                .or_else(|| e.strip_prefix("#X"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| e.strip_prefix('#').and_then(|dec| dec.parse().ok()))
+                .and_then(char::from_u32),
+        });
+        match (entity, decoded) {
+            (Some(e), Some(c)) => {
+                out.push(c);
+                rest = &rest[e.len() + 2..];
+            }
+            _ => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Extract text for a file identified by content sniffing (no usable extension):
@@ -192,7 +332,7 @@ fn text_max_input_bytes() -> u64 {
 
 /// Entries an office archive may declare before we refuse it. Generous against
 /// real documents (a heavy pptx is a few hundred), tight against a bomb.
-const MAX_ZIP_ENTRIES: usize = 4_096;
+pub(crate) const MAX_ZIP_ENTRIES: usize = 4_096;
 
 /// Slides read from one pptx. Bounds both the name `Vec` and the read loop.
 const MAX_PPTX_SLIDES: usize = 512;
@@ -469,7 +609,9 @@ fn for_each_office_page(
 }
 
 /// The slides of a pptx, in the order a person sees them.
-fn slide_names<R: std::io::Read + std::io::Seek>(zip: &zip::ZipArchive<R>) -> Vec<String> {
+pub(crate) fn slide_names<R: std::io::Read + std::io::Seek>(
+    zip: &zip::ZipArchive<R>,
+) -> Vec<String> {
     let mut names: Vec<String> = zip
         .file_names()
         .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
@@ -491,7 +633,7 @@ fn slide_names<R: std::io::Read + std::io::Seek>(zip: &zip::ZipArchive<R>) -> Ve
 /// Bytes, not text: the XML parser reads bytes, so turning the part into a
 /// `String` first only buys a second copy of a part that can be tens of
 /// megabytes.
-fn zip_entry_bytes(path: &Path, name: &str) -> Option<Vec<u8>> {
+pub(crate) fn zip_entry_bytes(path: &Path, name: &str) -> Option<Vec<u8>> {
     let cap = max_extract_bytes();
     let file = std::fs::File::open(path).ok()?;
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
@@ -614,6 +756,29 @@ fn append_decoded(event: &quick_xml::events::BytesText<'_>, out: &mut String, sk
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn saved_pages_and_markdown_name_their_titles() {
+        assert_eq!(
+            decode_entities("A &amp; B &#8212; C &#x2014; D &nbsp;&bogus; &"),
+            "A & B — C — D  &bogus; &"
+        );
+        let html = "<html><head><title>Shader Setup &#8212; Nsight</title><style>p{}</style></head>\
+                    <body><H1>Shader <b>Setup</b></h1><p>Use the &lt;debugger&gt;.</p><script>x<y</script></body></html>";
+        assert_eq!(
+            html_element(html, "title").as_deref(),
+            Some("Shader Setup — Nsight")
+        );
+        assert_eq!(html_element(html, "h1").as_deref(), Some("Shader Setup"));
+        let text = html_text(html);
+        assert!(
+            text.contains("Use the <debugger>.") && !text.contains("p{}") && !text.contains("x<y")
+        );
+        assert_eq!(
+            markdown_headings("intro\n## Usage\n# Getting started #\n#hashtag\n# Second"),
+            ["Getting started", "Second", "Usage"]
+        );
+    }
 
     /// Paragraphs become lines, a word Word split across runs stays whole, and
     /// entity references come back as characters.
