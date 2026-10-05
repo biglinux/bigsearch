@@ -533,7 +533,7 @@ extract_max_mb = 0      # extracted text per file. 0 = adaptive (4/8/16/32 MiB)
 text_max_mb = 0         # plain text input cap. 0 = no input-size skip; output is capped
 office_max_mb = 0       # Office input cap. 0 = adaptive (64 MiB low RAM, else 256 MiB)
 pdf_max_mb = 0          # PDF input cap. 0 = no input-size skip; timeout/output cap apply
-pdf_timeout_secs = 5    # wall-clock cap per PDF extraction
+pdf_timeout_secs = 5    # seconds of work per PDF extraction (CPU time at full clock)
 content_cooldown_secs = 900 # wait this long after a change before re-reading a file's
                         # content (files being edited are not re-read per save; a
                         # content search skips the wait). 0 = extract immediately

@@ -1,8 +1,9 @@
 # systemd *user* unit — install to ~/.config/systemd/user/big-search.service
 # then: systemctl --user enable --now big-search.service
 #
-# Runs unprivileged. Indexing throttles itself (nice 19 + idle I/O) at the
-# thread level, so the unit does NOT set Nice — the query path stays responsive.
+# Runs unprivileged. Indexing threads lower themselves (SCHED_IDLE, clock
+# clamp, idle I/O; throttle.rs), so the unit does NOT set Nice or
+# CPUSchedulingPolicy — the query thread keeps normal priority inside the unit.
 [Unit]
 Description=big-search file index daemon
 Documentation=https://github.com/Lord-Deepankar/big-search
@@ -24,7 +25,12 @@ Environment=BIG_SEARCH_ORIGIN_QUERY=1
 # would silently win over the user's config and make that setting a no-op.
 # Bound total memory: soft-throttle reclaims page cache, hard cap is a safety net
 # (the extraction worker pool uses a bounded queue so anonymous RSS stays low).
-CPUWeight=20
+# The whole service only gets CPU time nobody else wants (cgroup cpu.idle). A
+# thread's SCHED_IDLE counts only inside its cgroup, so without this the unit's
+# weight decides: a program sharing a core with the indexer lost 32 % at
+# CPUWeight=20, none at idle. Queries pay only when every CPU is busy: on 16
+# saturated CPUs a typical query took 6-57 ms instead of 2-22 ms.
+CPUWeight=idle
 IOAccounting=yes
 IOWeight=20
 MemoryHigh=512M

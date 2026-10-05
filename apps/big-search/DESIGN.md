@@ -127,8 +127,9 @@ Measured walk for this set ≈ tens of ms warm; one-time at first start.
 
 ### 3.4 Content extraction — `extract.rs`
 
-Bounded pool, **default 2 workers**, each `nice 19` + `ionice idle` + `setrlimit`
-(CPU time + address space) + hard wall-clock **timeout** → kill & skip on overrun.
+Bounded pool, **default 2 workers**, each at background priority (§3.5) + `setrlimit`
+(CPU time + address space) + a wall-clock backstop against hangs → kill on overrun,
+keeping the text written so far.
 Per format, lightest tool, **argv arrays only — never a shell**:
 
 | Format | Method | Dep | Phase |
@@ -229,9 +230,38 @@ runs for content-eligible extensions; everything else is name-only.
 
 ### 3.5 Throttle — `throttle.rs`
 
-`setpriority(PRIO_PROCESS, 0, 19)` + `ioprio_set(IOPRIO_CLASS_IDLE)` on scan and
-extract threads. Pool width small (2). Goal: never the cause of a perceptible
-slowdown — the explicit lesson from the 16-core pdftotext spike.
+Scan, extract and history threads take `SCHED_IDLE` with a utilization clamp
+of 512/1024, nice 19 as the fallback, and `IOPRIO_CLASS_IDLE`; the programs they
+start inherit all of it. The unit sets `CPUWeight=idle` (cgroup `cpu.idle`). Pool
+width small (2). Goal: never the cause of a perceptible slowdown — the explicit
+lesson from the 16-core pdftotext spike.
+
+Measured on an i5-13400 (6P+4E cores, SMT, `intel_cpufreq` + `schedutil`), a CPU
+loop in the program's place against the indexer's:
+
+| Indexer | Program sharing its core loses |
+|---|---|
+| nice 19, unit `CPUWeight=20` | 27 % |
+| `SCHED_IDLE`, unit `CPUWeight=20` | 32 % |
+| unit `CPUWeight=idle` | ~0 % |
+| on the core's SMT sibling, any policy | 42–50 % |
+
+A thread's policy only counts inside its cgroup, so the unit's weight decides
+against other programs; `cpu.idle` makes the whole service run on time nobody
+else wants, and `SCHED_IDLE` inside keeps the query thread ahead of the
+indexer. The cost is query latency when every CPU is busy: 16 saturated CPUs
+took a typical query from 2–22 ms to 6–57 ms, a 5000-hit one from 109–162 ms to
+412–831 ms. No policy helps against the SMT sibling — the two share one core —
+which is what the backfill's pacing (`backfill_pace`) is still for.
+
+The clamp holds the clock below turbo where the frequency driver follows the
+scheduler: a CPU loop ran at 4.1 GHz unclamped, 2.3 GHz at 512 (base 2.5) on a
+P-core; 3.3 and 1.7 GHz (base 1.8) on an E-core. Drivers that choose frequencies
+in hardware (`intel_pstate`/`amd-pstate` in active mode) ignore it. Since the
+work runs slower and waits for idle CPU, extraction is bounded by CPU time
+(`RLIMIT_CPU`, the configured seconds scaled by 1024/512), not wall-clock time:
+a PDF waiting its turn on a busy machine must not be killed and recorded as
+having no text. The wall-clock limit (3× that) only catches hangs.
 
 ### 3.6 State & crash-safety — `state.rs`
 

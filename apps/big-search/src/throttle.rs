@@ -1,12 +1,66 @@
 //! Background-priority hints and bounded backoff for indexing contention.
-//! Applied per-thread (Linux nice/ioprio are per-task): call from the indexing
-//! thread, leaving the query thread at normal priority.
+//! Applied per-thread (Linux scheduling policy, nice and ioprio are per-task):
+//! call from the indexing thread, leaving the query thread at normal priority.
 
-/// Lower the calling thread to nice 19 + idle I/O priority. Best-effort.
+/// `struct sched_attr` as of Linux 5.3 (`SCHED_ATTR_SIZE_VER1`): libc's lacks
+/// the utilization clamps.
+#[repr(C)]
+struct SchedAttr {
+    size: u32,
+    sched_policy: u32,
+    sched_flags: u64,
+    sched_nice: i32,
+    sched_priority: u32,
+    sched_runtime: u64,
+    sched_deadline: u64,
+    sched_period: u64,
+    sched_util_min: u32,
+    sched_util_max: u32,
+}
+
+/// Highest utilization the indexer may ask the CPU frequency for, out of 1024:
+/// half the CPU's own capacity, which under `schedutil` keeps a core just below
+/// its base clock — no turbo for background work. Measured on an i5-13400:
+/// 2.3 GHz on a P-core (base 2.5, turbo 4.1), 1.7 GHz on an E-core (base 1.8).
+pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
+
+/// Lower the calling thread, and the programs it starts, to background
+/// priority. Best-effort: each step stands alone, so a kernel that refuses one
+/// still gets the others.
+///
+/// - `SCHED_IDLE`: the thread runs on CPU time nobody else wants, and a normal
+///   task that wakes preempts it at once. A thread's policy only counts inside
+///   its cgroup: here it puts the indexer behind the query thread, and the
+///   unit's `CPUWeight=idle` does the same for the whole service against every
+///   other program (measured: a program sharing a core with the indexer lost
+///   32 % under a weight-20 unit, none under `CPUWeight=idle`).
+/// - The utilization clamp ([`INDEXER_UTIL_MAX`]) holds the clock down where
+///   the frequency driver follows the scheduler (`schedutil`); drivers that pick
+///   frequencies in hardware (`intel_pstate`/`amd-pstate` active) ignore it.
+/// - nice 19 for kernels that refuse `SCHED_IDLE`, and idle I/O priority, which
+///   the BFQ disk scheduler honours.
 pub fn lower_priority() {
-    // SAFETY: both are simple priority syscalls on the calling thread (who = 0).
+    let mut attr = SchedAttr {
+        size: std::mem::size_of::<SchedAttr>() as u32,
+        sched_policy: libc::SCHED_IDLE as u32,
+        sched_flags: libc::SCHED_FLAG_UTIL_CLAMP_MAX as u64,
+        sched_nice: 19,
+        sched_priority: 0,
+        sched_runtime: 0,
+        sched_deadline: 0,
+        sched_period: 0,
+        sched_util_min: 0,
+        sched_util_max: INDEXER_UTIL_MAX,
+    };
+    // SAFETY: priority syscalls on the calling thread (pid/who = 0); `attr`
+    // outlives the call and its `size` is the size of the struct passed.
     unsafe {
         libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+        if libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0) != 0 {
+            // A kernel built without utilization clamping: SCHED_IDLE alone.
+            attr.sched_flags = 0;
+            libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0);
+        }
         // ioprio_set(IOPRIO_WHO_PROCESS = 1, who = 0, IOPRIO_CLASS_IDLE = 3 << 13)
         libc::syscall(libc::SYS_ioprio_set, 1, 0, 3i64 << 13);
     }

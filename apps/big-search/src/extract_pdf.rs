@@ -3,8 +3,8 @@
     clippy::disallowed_types,
     reason = "text extraction is the one place the daemon runs other programs: \
               pdftotext (and, for big-docinfo, pdfinfo) for PDF, antiword for Word 97-2003, \
-              under a wall-clock timeout, with RLIMIT_AS set in pre_exec and stdout read \
-              through a hard cap (see run_capped)"
+              under a CPU-time limit and a wall-clock backstop, with RLIMIT_CPU and RLIMIT_AS \
+              set in pre_exec and stdout read through a hard cap (see run_capped)"
 )]
 
 use std::io::Read;
@@ -148,7 +148,7 @@ fn run_capped(
     let use_watchdog = pidfd_supported();
     let mut child = spawn_capped(program, path, !use_watchdog, options)?;
     let watchdog = if use_watchdog {
-        match SubprocessDeadline::arm(&child, Duration::from_secs(pdf_timeout_secs())) {
+        match SubprocessDeadline::arm(&child, Duration::from_secs(wall_deadline_secs())) {
             Some(watchdog) => Some(watchdog),
             None => {
                 kill_child_tree(&mut child);
@@ -222,7 +222,7 @@ fn spawn_capped(
 ) -> Option<Child> {
     let mut command = if use_timeout_wrapper {
         let mut wrapped = Command::new("timeout");
-        wrapped.arg(pdf_timeout_secs().to_string()).arg(program);
+        wrapped.arg(wall_deadline_secs().to_string()).arg(program);
         wrapped
     } else {
         Command::new(program)
@@ -243,16 +243,24 @@ fn spawn_capped(
     {
         command.process_group(0);
         let address_space_cap = crate::settings::pdf_memory_limit_bytes();
+        let cpu_seconds = cpu_limit_secs();
         // SAFETY: pre_exec runs post-fork/pre-exec in the child. setrlimit is
         // async-signal-safe, and a failed limit setup is propagated so an
-        // arbitrary PDF is never parsed without the promised memory cap.
+        // arbitrary file is never parsed without the promised caps.
         unsafe {
             command.pre_exec(move || {
-                let limit = libc::rlimit {
+                let memory = libc::rlimit {
                     rlim_cur: address_space_cap,
                     rlim_max: address_space_cap,
                 };
-                if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                // SIGXCPU at the limit, SIGKILL a second later if it is caught.
+                let cpu = libc::rlimit {
+                    rlim_cur: cpu_seconds,
+                    rlim_max: cpu_seconds + 1,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &memory) != 0
+                    || libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0
+                {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -409,6 +417,23 @@ fn pdf_max_input_bytes() -> u64 {
 
 fn pdf_timeout_secs() -> u64 {
     crate::settings::pdf_timeout_secs()
+}
+
+/// CPU time an extractor may use: the configured seconds of work, scaled by
+/// the clock the indexer is held to ([`crate::throttle::INDEXER_UTIL_MAX`]),
+/// so the setting buys the same work as when it was a wall-clock limit.
+///
+/// The work is bounded by CPU time rather than wall-clock time because the
+/// indexer runs at idle priority: on a busy machine a PDF waits its turn, and a
+/// wall-clock limit would kill it there and record the file as having no text.
+fn cpu_limit_secs() -> u64 {
+    pdf_timeout_secs().saturating_mul(1024) / u64::from(crate::throttle::INDEXER_UTIL_MAX)
+}
+
+/// Wall-clock time an extractor may take, against one that hangs without
+/// using CPU (a stalled network mount).
+fn wall_deadline_secs() -> u64 {
+    cpu_limit_secs().saturating_mul(3)
 }
 
 /// Full PDF text split into pages by the form-feed pdftotext emits per page.
@@ -573,6 +598,61 @@ mod tests {
         assert_eq!(rtf_described.declared_title.as_deref(), Some("Ata"));
         assert!(other_text.is_none());
         assert_eq!(plain_text.as_deref(), Some("Keymap notes\n"));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&bin).ok();
+    }
+
+    /// Work is bounded by CPU time: an extractor that spins is stopped by
+    /// RLIMIT_CPU (2 s for a 1 s setting at half clock), well before the
+    /// wall-clock backstop (6 s), and the text it wrote first is kept.
+    #[test]
+    fn pdf_extraction_stops_a_spinning_extractor_by_cpu_time() {
+        let _env_guard = subprocess_env_guard();
+        let dir = temporary_extract_dir("pdfspin");
+        let bin = temporary_executable_dir("pdfspin");
+        let fake_pdftotext = bin.join("pdftotext");
+        std::fs::write(
+            &fake_pdftotext,
+            "#!/bin/sh\necho 'first page'\nwhile :; do :; done\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&fake_pdftotext).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_pdftotext, permissions).unwrap();
+        let path = dir.join("spinning.pdf");
+        std::fs::write(&path, b"%PDF fake").unwrap();
+
+        let previous_path = std::env::var_os("PATH");
+        let previous_timeout = std::env::var_os("BIG_SEARCH_PDF_TIMEOUT_SECS");
+        let test_path = previous_path
+            .as_ref()
+            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
+            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
+        unsafe {
+            std::env::set_var("PATH", test_path);
+            std::env::set_var("BIG_SEARCH_PDF_TIMEOUT_SECS", "1");
+        }
+
+        let started = std::time::Instant::now();
+        let text = read_pdf(&path);
+        let elapsed = started.elapsed();
+
+        unsafe {
+            match previous_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match previous_timeout {
+                Some(value) => std::env::set_var("BIG_SEARCH_PDF_TIMEOUT_SECS", value),
+                None => std::env::remove_var("BIG_SEARCH_PDF_TIMEOUT_SECS"),
+            }
+        }
+
+        assert_eq!(text.as_deref(), Some("first page\n"));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "CPU limit not enforced: took {elapsed:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&bin).ok();
     }
