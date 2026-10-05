@@ -383,6 +383,21 @@ pub fn backfill_pace(work: Duration) -> (Load, Duration) {
 /// so each backfill cycle measures what the others used during it.
 static CPU_SAMPLE: Mutex<Option<(Instant, f64, f64)>> = Mutex::new(None);
 
+/// Start the window [`backfill_pace`] judges: what the others use while a batch
+/// runs. Measured from the previous batch instead, the first batch after a
+/// quiet spell averaged minutes of idle machine and ran flat out under load.
+pub fn begin_cpu_window() {
+    let own = own_cgroup_dir();
+    if let (Some(busy), Some(own)) = (
+        machine_busy_seconds(),
+        own.as_deref().and_then(cgroup_cpu_seconds),
+    ) {
+        *CPU_SAMPLE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some((Instant::now(), busy, own));
+    }
+}
+
 /// Cores the rest of the machine kept busy since the previous call. Zero on the
 /// first call, and whenever a counter cannot be read.
 fn others_cores(cgroup: Option<&std::path::Path>) -> f64 {

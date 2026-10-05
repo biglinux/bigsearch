@@ -623,6 +623,7 @@ fn run_content_backfill_batch(
     content_backfill: &mut ContentBackfill,
 ) -> Result<()> {
     let started = Instant::now();
+    crate::throttle::begin_cpu_window();
     // Only when something was actually deleted. Proving "no orphans" still costs
     // a full scan of the content namespace — 19 865 page reads on this corpus —
     // and running that at the start of every pass meant paying it after every
