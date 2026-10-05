@@ -181,6 +181,16 @@ the ceiling (`count_capped`); warm, a name query went from 17-24 ms to 3-5 ms an
 "both" from 19-25 ms to 5-18 ms. Names carry their folded stem as a term so the
 exact name stays first among few candidates.
 
+**Memory and build (2026-10).** Query readers keep 8 decompressed store blocks
+per segment instead of tantivy's 100 (`index::query_reader`): on fresh daemons
+after the same 60 queries, 23.6 MB of anonymous memory against 26.2-27.0 MB.
+tantivy is built with only `mmap` and `lz4-compression`: the stemmer, stopword
+lists and columnar zstd went unused, and the release binary went from 9.1 to
+8.1 MB. The docstore compressor thread stays: it lives only while a segment is
+written, and it is spawned by the indexing thread, whose idle policy and cgroup
+it inherits. The state migrations for earlier installs are gone; the program is
+not installed anywhere yet.
+
 ### 3.2 Initial scan — `scan.rs`
 
 `ignore` crate `WalkBuilder` (parallel, the engine behind `fd`/`rg`): respects
