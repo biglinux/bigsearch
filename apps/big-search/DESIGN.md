@@ -156,7 +156,14 @@ and in Russian did not even join "квартал" to "квартале"; the rul
 such pair, in both directions. Totals went from 363 to the ceiling for
 "relatorios", 898 to 1509 for "acoes", 367 to 764 for "responsaveis", with no
 change in latency. Russian inflection beyond the last-word prefix ("кварталы" →
-"квартале") is not covered. On the i3's 5400 rpm disk
+"квартале") is not covered. Spellings the analyzer keeps apart are asked for at query time
+(`query::script_variants`: Russian е/ё, Greek accent and final ς, Arabic hamza
+alef and article; one CJK character as the prefix of the bigrams it opens, in
+content and names) instead of a content re-index: re-extracting every document
+on every machine to fold them would have fixed only decomposed accents, 387 of
+5.5 million indexed words, all the dot of a Turkish İ. The 42-query test in 12
+languages went from 23 to 38 hits; left are simplified/traditional Chinese
+(needs a dictionary), German "oe" for "ö" and the Turkish İ in content. On the i3's 5400 rpm disk
 the expansion cost nothing measurable cold ("zz relatorio" 1013 ms against
 "relatorio zz" 1019 ms, both dominated by opening the indexes), and a tighter
 budget (16/10 000) changed no timing while dropping Portuguese words from short
