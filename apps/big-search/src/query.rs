@@ -239,7 +239,7 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
         return Ok(Vec::new());
     }
 
-    let Some(query) = name_query(&f, &words, filter) else {
+    let Some(query) = name_query(&searcher, &f, &words, filter) else {
         return Ok(Vec::new());
     };
 
@@ -321,7 +321,12 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
 /// Should clauses rank, they never widen: an exact name, then words that
 /// start or end where the query does, are lifted above the rest, so they are
 /// among the candidates even when only a page of them is read.
-fn name_query(f: &crate::index::Fields, words: &[String], filter: &Filter) -> Option<BooleanQuery> {
+fn name_query(
+    searcher: &tantivy::Searcher,
+    f: &crate::index::Fields,
+    words: &[String],
+    filter: &Filter,
+) -> Option<BooleanQuery> {
     let term = |field, text: &str| -> Box<dyn Query> {
         Box::new(TermQuery::new(
             Term::from_field_text(field, text),
@@ -342,6 +347,18 @@ fn name_query(f: &crate::index::Fields, words: &[String], filter: &Filter) -> Op
             for gram in grams {
                 clauses.push((Occur::Must, term(f.name, &gram)));
             }
+            continue;
+        }
+        if chars.len() == 1 {
+            // One CJK character: every place it stands in a name opens a
+            // two-character gram (the name text ends with a space), so the
+            // grams it begins find it.
+            let grams = grams_beginning(searcher, f.name, word);
+            let any: Vec<(Occur, Box<dyn Query>)> = grams
+                .iter()
+                .map(|gram| (Occur::Should, term(f.name, gram)))
+                .collect();
+            clauses.push((Occur::Must, Box::new(BooleanQuery::new(any))));
             continue;
         }
         // Three-letter grams only: they imply the two-letter ones, whose
@@ -384,6 +401,38 @@ fn name_query(f: &crate::index::Fields, words: &[String], filter: &Filter) -> Op
     Some(BooleanQuery::new(clauses))
 }
 
+/// The two-character grams of the name field that begin with `prefix` (one
+/// character), across segments, at most 64.
+fn grams_beginning(
+    searcher: &tantivy::Searcher,
+    field: tantivy::schema::Field,
+    prefix: &str,
+) -> Vec<String> {
+    let upper = prefix_end(prefix.as_bytes());
+    let mut grams: Vec<String> = Vec::new();
+    for segment in searcher.segment_readers() {
+        let Ok(inverted) = segment.inverted_index(field) else {
+            continue;
+        };
+        let mut range = inverted.terms().range().ge(prefix.as_bytes());
+        if let Some(upper) = &upper {
+            range = range.lt(upper);
+        }
+        let Ok(mut terms) = range.into_stream() else {
+            continue;
+        };
+        while grams.len() < 64 && terms.advance() {
+            if let Ok(text) = std::str::from_utf8(terms.key())
+                && text.chars().count() == 2
+                && !grams.iter().any(|gram| gram == text)
+            {
+                grams.push(text.to_owned());
+            }
+        }
+    }
+    grams
+}
+
 /// Matches of `query` in the index, counted up to `cap`: the posting lists
 /// are walked, nothing is scored and no document is read.
 fn count_capped(searcher: &tantivy::Searcher, query: &dyn Query, cap: usize) -> Result<usize> {
@@ -406,7 +455,7 @@ fn count_capped(searcher: &tantivy::Searcher, query: &dyn Query, cap: usize) -> 
 fn count_names(reader: &IndexReader, q: &str, filter: &Filter, cap: usize) -> Result<usize> {
     let searcher = reader.searcher();
     let f = fields(searcher.index())?;
-    match name_query(&f, &crate::index::name_words(q), filter) {
+    match name_query(&searcher, &f, &crate::index::name_words(q), filter) {
         Some(query) => count_capped(&searcher, &query, cap),
         None => Ok(0),
     }
@@ -712,12 +761,19 @@ fn word_query(
 ) -> Result<Box<dyn Query>> {
     let exact = TermQuery::new(Term::from_field_text(field, word), record);
     if word.chars().any(crate::cjk_tokenizer::is_unspaced) {
-        return Ok(Box::new(exact));
+        // One CJK character is indexed only where it stands alone; elsewhere
+        // it opens bigrams, which it finds as their prefix.
+        if word.chars().count() > 1 {
+            return Ok(Box::new(exact));
+        }
+        let forms = prefix_forms(searcher, field, word)?;
+        return Ok(with_forms(exact, forms, field, record));
     }
     // Only forms the index holds: a query term for a word no document has
     // would cost a lookup for nothing on every segment.
     let mut forms: Vec<String> = inflections(word)
         .into_iter()
+        .chain(script_variants(word))
         .filter(|form| {
             searcher.segment_readers().iter().any(|segment| {
                 segment.inverted_index(field).is_ok_and(|inverted| {
@@ -732,8 +788,18 @@ fn word_query(
     if last && word.chars().count() >= MIN_PREFIX_CHARS {
         forms.extend(prefix_forms(searcher, field, word)?);
     }
+    Ok(with_forms(exact, forms, field, record))
+}
+
+/// `exact`, ranked first, or any of `forms`.
+fn with_forms(
+    exact: TermQuery,
+    mut forms: Vec<String>,
+    field: tantivy::schema::Field,
+    record: IndexRecordOption,
+) -> Box<dyn Query> {
     if forms.is_empty() {
-        return Ok(Box::new(exact));
+        return Box::new(exact);
     }
     forms.sort_unstable();
     forms.dedup();
@@ -745,7 +811,93 @@ fn word_query(
         let term = Term::from_field_text(field, &form);
         clauses.push((Occur::Should, Box::new(TermQuery::new(term, record))));
     }
-    Ok(Box::new(BooleanQuery::new(clauses)))
+    Box::new(BooleanQuery::new(clauses))
+}
+
+/// Spellings of a content word that the analyzer keeps apart and people treat
+/// as one: Russian е and ё, Greek with or without its accent and final ς, and
+/// Arabic alef with or without hamza, with or without the article. The content
+/// index stores words as written, so the query asks for each spelling the
+/// index holds instead of every document being re-read to fold them: of 5.5
+/// million indexed words, these were the cases found (702 with ё, 18 133 with
+/// a Greek accent, 1 443 with a hamza alef, 1 932 with the article), while
+/// decomposed accents, which only re-reading would fix, were 387, all of them
+/// the dot of a Turkish İ.
+fn script_variants(word: &str) -> Vec<String> {
+    let mut variants: Vec<String> = Vec::new();
+    let chars: Vec<char> = word.chars().collect();
+    let mut push = |variant: String| {
+        if variant != word && !variants.contains(&variant) {
+            variants.push(variant);
+        }
+    };
+    // Russian: ё typed as е, or written as е.
+    if word.contains('ё') {
+        push(word.replace('ё', "е"));
+    }
+    for (i, &c) in chars.iter().enumerate() {
+        if c == 'е' {
+            let mut with_yo = chars.clone();
+            with_yo[i] = 'ё';
+            push(with_yo.into_iter().collect());
+        }
+    }
+    // Greek: the accent typed or left out, on whichever vowel carries it.
+    const TONOS: [(char, char); 7] = [
+        ('α', 'ά'),
+        ('ε', 'έ'),
+        ('η', 'ή'),
+        ('ι', 'ί'),
+        ('ο', 'ό'),
+        ('υ', 'ύ'),
+        ('ω', 'ώ'),
+    ];
+    let plain = |c: char| TONOS.iter().find(|(_, a)| *a == c).map_or(c, |(p, _)| *p);
+    if chars.iter().any(|c| TONOS.iter().any(|(_, a)| a == c)) {
+        push(chars.iter().map(|&c| plain(c)).collect());
+    } else {
+        for (i, &c) in chars.iter().enumerate() {
+            if let Some((_, accented)) = TONOS.iter().find(|(p, _)| *p == c) {
+                let mut with_tonos = chars.clone();
+                with_tonos[i] = *accented;
+                push(with_tonos.into_iter().collect());
+            }
+        }
+    }
+    if let Some(stem) = word.strip_suffix('σ') {
+        push(format!("{stem}ς"));
+    }
+    if let Some(stem) = word.strip_suffix('ς') {
+        push(format!("{stem}σ"));
+    }
+    // Arabic: alef with or without hamza, and the article in front or not.
+    let arabic = chars.iter().any(|c| ('\u{0600}'..='\u{06FF}').contains(c));
+    if arabic && chars.len() >= 3 {
+        let bare: String = chars
+            .iter()
+            .map(|&c| if "أإآٱ".contains(c) { 'ا' } else { c })
+            .collect();
+        let without_article = ["وال", "بال", "كال", "فال", "ال", "لل"]
+            .iter()
+            .find_map(|article| {
+                bare.strip_prefix(article)
+                    .filter(|rest| rest.chars().count() >= 3)
+            })
+            .unwrap_or(&bare)
+            .to_owned();
+        let mut stems = vec![without_article.clone()];
+        if let Some(rest) = without_article.strip_prefix('ا') {
+            for hamza in ['أ', 'إ', 'آ'] {
+                stems.push(format!("{hamza}{rest}"));
+            }
+        }
+        for stem in stems {
+            for article in ["", "ال", "وال", "بال"] {
+                push(format!("{article}{stem}"));
+            }
+        }
+    }
+    variants
 }
 
 /// The indexed words `word` begins, the most frequent first, within
@@ -1926,6 +2078,61 @@ mod tests {
         assert!(paths("re").is_empty());
         // Only the last word begins others: "rel" is no word of plural.txt.
         assert!(paths("rel contratos").is_empty());
+    }
+
+    /// The spellings people treat as one find each other: Russian е/ё, Greek
+    /// with or without its accent, Arabic alef with or without hamza and with
+    /// or without the article; one CJK character finds the words it opens.
+    #[test]
+    fn content_spellings_find_each_other() {
+        let content = content_index_with(
+            "spellings",
+            &[
+                ("/d/ru.txt", "Отчёт о продажах и ёлка"),
+                ("/d/ru2.txt", "елка без точек"),
+                ("/d/el.txt", "Οι πωλήσεις αυξήθηκαν κατά είκοσι"),
+                ("/d/ar.txt", "ارتفعت المبيعات وقال أحمد"),
+                ("/d/zh.txt", "本季度的销售额增长了"),
+            ],
+        );
+        let paths = |q: &str| -> Vec<String> {
+            let mut found: Vec<String> = search_content(&content, q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect();
+            found.sort();
+            found
+        };
+        assert_eq!(paths("отчет"), ["/d/ru.txt"]);
+        assert_eq!(paths("елка"), ["/d/ru.txt", "/d/ru2.txt"]);
+        assert_eq!(paths("ёлка"), ["/d/ru.txt", "/d/ru2.txt"]);
+        assert_eq!(paths("πωλησεις"), ["/d/el.txt"]);
+        assert_eq!(paths("ΑΥΞΗΘΗΚΑΝ"), ["/d/el.txt"]);
+        assert_eq!(paths("مبيعات"), ["/d/ar.txt"]);
+        assert_eq!(paths("احمد"), ["/d/ar.txt"]);
+        assert_eq!(paths("销"), ["/d/zh.txt"]);
+    }
+
+    /// One CJK character finds the names it stands in, wherever it stands.
+    #[test]
+    fn one_cjk_character_finds_names() {
+        let index = index_with(
+            "cjk-one",
+            &["/h/季度销售报告2026.txt", "/h/会議の議事録.txt"],
+        );
+        for (query, name) in [
+            ("报", "季度销售报告2026.txt"),
+            ("告", "季度销售报告2026.txt"),
+            ("季", "季度销售报告2026.txt"),
+            ("録", "会議の議事録.txt"),
+        ] {
+            assert_eq!(
+                names(search(&index, query, &Filter::default(), 10).unwrap()),
+                [name],
+                "query {query:?}"
+            );
+        }
     }
 
     /// Every word finds its plural or singular, in both directions and whatever
