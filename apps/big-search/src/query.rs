@@ -1,5 +1,5 @@
 //! Name search: ngram recall via Tantivy, then exact substring post-filter.
-use crate::index::{BODY, content_fields, fields};
+use crate::index::{BODY_QUERY, content_fields, fields};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
@@ -239,7 +239,7 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
         return Ok(Vec::new());
     }
 
-    let Some(query) = name_query(&searcher, &f, &words, filter) else {
+    let Some(query) = name_query(&f, &words, filter) else {
         return Ok(Vec::new());
     };
 
@@ -321,12 +321,7 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
 /// Should clauses rank, they never widen: an exact name, then words that
 /// start or end where the query does, are lifted above the rest, so they are
 /// among the candidates even when only a page of them is read.
-fn name_query(
-    searcher: &tantivy::Searcher,
-    f: &crate::index::Fields,
-    words: &[String],
-    filter: &Filter,
-) -> Option<BooleanQuery> {
+fn name_query(f: &crate::index::Fields, words: &[String], filter: &Filter) -> Option<BooleanQuery> {
     let term = |field, text: &str| -> Box<dyn Query> {
         Box::new(TermQuery::new(
             Term::from_field_text(field, text),
@@ -349,20 +344,9 @@ fn name_query(
             }
             continue;
         }
-        if chars.len() == 1 {
-            // One CJK character: every place it stands in a name opens a
-            // two-character gram (the name text ends with a space), so the
-            // grams it begins find it.
-            let grams = grams_beginning(searcher, f.name, word);
-            let any: Vec<(Occur, Box<dyn Query>)> = grams
-                .iter()
-                .map(|gram| (Occur::Should, term(f.name, gram)))
-                .collect();
-            clauses.push((Occur::Must, Box::new(BooleanQuery::new(any))));
-            continue;
-        }
         // Three-letter grams only: they imply the two-letter ones, whose
-        // posting lists are the longest reads on a cold disk.
+        // posting lists are the longest reads on a cold disk. One CJK
+        // character is a gram of its own (`index::NameGrams`).
         let mut grams: Vec<String> = if chars.len() < 3 {
             vec![word.clone()]
         } else {
@@ -401,38 +385,6 @@ fn name_query(
     Some(BooleanQuery::new(clauses))
 }
 
-/// The two-character grams of the name field that begin with `prefix` (one
-/// character), across segments, at most 64.
-fn grams_beginning(
-    searcher: &tantivy::Searcher,
-    field: tantivy::schema::Field,
-    prefix: &str,
-) -> Vec<String> {
-    let upper = prefix_end(prefix.as_bytes());
-    let mut grams: Vec<String> = Vec::new();
-    for segment in searcher.segment_readers() {
-        let Ok(inverted) = segment.inverted_index(field) else {
-            continue;
-        };
-        let mut range = inverted.terms().range().ge(prefix.as_bytes());
-        if let Some(upper) = &upper {
-            range = range.lt(upper);
-        }
-        let Ok(mut terms) = range.into_stream() else {
-            continue;
-        };
-        while grams.len() < 64 && terms.advance() {
-            if let Ok(text) = std::str::from_utf8(terms.key())
-                && text.chars().count() == 2
-                && !grams.iter().any(|gram| gram == text)
-            {
-                grams.push(text.to_owned());
-            }
-        }
-    }
-    grams
-}
-
 /// Matches of `query` in the index, counted up to `cap`: the posting lists
 /// are walked, nothing is scored and no document is read.
 fn count_capped(searcher: &tantivy::Searcher, query: &dyn Query, cap: usize) -> Result<usize> {
@@ -455,7 +407,7 @@ fn count_capped(searcher: &tantivy::Searcher, query: &dyn Query, cap: usize) -> 
 fn count_names(reader: &IndexReader, q: &str, filter: &Filter, cap: usize) -> Result<usize> {
     let searcher = reader.searcher();
     let f = fields(searcher.index())?;
-    match name_query(&searcher, &f, &crate::index::name_words(q), filter) {
+    match name_query(&f, &crate::index::name_words(q), filter) {
         Some(query) => count_capped(&searcher, &query, cap),
         None => Ok(0),
     }
@@ -711,7 +663,10 @@ fn content_query(searcher: &tantivy::Searcher, q: &str) -> Result<Option<Boolean
     } else {
         IndexRecordOption::Basic
     };
-    let mut analyzer = index.tokenizers().get(BODY).context("body tokenizer")?;
+    let mut analyzer = index
+        .tokenizers()
+        .get(BODY_QUERY)
+        .context("body query tokenizer")?;
     let mut words: Vec<String> = Vec::new();
     let mut stream = analyzer.token_stream(q);
     while stream.advance() {
@@ -749,8 +704,8 @@ const MAX_SCANNED_TERMS: usize = 20_000;
 /// or singular (see [`inflections`]) — "relatorios" finds "relatorio", "acao"
 /// finds "acoes". The last word is also read as typed so far: it finds any
 /// indexed word it begins — as-you-type in a launcher — the most frequent
-/// first (see [`prefix_forms`]). Every form keeps its BM25 score. A word of CJK
-/// bigrams is matched exactly, and a last word shorter than
+/// first (see [`prefix_forms`]). Every form keeps its BM25 score. A CJK bigram
+/// or character is matched exactly, and a last word shorter than
 /// [`MIN_PREFIX_CHARS`] begins nothing.
 fn word_query(
     searcher: &tantivy::Searcher,
@@ -761,13 +716,7 @@ fn word_query(
 ) -> Result<Box<dyn Query>> {
     let exact = TermQuery::new(Term::from_field_text(field, word), record);
     if word.chars().any(crate::cjk_tokenizer::is_unspaced) {
-        // One CJK character is indexed only where it stands alone; elsewhere
-        // it opens bigrams, which it finds as their prefix.
-        if word.chars().count() > 1 {
-            return Ok(Box::new(exact));
-        }
-        let forms = prefix_forms(searcher, field, word)?;
-        return Ok(with_forms(exact, forms, field, record));
+        return Ok(Box::new(exact));
     }
     // Only forms the index holds: a query term for a word no document has
     // would cost a lookup for nothing on every segment.
@@ -2051,6 +2000,43 @@ mod tests {
                 [name],
                 "query {query:?}"
             );
+        }
+    }
+
+    /// One CJK character is a term of its own: it is found wherever it stands,
+    /// however many different characters follow it elsewhere (the names held
+    /// to be scanned for the grams it opens stopped at 64).
+    #[test]
+    fn one_cjk_character_is_found_wherever_it_stands() {
+        let mut paths: Vec<String> = (0..70)
+            .map(|i| format!("/h/报{}.txt", char::from_u32(0x4E00 + i).unwrap()))
+            .collect();
+        paths.push("/h/报龥.txt".to_owned());
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let index = index_with("cjk-many", &refs);
+        let found = names(search(&index, "报", &Filter::default(), 100).unwrap());
+        assert_eq!(found.len(), 71);
+        assert!(found.iter().any(|name| name == "报龥.txt"));
+
+        let content = content_index_with(
+            "cjk-one-content",
+            &[
+                ("/h/a.txt", "本季度的销售额增长了。"),
+                ("/h/b.txt", "销售部门"),
+            ],
+        );
+        for (query, expected) in [
+            ("额", vec!["/h/a.txt"]),
+            ("销", vec!["/h/a.txt", "/h/b.txt"]),
+            ("售额", vec!["/h/a.txt"]),
+        ] {
+            let mut got: Vec<String> = search_content(&content, query, 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect();
+            got.sort();
+            assert_eq!(got, expected, "query {query:?}");
         }
     }
 

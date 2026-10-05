@@ -160,8 +160,7 @@ change in latency. Russian inflection beyond the last-word prefix ("кварта
 (`index::ScriptFold` over `extract::fold_script_into`, then ASCII folding:
 combining marks, ё, Greek accents and ς, Arabic hamza alef, alef maqsura, vowel
 signs, tatweel and article), and the tokenizer keeps combining marks inside a
-word so a decomposed accent no longer splits it. One CJK character finds the
-bigrams it opens, in content and names. A query-time variant scheme was built
+word so a decomposed accent no longer splits it. A query-time variant scheme was built
 first to spare installed machines a re-index; the program is not installed
 anywhere yet, so the one-time re-index won (88 055 documents in about 13 minutes
 here, part of it under heavy load). The 42-query test in 12 languages went from
@@ -179,6 +178,16 @@ instead of bigrams. Text already in NFKC, nearly all of it, is not copied. On
 the translation-catalog test (`local-agent-mini/tools/lang_eval.py`, 13
 languages) Korean NFD documents went from 0 % to 100 % found, Japanese NFD from
 79 % and halfwidth from 37 % to 100 %, with no other result changed.
+
+**One CJK character (2026-10).** The index holds every character of a CJK,
+Thai, Lao, Khmer or Myanmar run alone as well as its bigrams, in content
+(`CjkFriendlyTokenizer { unigrams: true }`) and in names (`index::NameGrams`);
+queries of two characters or more still ask for bigrams only (`BODY_QUERY`). One
+typed character used to be expanded to the indexed bigrams it begins, capped at
+32 (content) and 64 (names) in byte order, and a character that only ended runs
+began none: documents holding a sampled character were all found for 30-55 %
+of queries; now for all of them, with the content index of the 13-language test
+3 % larger.
 
 The backfill's duty cycle follows the CPU time the service used in a batch, not
 the batch's wall time: at idle priority on a busy machine a 250-file batch took

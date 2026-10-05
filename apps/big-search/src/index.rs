@@ -9,20 +9,24 @@ use tantivy::schema::{
     Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
 };
 use tantivy::tokenizer::{
-    AsciiFoldingFilter, LowerCaser, NgramTokenizer, RemoveLongFilter, TextAnalyzer, Token,
-    TokenFilter, TokenStream, Tokenizer,
+    AsciiFoldingFilter, LowerCaser, RemoveLongFilter, TextAnalyzer, Token, TokenFilter,
+    TokenStream, Tokenizer,
 };
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
-/// Registered analyzer for the `name` field: 2- and 3-character grams of
-/// [`name_text`]. Bumped from `name_ngram` (which folded after cutting the
-/// grams), so the on-disk schema differs and the name index rebuilds.
-pub const NGRAM: &str = "name_grams";
-/// Registered analyzer for the `body` field: CJK-bigram aware, word-splitting
-/// otherwise, folded like names ([`ScriptFold`] then ASCII folding). Bumped
-/// from `body_cjk` (folding Latin accents only) so the on-disk schema differs
-/// and the content index rebuilds with the new analyzer.
-pub const BODY: &str = "body_folded";
+/// Registered analyzer for the `name` field: [`NameGrams`] of [`name_text`].
+/// Its name changes with what it emits (last: `name_grams`, before NFKC and
+/// single CJK characters), so the on-disk schema differs and the name index
+/// rebuilds.
+pub const NGRAM: &str = "name_nfkc";
+/// Registered analyzer for the `body` field: CJK-bigram aware with every CJK
+/// character alone too, word-splitting otherwise, folded like names
+/// ([`ScriptFold`] then ASCII folding). Renamed the same way (last:
+/// `body_folded`), so the content index rebuilds with it.
+pub const BODY: &str = "body_nfkc";
+/// The analyzer content queries go through: [`BODY`] without the single
+/// characters of a CJK run (see [`CjkFriendlyTokenizer`]).
+pub const BODY_QUERY: &str = "body_nfkc_query";
 const DEFAULT_BACKGROUND_WRITER_MEMORY_MB: usize = 15;
 const DEFAULT_BULK_WRITER_MEMORY_MB: usize = 32;
 const MIN_WRITER_MEMORY_MB: usize = 15;
@@ -109,12 +113,78 @@ fn raw_identifier_options(stored: bool) -> TextOptions {
 /// Register the name analyzer: plain grams, because [`name_text`] already
 /// folded the text. Folding after cutting the grams changed their length
 /// ("ß" -> "ss") and broke every gram across the letter.
-fn register_name_tokenizer(index: &Index) -> Result<()> {
-    let ngram = NgramTokenizer::all_ngrams(2, 3).context("ngram tokenizer")?;
+fn register_name_tokenizer(index: &Index) {
     index
         .tokenizers()
-        .register(NGRAM, TextAnalyzer::builder(ngram).build());
-    Ok(())
+        .register(NGRAM, TextAnalyzer::builder(NameGrams).build());
+}
+
+/// The `name` field's grams: every two- and three-character slice of
+/// [`name_text`], and each character of a space-less script alone, since one
+/// Chinese or Korean character is often a word.
+#[derive(Clone)]
+struct NameGrams;
+
+impl Tokenizer for NameGrams {
+    type TokenStream<'a> = NameGramStream<'a>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> NameGramStream<'a> {
+        NameGramStream {
+            text,
+            start: 0,
+            length: 0,
+            token: Token::default(),
+        }
+    }
+}
+
+struct NameGramStream<'a> {
+    text: &'a str,
+    /// Byte offset of the character the next grams start at.
+    start: usize,
+    /// Characters in the last gram emitted from `start`.
+    length: usize,
+    token: Token,
+}
+
+impl TokenStream for NameGramStream<'_> {
+    fn advance(&mut self) -> bool {
+        while let Some(first) = self.text[self.start..].chars().next() {
+            self.length += 1;
+            let wanted =
+                self.length == 1 && crate::cjk_tokenizer::is_unspaced(first) || self.length >= 2;
+            let end = self.text[self.start..]
+                .char_indices()
+                .nth(self.length - 1)
+                .map(|(at, c)| self.start + at + c.len_utf8());
+            match end {
+                Some(end) if self.length <= 3 => {
+                    if !wanted {
+                        continue;
+                    }
+                    self.token.offset_from = self.start;
+                    self.token.offset_to = end;
+                    self.token.position = self.start;
+                    self.token.text.clear();
+                    self.token.text.push_str(&self.text[self.start..end]);
+                    return true;
+                }
+                _ => {
+                    self.start += first.len_utf8();
+                    self.length = 0;
+                }
+            }
+        }
+        false
+    }
+
+    fn token(&self) -> &Token {
+        &self.token
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        &mut self.token
+    }
 }
 
 /// The text the `name` field indexes and every name comparison reads: folded
@@ -181,17 +251,19 @@ fn is_name_separator(c: char) -> bool {
         )
 }
 
-/// Register the content word analyzer.
+/// Register the content word analyzers, for the index and for queries.
 fn register_body_tokenizer(index: &Index) {
-    index.tokenizers().register(
-        BODY,
-        TextAnalyzer::builder(CjkFriendlyTokenizer)
-            .filter(RemoveLongFilter::limit(40))
-            .filter(LowerCaser)
-            .filter(ScriptFold)
-            .filter(AsciiFoldingFilter)
-            .build(),
-    );
+    for (name, unigrams) in [(BODY, true), (BODY_QUERY, false)] {
+        index.tokenizers().register(
+            name,
+            TextAnalyzer::builder(CjkFriendlyTokenizer { unigrams })
+                .filter(RemoveLongFilter::limit(40))
+                .filter(LowerCaser)
+                .filter(ScriptFold)
+                .filter(AsciiFoldingFilter)
+                .build(),
+        );
+    }
 }
 
 /// The folding of [`crate::extract::fold_script_into`] for content words, so a
@@ -354,7 +426,7 @@ fn open_read_only_with(
         )
     })?;
     if index.schema() == build_name_schema() {
-        register_name_tokenizer(&index)?;
+        register_name_tokenizer(&index);
     } else if [IndexRecordOption::Basic, IndexRecordOption::WithFreqs]
         .into_iter()
         .any(|record| index.schema() == build_content_schema_for(record))
@@ -370,7 +442,7 @@ fn open_read_only_with(
 /// Open the on-disk index, creating it on first use. Tokenizer is always registered.
 pub fn open_or_create(dir: &Path) -> Result<Index> {
     let index = open_or_create_with_schema(dir, build_name_schema)?;
-    register_name_tokenizer(&index)?;
+    register_name_tokenizer(&index);
     Ok(index)
 }
 
@@ -450,7 +522,7 @@ fn is_non_empty_dir(dir: &Path) -> bool {
 
 pub fn recreate_on_disk(dir: &Path) -> Result<Index> {
     let index = recreate(dir, build_name_schema)?;
-    register_name_tokenizer(&index)?;
+    register_name_tokenizer(&index);
     Ok(index)
 }
 
@@ -685,6 +757,36 @@ pub fn is_divergent_document_count(indexed_documents: u64, cached_paths: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grams(text: &str) -> Vec<String> {
+        let mut tokenizer = NameGrams;
+        let mut stream = tokenizer.token_stream(text);
+        let mut out = Vec::new();
+        while stream.advance() {
+            out.push(stream.token().text.clone());
+        }
+        out
+    }
+
+    /// The name grams are tantivy's 2- and 3-grams, plus each CJK character.
+    #[test]
+    fn name_grams_add_single_cjk_characters_to_the_ngrams() {
+        for text in [" relatorio final ", " go ", " a ", "", " ab"] {
+            let mut ngram = tantivy::tokenizer::NgramTokenizer::all_ngrams(2, 3).unwrap();
+            let mut stream = ngram.token_stream(text);
+            let mut expected = Vec::new();
+            while stream.advance() {
+                expected.push(stream.token().text.clone());
+            }
+            assert_eq!(grams(text), expected, "for {text:?}");
+        }
+        assert_eq!(
+            grams(" 报告 x"),
+            [
+                " 报", " 报告", "报", "报告", "报告 ", "告", "告 ", "告 x", " x"
+            ]
+        );
+    }
     use tantivy::schema::FieldType;
 
     #[test]

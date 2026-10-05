@@ -133,6 +133,10 @@ pub struct CjkTokenStream<'a> {
     /// longer one must not get a trailing unigram, which would add a clause no
     /// document can satisfy.
     run: Option<(usize, char, bool)>,
+    /// Indexing: every character of a space-less run is also a token of its
+    /// own, due before the bigram it opens.
+    unigrams: bool,
+    unigram_due: bool,
     position: usize,
     token: Token,
 }
@@ -180,11 +184,19 @@ impl TokenStream for CjkTokenStream<'_> {
     fn advance(&mut self) -> bool {
         loop {
             if let Some((offset, current, emitted)) = self.run {
+                if self.unigram_due {
+                    self.unigram_due = false;
+                    self.token.text.clear();
+                    self.token.text.push(current);
+                    self.emit(offset, offset + current.len_utf8());
+                    return true;
+                }
                 match self.char_at(self.cursor) {
                     Some(next) if is_unspaced(next) => {
                         let next_offset = self.cursor;
                         self.cursor += next.len_utf8();
                         self.run = Some((next_offset, next, true));
+                        self.unigram_due = self.unigrams;
                         self.token.text.clear();
                         self.token.text.push(current);
                         self.token.text.push(next);
@@ -193,7 +205,7 @@ impl TokenStream for CjkTokenStream<'_> {
                     }
                     _ => {
                         self.run = None;
-                        if emitted {
+                        if emitted || self.unigrams {
                             continue;
                         }
                         self.token.text.clear();
@@ -217,6 +229,7 @@ impl TokenStream for CjkTokenStream<'_> {
             self.cursor += current.len_utf8();
             if is_unspaced(current) {
                 self.run = Some((offset, current, false));
+                self.unigram_due = self.unigrams;
                 continue;
             }
             if !current.is_alphanumeric() {
@@ -243,8 +256,16 @@ impl TokenStream for CjkTokenStream<'_> {
 }
 
 /// Body analyzer base tokenizer: CJK-bigram aware, word-splitting otherwise.
-#[derive(Clone, Default)]
-pub struct CjkFriendlyTokenizer;
+///
+/// The index and the queries tokenize space-less runs differently. A document
+/// holds every character of a run alone as well as its bigrams, so one typed
+/// character ("销") finds every place it stands, the end of a run included.
+/// A query of two characters or more asks for bigrams only: a unigram clause
+/// would add nothing the bigrams do not already require.
+#[derive(Clone)]
+pub struct CjkFriendlyTokenizer {
+    pub unigrams: bool,
+}
 
 impl Tokenizer for CjkFriendlyTokenizer {
     type TokenStream<'a> = CjkTokenStream<'a>;
@@ -254,6 +275,8 @@ impl Tokenizer for CjkFriendlyTokenizer {
             text: crate::extract::compose(text),
             cursor: 0,
             run: None,
+            unigrams: self.unigrams,
+            unigram_due: false,
             position: 0,
             token: Token {
                 offset_from: 0,
@@ -271,7 +294,11 @@ mod tests {
     use super::*;
 
     fn streamed(text: &str) -> Vec<Token> {
-        let mut tokenizer = CjkFriendlyTokenizer;
+        streamed_with(text, false)
+    }
+
+    fn streamed_with(text: &str, unigrams: bool) -> Vec<Token> {
+        let mut tokenizer = CjkFriendlyTokenizer { unigrams };
         let mut stream = tokenizer.token_stream(text);
         let mut out = Vec::new();
         while stream.advance() {
@@ -387,6 +414,27 @@ mod tests {
     }
 
     #[test]
+    fn the_index_also_holds_every_character_of_a_run() {
+        let indexed: Vec<String> = streamed_with("报告 中文内容 文", true)
+            .into_iter()
+            .map(|t| t.text)
+            .collect();
+        assert_eq!(
+            indexed,
+            [
+                "报", "报告", "告", "中", "中文", "文", "文内", "内", "内容", "容", "文"
+            ]
+        );
+        // Words and positions are otherwise those of the query tokenizer.
+        let words = streamed_with("relatório 2026 中文", true);
+        assert_eq!(
+            words.iter().map(|t| t.position).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4]
+        );
+        assert_eq!(words[0].text, "relatório");
+    }
+
+    #[test]
     fn single_cjk_char_is_a_unigram() {
         assert_eq!(texts("文 abc"), ["文", "abc"]);
     }
@@ -400,7 +448,7 @@ mod tests {
     #[test]
     fn full_body_analyzer_keeps_cjk_bigrams() {
         use tantivy::tokenizer::{AsciiFoldingFilter, LowerCaser, RemoveLongFilter, TextAnalyzer};
-        let mut analyzer = TextAnalyzer::builder(CjkFriendlyTokenizer)
+        let mut analyzer = TextAnalyzer::builder(CjkFriendlyTokenizer { unigrams: false })
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
             .filter(AsciiFoldingFilter)
