@@ -1,0 +1,37 @@
+revisão - termodinâmica (cap. 4 e 5)
+
+1a lei: ΔU = Q - W
+  - Q > 0 calor entra no sistema
+  - W > 0 sistema realiza trabalho (convenção da física; na química o sinal
+    muda!! cuidado na prova)
+  - processo cíclico -> ΔU = 0, então Q = W
+
+transformações:
+  isobárica -> P cte, W = P.ΔV
+  isocórica (isovolumétrica) -> V cte, W = 0, logo Q = ΔU
+  isotérmica -> T cte, ΔU = 0 (gás ideal), Q = W
+  adiabática -> Q = 0, ΔU = -W  (expansão adiabática esfria o gás)
+
+gráfico P x V: trabalho = área sob a curva
+  ciclo horário = máquina térmica (W > 0)
+  anti-horário = refrigerador
+
+2a lei
+  - Kelvin-Planck: impossível converter todo calor em trabalho num ciclo
+  - Clausius: calor não vai sozinho do frio p/ o quente
+  rendimento η = W/Q1 = 1 - Q2/Q1
+  Carnot: η = 1 - T2/T1  (T em KELVIN, sempre!!)
+
+ex. que errei: máquina entre 527 °C e 127 °C
+  T1 = 800 K, T2 = 400 K -> η máx = 50%
+  (eu tinha feito com Celsius e deu 76%, errado)
+
+entropia: ΔS = Q/T (processo reversível, T cte)
+  universo: ΔS >= 0 sempre
+
+dúvidas p/ perguntar:
+  - por que na adiabática PV^γ = cte? de onde sai o γ?
+  - diferença entre cp e cv na prática
+  - refrigerador: COP pode ser > 1? (acho que sim)
+
+refazer lista 3, exercícios 7, 9 e 12

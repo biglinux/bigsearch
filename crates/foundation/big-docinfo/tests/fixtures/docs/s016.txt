@@ -1,0 +1,42 @@
+BANCO CAIUÁ S.A.                                         Extrato de Conta Corrente
+SAC 0800 940 2210 | Ouvidoria 0800 940 2299
+
+Cliente: PATRÍCIA NOGUEIRA AMARAL
+CPF: ***.661.083-**
+Agência: 0457 - Maringá Centro     Conta corrente: 28.114-6
+Período: 01/08/2026 a 31/08/2026
+Emitido em: 02/09/2026 às 08:41
+
+DATA        HISTÓRICO                                  DOCUMENTO      VALOR (R$)      SALDO (R$)
+31/07/2026  SALDO ANTERIOR                                                             3.412,87
+01/08/2026  PIX RECEBIDO - TRANSPORTES ALVORADA LTDA   E0457001      5.840,00 C      9.252,87
+03/08/2026  PAGTO BOLETO - CONDOMINIO ED. IPÊ ROXO     031188          712,40 D      8.540,47
+04/08/2026  DEB. AUT. ENERGIA - COPEL-SUL              400712          198,33 D      8.342,14
+05/08/2026  PIX ENVIADO - CLELIA MARQUES DUARTE        E0457114      1.780,00 D      6.562,14
+07/08/2026  COMPRA CARTAO DEB - SUPERM. BOA COLHEITA   774410          326,18 D      6.235,96
+10/08/2026  TED RECEBIDA - RESTITUICAO IRPF            000045          894,22 C      7.130,18
+12/08/2026  DEB. AUT. TELEFONIA - VOZ+ MOVEL           552190           89,90 D      7.040,28
+15/08/2026  APLICACAO CDB DI LIQUIDEZ DIARIA           CDB0815       2.000,00 D      5.040,28
+18/08/2026  PAGTO FATURA CARTAO CAIUA VISA             FAT0818       1.437,65 D      3.602,63
+20/08/2026  SAQUE TERMINAL 24H - AV. BRASIL            T20811          300,00 D      3.302,63
+22/08/2026  PIX RECEBIDO - MARCOS V. AMARAL            E0457288        250,00 C      3.552,63
+25/08/2026  TARIFA PACOTE SERVICOS ESSENCIAL PLUS      TAR0825          38,50 D      3.514,13
+27/08/2026  COMPRA CARTAO DEB - FARMACIA SAO LUCAS     810233           74,60 D      3.439,53
+29/08/2026  RESGATE CDB DI LIQUIDEZ DIARIA             CDB0829         500,00 C      3.939,53
+31/08/2026  REND. POUPANCA INTEGRADA                   REN0831          12,47 C      3.952,00
+31/08/2026  SALDO FINAL                                                                3.952,00
+
+RESUMO DO PERÍODO
+Total de créditos ............................ R$ 7.496,69
+Total de débitos ............................. R$ 6.957,56
+Saldo em 31/08/2026 .......................... R$ 3.952,00
+Limite cheque especial contratado ............ R$ 2.500,00 (não utilizado no período)
+Investimentos vinculados (CDB DI) ............ R$ 1.508,92 em 31/08/2026
+
+Lançamentos futuros:
+05/09/2026  PAGTO AGENDADO - ALUGUEL (PIX)     1.780,00 D
+
+Mensagem: Seu pacote de serviços Essencial Plus terá novo valor a partir de
+01/11/2026. Consulte as condições no aplicativo.
+
+Página 1/1                                    Documento sem valor fiscal

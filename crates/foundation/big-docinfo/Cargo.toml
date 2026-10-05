@@ -1,0 +1,15 @@
+[package]
+name = "big-docinfo"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+description = "Reads the kind, date, author and key sentences of a document from its text, and suggests a file name, without any model"
+license.workspace = true
+repository.workspace = true
+workspace = "../../.."
+
+[dependencies]
+regex = { version = "1.12.4" }
+
+[dev-dependencies]
+serde_json = { version = "1.0.150" }

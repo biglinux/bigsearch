@@ -1,0 +1,66 @@
+PRUMO ENGENHARIA DIAGNÓSTICA LTDA
+CNPJ 19.044.738/0001-15 - CREA-GO 18.442/RF
+Av. T-63, 1.296, sala 804 - Setor Bueno - Goiânia/GO
+
+PARECER TÉCNICO Nº 112/2026
+VISTORIA DE ENGENHARIA - FISSURAS EM EDIFICAÇÃO RESIDENCIAL
+
+Solicitante: Sr. Jonas Pereira Calixto
+Imóvel: residência unifamiliar térrea - Rua C-149, Qd. 312, Lt. 08,
+Jardim América, Goiânia/GO
+Data da vistoria: 16/09/2026
+Data do parecer: 25/09/2026
+
+1. OBJETIVO
+Avaliar as fissuras surgidas nas paredes da residência após a execução de
+escavação para subsolo no lote vizinho (Lt. 09), identificar suas causas
+prováveis e indicar as medidas necessárias.
+
+2. METODOLOGIA
+Inspeção visual de todos os cômodos, registro fotográfico, mapeamento das
+fissuras com fissurômetro, verificação de prumo e nível com nível a laser,
+e análise do projeto estrutural fornecido pelo solicitante (residência
+construída em 2011, fundação em estacas tipo broca e vigas baldrame).
+
+3. CONSTATAÇÕES
+3.1 Foram identificadas 14 fissuras, concentradas nas paredes da divisa
+leste, voltada para a escavação vizinha.
+3.2 As fissuras da cozinha e do dormitório 2 são inclinadas, a cerca de
+45°, com aberturas de 0,8 mm a 2,5 mm, típicas de recalque diferencial de
+fundação.
+3.3 O piso da cozinha apresenta desnível de 18 mm em 3,0 m na direção
+leste.
+3.4 Os selos de gesso instalados em 16/09/2026 serão reavaliados em 30
+dias para verificar se as fissuras estão ativas.
+3.5 Nas demais paredes, há apenas fissuras capilares de retração (abaixo
+de 0,3 mm), sem relevância estrutural.
+
+4. ANÁLISE
+A distribuição e a geometria das fissuras, sua localização exclusiva na
+face voltada para a escavação e o desnível do piso indicam recalque das
+fundações da divisa leste, provavelmente causado pelo alívio de tensões e
+pela perda de confinamento do solo durante a escavação do subsolo vizinho,
+executada sem contenção adequada.
+
+5. CONCLUSÃO E RECOMENDAÇÕES
+5.1 O dano é de gravidade MÉDIA, sem risco imediato de colapso, mas com
+tendência de evolução enquanto a escavação permanecer sem contenção.
+5.2 Recomenda-se notificar o responsável pela obra vizinha para execução
+imediata de contenção (cortina de estacas ou solo grampeado), com projeto
+e ART.
+5.3 Após a estabilização, executar reforço das fundações da divisa leste
+(estacas tipo mega ou microestacas) e recuperação das alvenarias com tela
+e argamassa.
+5.4 Monitorar os selos e repetir a medição de nível em 30 e 60 dias.
+
+Custo estimado da recuperação (fundações e alvenaria): R$ 68.000,00 a
+R$ 85.000,00, a ser detalhado em projeto específico.
+
+Goiânia, 25 de setembro de 2026.
+
+______________________________________
+Eng. Civil Rebeca Fonseca Arantes
+CREA-GO 1019874520 - ART nº 1020260221847
+Prumo Engenharia Diagnóstica Ltda
+
+Parecer Técnico nº 112/2026                                   Página 1 de 1

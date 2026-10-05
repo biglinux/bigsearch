@@ -1,0 +1,73 @@
+                                                    LUMINAR SISTEMAS
+                                    Software para gestão de clínicas
+
+PROPOSTA COMERCIAL Nº LS-2026-0384
+
+Florianópolis, 29 de setembro de 2026
+
+À
+CLÍNICA ODONTOLÓGICA SORRIR MAIS LTDA
+A/C: Dra. Priscila Mattos Koerich - Diretora Clínica
+Rua Esteves Júnior, 605 - Centro - Florianópolis/SC
+
+Ref.: Implantação do sistema Luminar Clinic na matriz e nas duas filiais
+
+
+1. APRESENTAÇÃO
+
+A Luminar Sistemas Ltda (CNPJ 26.884.017/0001-50) desenvolve, há 11 anos,
+software de gestão para clínicas médicas e odontológicas, com mais de 900
+clientes ativos no Sul do país. Atendendo à solicitação feita na reunião
+de 22 de setembro de 2026, apresentamos nossa proposta para a implantação
+do Luminar Clinic, em nuvem, nas três unidades da Clínica Sorrir Mais.
+
+2. ESCOPO
+
+- Agenda on-line integrada para 14 cadeiras odontológicas, com
+  confirmação automática de consultas por WhatsApp;
+- Prontuário eletrônico odontológico com odontograma e anexos de
+  radiografias;
+- Módulo financeiro (contas a pagar e a receber, repasse a dentistas,
+  conciliação bancária);
+- Faturamento de convênios odontológicos (padrão TISS);
+- Emissão de NFS-e integrada à prefeitura de Florianópolis;
+- Migração dos dados do sistema atual (cadastro de cerca de 18 mil
+  pacientes e histórico financeiro dos últimos 3 anos);
+- Treinamento presencial de 16 horas por unidade e suporte remoto.
+
+3. INVESTIMENTO
+
+Item                                          Qtde      Valor
+Implantação e migração de dados               1         R$ 9.600,00 (único)
+Treinamento presencial (3 unidades)           48 h      R$ 4.320,00 (único)
+Licença mensal Luminar Clinic Pro             3 unid.   R$ 1.470,00/mês
+Módulo de convênios TISS                      1         R$ 290,00/mês
+                                                        ---------------------
+Total de investimento inicial:                          R$ 13.920,00
+Total mensal recorrente:                                R$ 1.760,00
+
+Condições: investimento inicial em 3 parcelas sem juros; mensalidade a
+partir do mês seguinte à conclusão da implantação, reajustada anualmente
+pelo IPCA. Fidelidade mínima de 12 meses.
+
+4. CRONOGRAMA
+
+Semanas 1-2: levantamento e parametrização
+Semanas 3-4: migração e validação dos dados
+Semana 5: treinamento e entrada em produção (go-live) na matriz
+Semana 6: entrada em produção nas filiais
+
+5. NÍVEL DE SERVIÇO
+
+Disponibilidade garantida de 99,5% ao mês; suporte em horário comercial
+por chat, telefone e e-mail, com primeiro atendimento em até 2 horas;
+backup diário com retenção de 30 dias; dados hospedados no Brasil, em
+conformidade com a LGPD.
+
+Validade desta proposta: 30 dias.
+
+Atenciosamente,
+
+Eduardo Kremer Bittencourt
+Executivo de Contas - Luminar Sistemas Ltda
+(48) 3028-7750 | eduardo.kremer@luminarsistemas.com.br (fictício)

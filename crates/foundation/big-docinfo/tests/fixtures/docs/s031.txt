@@ -1,0 +1,70 @@
+NEXALINK AX1800 DUAL BAND
+Roteador Wi-Fi 6 - Guia de Instalação Rápida
+
+Modelo: NX-AX18      Versão do guia: 2.1
+
+CONTEÚDO DA EMBALAGEM
+- 1 roteador NexaLink AX1800
+- 1 fonte de alimentação 12 V / 1,5 A
+- 1 cabo de rede Ethernet (RJ-45)
+- Este guia
+
+CONHEÇA O SEU ROTEADOR
+Painel frontal (LEDs):
+  PWR ....... aceso: ligado
+  INTERNET .. verde: conectado | laranja: sem acesso à internet
+  2.4G / 5G . aceso: rede sem fio ativa
+  WPS ....... piscando: pareamento em andamento
+Painel traseiro:
+  WAN (azul) - conecte ao modem da operadora
+  LAN 1-3 (amarelas) - conecte computadores, TVs e videogames
+  RESET - mantenha pressionado por 10 segundos para restaurar o padrão de
+  fábrica
+
+1. CONECTANDO OS CABOS
+1.1 Desligue o modem da operadora.
+1.2 Ligue o cabo de rede da porta WAN do roteador a uma porta LAN do
+    modem.
+1.3 Ligue o modem e aguarde 1 minuto.
+1.4 Conecte a fonte ao roteador e verifique se o LED PWR acende.
+
+2. CONFIGURAÇÃO PELO APLICATIVO
+2.1 Instale o aplicativo NexaLink Home (Android ou iOS).
+2.2 No celular, conecte-se à rede Wi-Fi NexaLink_XXXX impressa na
+    etiqueta inferior do roteador. A senha padrão também está na etiqueta.
+2.3 Abra o aplicativo e siga o assistente: escolha o tipo de conexão
+    (normalmente "IP dinâmico"; para PPPoE, informe usuário e senha
+    fornecidos pela operadora).
+2.4 Defina o nome da nova rede (SSID) e uma senha com pelo menos 12
+    caracteres.
+2.5 Ao final, o LED INTERNET deve ficar verde.
+
+3. CONFIGURAÇÃO PELO NAVEGADOR (ALTERNATIVA)
+Acesse http://192.168.0.1 e entre com a senha de administrador indicada na
+etiqueta. Recomenda-se trocar essa senha no primeiro acesso.
+
+4. DICAS DE POSICIONAMENTO
+- Coloque o roteador em local alto e central da residência.
+- Evite proximidade com micro-ondas, aquários e espelhos.
+- A banda de 5 GHz é mais rápida, mas tem alcance menor; a de 2,4 GHz
+  atravessa melhor as paredes.
+
+5. SOLUÇÃO DE PROBLEMAS
+LED INTERNET laranja: reinicie o modem e o roteador; confira o cabo WAN.
+Esqueci a senha do Wi-Fi: pressione RESET por 10 segundos e configure
+novamente.
+Sinal fraco em alguns cômodos: considere um repetidor ou sistema mesh
+compatível NexaLink.
+
+ESPECIFICAÇÕES
+Padrão: IEEE 802.11ax/ac/n/g/b/a | Velocidade: até 574 Mbps (2,4 GHz) +
+1.201 Mbps (5 GHz) | Portas: 1 WAN + 3 LAN Gigabit | Antenas: 4 externas
+de 5 dBi | Segurança: WPA3/WPA2-PSK
+
+Garantia: 12 meses contra defeitos de fabricação, mediante nota fiscal.
+Suporte: suporte@nexalink-br.com.br (fictício) | 0800 771 3030
+
+Fabricado por NexaLink Tecnologia Ltda - Produzido no Polo Industrial de
+Manaus. Imagens meramente ilustrativas.
+
+                                                                         1/1

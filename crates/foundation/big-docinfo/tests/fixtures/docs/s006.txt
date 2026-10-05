@@ -1,0 +1,30 @@
+RENATA CAVALCANTI DUARTE
+Recife — PE | renata.duarte@exemplo.com.br | (81) 99000-1234
+
+OBJETIVO
+Atuar como engenheira de dados em empresa de tecnologia ou saúde.
+
+FORMAÇÃO
+- Mestrado em Ciência da Computação — Universidade Federal de Pernambuco (2021)
+- Bacharelado em Estatística — Universidade Federal de Pernambuco (2018)
+
+EXPERIÊNCIA PROFISSIONAL
+Hospital Santa Clara — Engenheira de Dados (março de 2022 até o momento)
+- Construí pipelines de dados em Python e Apache Airflow que integram
+  prontuários de 4 unidades hospitalares.
+- Reduzi de 6 horas para 40 minutos o tempo de geração dos relatórios
+  diários de ocupação de leitos.
+
+Nordeste Analytics — Analista de Dados (janeiro de 2019 a fevereiro de 2022)
+- Desenvolvi painéis em Power BI para clientes do varejo.
+- Modelei previsões de demanda com séries temporais.
+
+COMPETÊNCIAS
+Python, SQL, PostgreSQL, Apache Airflow, Apache Spark, Docker, Power BI,
+estatística aplicada.
+
+IDIOMAS
+Inglês avançado; espanhol intermediário.
+
+CERTIFICAÇÕES
+- Google Cloud Professional Data Engineer (2023)

@@ -1,0 +1,48 @@
+                                   DANFE
+                 DOCUMENTO AUXILIAR DA NOTA FISCAL ELETRÔNICA
+                 0 - ENTRADA   1 - SAÍDA  [1]
+                 Nº 000.087.341   SÉRIE 001   FOLHA 1/1
+
+EMITENTE
+MEGABYTE INFORMÁTICA COMÉRCIO LTDA
+Av. Afonso Pena, 2.210, loja 4 - Funcionários - Belo Horizonte/MG - CEP 30130-007
+Fone (31) 3555-0192
+CNPJ: 33.708.162/0001-45    IE: 062.441.209.0071
+
+CHAVE DE ACESSO
+3126 0933 7081 6200 0145 5500 1000 0873 4110 4821 7764
+Consulta de autenticidade no portal nacional da NF-e www.nfe.fazenda.gov.br/portal
+
+NATUREZA DA OPERAÇÃO: VENDA DE MERCADORIA ADQUIRIDA DE TERCEIROS
+PROTOCOLO DE AUTORIZAÇÃO DE USO: 131260098812207 - 18/09/2026 15:22:47
+
+DESTINATÁRIO / REMETENTE
+NOME/RAZÃO SOCIAL: GUSTAVO FERRAZ LEMOS            CPF: ***.307.958-**
+ENDEREÇO: Rua Grão Mogol, 640, apto 302 - Sion - Belo Horizonte/MG - CEP 30315-100
+DATA DA EMISSÃO: 18/09/2026     DATA DA SAÍDA: 18/09/2026     HORA: 15:30
+
+CÁLCULO DO IMPOSTO
+BASE CÁLC. ICMS   VALOR ICMS   BASE ICMS ST   VALOR ICMS ST   VALOR TOTAL PRODUTOS
+5.317,00          957,06       0,00           0,00            5.317,00
+VALOR FRETE   VALOR SEGURO   DESCONTO   OUTRAS DESP.   VALOR IPI   VALOR TOTAL DA NOTA
+0,00          0,00           240,00     0,00           0,00        5.077,00
+
+TRANSPORTADOR / VOLUMES TRANSPORTADOS
+FRETE POR CONTA: 9 - SEM OCORRÊNCIA DE TRANSPORTE (retirada na loja)
+
+DADOS DOS PRODUTOS / SERVIÇOS
+CÓD.     DESCRIÇÃO                                   NCM       CST  CFOP  UN  QTD   V.UNIT    V.TOTAL   ICMS%
+NB-4471  NOTEBOOK VELTRA PRO 15 I7 16GB SSD 512GB   84713012  000  5102  UN  1     4.799,00  4.799,00  18,00
+MS-0210  MOUSE SEM FIO VELTRA M210                  84716053  000  5102  UN  1     89,00     89,00     18,00
+MC-1530  MOCHILA P/ NOTEBOOK 15,6" URBAN            42029200  000  5102  UN  1     189,00    189,00    18,00
+GE-0012  GARANTIA ESTENDIDA 12 MESES (SEGURO)       -         -    -     UN  1     240,00    240,00    18,00
+
+DADOS ADICIONAIS
+Informações complementares: Pagamento: cartão de crédito em 10x de R$ 507,70
+sem juros. Desconto promocional de R$ 240,00 aplicado sobre a garantia
+estendida (campanha "Volta às Aulas"). Valor aproximado dos tributos
+(Lei 12.741/2012): R$ 1.564,28 (30,81%). Fonte: IBPT.
+Garantia do fabricante: 12 meses a partir da data da compra.
+Vendedor: Aline (cód. 117).
+
+Reservado ao fisco

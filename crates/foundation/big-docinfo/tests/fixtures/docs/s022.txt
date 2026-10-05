@@ -1,0 +1,55 @@
+LABORATÓRIO ANALÍTICO VITA DIAGNÓSTICOS
+Rua Dom Pedro II, 912 - Centro - Ribeirão Preto/SP - CEP 14015-070
+Resp. Técnico: Dr. Paulo César Rinaldi - CRF/SP 38.441
+CNPJ 09.317.552/0001-08 | www.vitadiagnosticos.com.br (fictício)
+
+                     LAUDO DE EXAMES LABORATORIAIS
+
+Paciente: MARIANA SOUZA FIGUEIREDO              Sexo: F     Idade: 44 anos
+Data de nasc.: 05/02/1982                        Protocolo: 2026-0915-33871
+Médico solicitante: Dr. Eduardo Paiva Leme - CRM/SP 112.408
+Convênio: SAÚDE PLENA EMPRESARIAL
+Data da coleta: 15/09/2026 07:12               Data da liberação: 17/09/2026 16:40
+
+-------------------------------------------------------------------------------
+HEMOGRAMA COMPLETO                              Material: Sangue total (EDTA)
+Método: Automatizado - citometria de fluxo
+
+ERITROGRAMA                 RESULTADO        VALORES DE REFERÊNCIA
+Hemácias                    4,21 milhões/mm³ 3,90 a 5,03
+Hemoglobina                 11,4 g/dL        12,0 a 15,5       (*)
+Hematócrito                 35,2 %           34,9 a 44,5
+VCM                         83,6 fL          81,6 a 98,3
+HCM                         27,1 pg          26,0 a 34,0
+RDW                         15,8 %           11,8 a 15,6       (*)
+
+LEUCOGRAMA
+Leucócitos                  6.840 /mm³       3.500 a 10.500
+Neutrófilos                 58 %  3.967 /mm³ 1.700 a 7.000
+Linfócitos                  31 %  2.120 /mm³ 900 a 2.900
+Monócitos                   7 %     479 /mm³ 300 a 900
+Eosinófilos                 3 %     205 /mm³ 50 a 500
+Basófilos                   1 %      68 /mm³ 0 a 300
+
+PLAQUETAS                   268.000 /mm³     150.000 a 450.000
+
+-------------------------------------------------------------------------------
+GLICOSE EM JEJUM                                Material: Plasma fluoretado
+Resultado: 92 mg/dL                Referência: 70 a 99 mg/dL
+
+FERRITINA                                       Material: Soro
+Resultado: 9,8 ng/mL               Referência: 15 a 150 ng/mL      (*)
+
+COLESTEROL TOTAL                                Material: Soro
+Resultado: 187 mg/dL               Desejável: < 190 mg/dL
+
+TSH                                             Material: Soro
+Resultado: 2,31 µUI/mL             Referência: 0,45 a 4,50 µUI/mL
+
+-------------------------------------------------------------------------------
+(*) Resultado fora do intervalo de referência.
+Nota: valores de referência para adultos do sexo feminino.
+Laudo liberado eletronicamente por Dra. Camila Toledo Bressan - CRBM 12.774.
+A interpretação dos resultados deve ser feita pelo médico solicitante.
+
+                                                                   Página 1 de 1

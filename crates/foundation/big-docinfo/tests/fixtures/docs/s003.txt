@@ -1,0 +1,27 @@
+Compressão zstd em sistemas de arquivos Btrfs: impacto em SSDs de baixo custo
+
+Resumo
+Este artigo avalia o uso da compressão transparente zstd no sistema de arquivos
+Btrfs em computadores com SSD SATA de baixo custo. Foram comparados os níveis
+1, 3 e 9 em três cargas de trabalho: compilação do kernel Linux 6.12, cópia de
+uma biblioteca de fotos JPEG e operação de um banco SQLite com 2 milhões de
+registros.
+
+Metodologia
+Os testes foram executados em um notebook com processador de quatro núcleos,
+8 GB de RAM e SSD de 240 GB. Cada carga foi repetida cinco vezes, e a mediana
+foi usada como resultado. A quantidade de dados gravados no SSD foi obtida
+pelos contadores SMART antes e depois de cada execução.
+
+Resultados
+Na compilação do kernel, o nível 1 reduziu em 41% o volume gravado no SSD e
+o tempo total aumentou apenas 2%. O nível 9 reduziu o volume em 48%, mas
+aumentou o tempo de compilação em 19%. Na biblioteca de fotos não houve ganho,
+pois arquivos JPEG já são comprimidos; o Btrfs detectou isso e desistiu da
+compressão na maioria dos arquivos. No banco SQLite, o nível 3 reduziu o
+tamanho em disco em 37%, sem diferença significativa no tempo das consultas.
+
+Conclusão
+Para desktops com SSD modesto, zstd nível 1 ou 3 é a escolha recomendada:
+reduz o desgaste do SSD e o espaço ocupado com custo de CPU pequeno. Níveis
+altos só compensam em arquivamento, quando a gravação acontece uma única vez.

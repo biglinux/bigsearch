@@ -1,0 +1,51 @@
+COPEL-SUL DISTRIBUIDORA DE ENERGIA S.A.          CNPJ 48.215.330/0001-90
+Av. das Hortênsias, 3.400 - Ponta Grossa/PR - CEP 84010-200
+Atendimento 0800 700 4412 | www.copelsul-energia.com.br (fictício)
+
+                    NOTA FISCAL / CONTA DE ENERGIA ELÉTRICA
+                    Nº 004.512.778    Série B    Emissão: 14/09/2026
+
+TITULAR: SÔNIA REGINA BACKES
+CPF: ***.774.320-**
+Endereço da unidade: Rua Cel. Dulcídio, 588 - Uvaranas - Ponta Grossa/PR
+Unidade consumidora: 3021558847      Classe: Residencial B1 - Monofásico
+Rota de leitura: 12-044-0117
+
+REFERÊNCIA    VENCIMENTO    TOTAL A PAGAR
+SET/2026      29/09/2026    R$ 247,63
+
+DADOS DA LEITURA
+Leitura anterior     Leitura atual      Próxima leitura prevista
+12/08/2026           11/09/2026         13/10/2026
+Medidor nº 7781204   Dias de consumo: 30
+Leitura ant. (kWh) 18.442   Leitura atual (kWh) 18.718   Consumo: 276 kWh
+
+HISTÓRICO DE CONSUMO (kWh)
+SET/26 276 | AGO/26 301 | JUL/26 318 | JUN/26 297 | MAI/26 254 | ABR/26 239
+MAR/26 262 | FEV/26 288 | JAN/26 305 | DEZ/25 290 | NOV/25 271 | OUT/25 260
+Média 12 meses: 280 kWh
+
+DESCRIÇÃO DO FATURAMENTO       Quant.   Tarifa c/ trib.   Valor (R$)
+Consumo TUSD                   276 kWh  0,412300          113,79
+Consumo TE                     276 kWh  0,348150           96,09
+Adicional Bandeira Amarela     276 kWh  0,018850            5,20
+Contrib. Ilum. Pública (CIP)                                 28,40
+Juros/Multa fatura anterior                                   4,15
+                                                          --------
+TOTAL                                                       247,63
+
+TRIBUTOS               Base cálc.    Alíq.    Valor
+ICMS                   215,08        19%      40,87
+PIS/PASEP              215,08        0,98%     2,11
+COFINS                 215,08        4,52%     9,72
+
+Bandeira tarifária vigente no período: AMARELA.
+Débito em aberto: não há faturas vencidas nesta unidade.
+Reaviso: o não pagamento até o vencimento sujeita a multa de 2% e juros de
+mora de 1% ao mês.
+
+-------------------------------------------- corte aqui --------------------
+COPEL-SUL DISTRIBUIDORA     UC 3021558847    Venc. 29/09/2026   R$ 247,63
+83660000002-4 47630412215-3 30021558847-1 20260929000-8
+
+Página 1 de 1

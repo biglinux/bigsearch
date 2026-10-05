@@ -1,0 +1,32 @@
+RELATÓRIO TRIMESTRAL DE ATENDIMENTO — SUPORTE TÉCNICO
+Período: julho a setembro de 2026
+Elaborado por: Coordenação de Suporte — Cooperativa Agrícola Campos Gerais
+
+1. Volume
+Foram abertos 1.842 chamados no trimestre, aumento de 12% em relação ao
+trimestre anterior (1.645 chamados). O mês de maior demanda foi agosto, com
+702 chamados, devido à migração do sistema de balanças.
+
+2. Tempo de resposta
+O tempo médio de primeira resposta caiu de 3,1 horas para 1,8 hora. A meta
+de 2 horas foi cumprida em julho e setembro, mas não em agosto (2,6 horas).
+
+3. Categorias principais
+- Acesso e senhas: 38%
+- Sistema de balanças: 27%
+- Impressoras: 15%
+- Rede e internet: 12%
+- Outros: 8%
+
+4. Satisfação
+A pesquisa de satisfação teve 611 respostas, com nota média 4,3 de 5.
+
+5. Problemas identificados
+A migração do sistema de balanças gerou retrabalho porque o treinamento dos
+operadores ocorreu depois da troca do software. Os chamados de senha continuam
+altos por falta de redefinição automática.
+
+6. Recomendações
+- Implantar portal de redefinição de senha até dezembro de 2026.
+- Treinar usuários antes de qualquer migração de sistema.
+- Contratar um técnico temporário para o período de safra.

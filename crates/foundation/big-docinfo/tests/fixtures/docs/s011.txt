@@ -1,0 +1,66 @@
+POLÍTICA DE CÓPIAS DE SEGURANÇA — SECRETARIA MUNICIPAL DE EDUCAÇÃO DE ITAJUBÁ/MG
+Versão 2.0 — aprovada em 4 de junho de 2026
+Responsável: Divisão de Tecnologia da Informação, coordenada por Sérgio Antunes Lima
+
+1. Finalidade
+Esta política define como são feitas, guardadas e testadas as cópias de segurança
+dos dados administrativos e pedagógicos da Secretaria Municipal de Educação. Ela
+substitui a versão 1.3, de 2023, que previa apenas cópias semanais em discos
+externos guardados na própria sede. Em fevereiro de 2026, uma infiltração no
+prédio da sede danificou dois desses discos, e a Secretaria perdeu onze dias de
+lançamentos de frequência escolar, que precisaram ser redigitados a partir dos
+diários em papel. Esse incidente motivou a revisão.
+
+2. Abrangência
+A política se aplica aos seguintes sistemas:
+a) Sistema de Gestão Escolar (matrículas, frequência, notas e histórico de 14.300
+   estudantes da rede municipal);
+b) servidor de arquivos administrativos da sede, com cerca de 1,8 TB;
+c) banco de dados da folha de pagamento dos 1.120 servidores da educação;
+d) caixas de correio eletrônico institucionais das 38 escolas.
+Computadores pessoais dos servidores não estão incluídos; documentos de trabalho
+devem ser salvos no servidor de arquivos.
+
+3. Regra 3-2-1
+A Secretaria adota a regra 3-2-1: três cópias dos dados, em dois tipos de mídia
+diferentes, sendo uma delas fora da sede. Na prática:
+- cópia 1: dados em produção no servidor da sede;
+- cópia 2: cópia diária em um equipamento de armazenamento em rede (NAS) instalado
+  no prédio anexo, a 200 metros da sede;
+- cópia 3: cópia semanal criptografada enviada ao datacenter da Companhia de
+  Processamento de Dados do Estado, conforme convênio nº 045/2026.
+
+4. Frequência e retenção
+- Sistema de Gestão Escolar e folha de pagamento: cópia incremental diária às
+  23h e cópia completa aos domingos às 2h. Retenção de 30 cópias diárias e
+  12 cópias mensais.
+- Servidor de arquivos: cópia incremental diária e completa mensal, com retenção
+  de 6 meses.
+- Correio eletrônico: retenção de 90 dias, conforme contrato com o fornecedor.
+Durante o período de fechamento do ano letivo, de 1º a 20 de dezembro, o Sistema
+de Gestão Escolar terá uma cópia adicional ao meio-dia.
+
+5. Testes de restauração
+Uma cópia que nunca foi restaurada não pode ser considerada confiável. Por isso:
+- todo primeiro dia útil do mês, a equipe de TI restaurará uma amostra de
+  arquivos do servidor administrativo em um ambiente de teste;
+- a cada trimestre, será feita a restauração completa do banco do Sistema de
+  Gestão Escolar, medindo o tempo total; a meta é concluir em até 4 horas;
+- o resultado de cada teste será registrado em planilha própria, com data,
+  responsável, tempo gasto e problemas encontrados.
+
+6. Responsabilidades
+- Divisão de TI: configurar, monitorar e testar as cópias; comunicar falhas em
+  até 24 horas à chefia de gabinete.
+- Diretores escolares: garantir que os lançamentos de frequência sejam feitos no
+  sistema até o fim de cada semana.
+- Servidores: não guardar documentos oficiais apenas no computador local.
+
+7. Custos
+A compra do NAS e de oito discos de 8 TB custou R$ 27.600,00, já empenhados no
+orçamento de 2026. O convênio com a Companhia de Processamento de Dados do
+Estado tem custo anual de R$ 9.000,00.
+
+8. Vigência
+Esta política entra em vigor em 1º de julho de 2026 e deverá ser revisada a cada
+dois anos ou após qualquer incidente que cause perda de dados.

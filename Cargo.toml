@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "apps/big-search",
+    "crates/foundation/big-docinfo",
     "crates/foundation/big-indexd-client",
     "crates/foundation/big-search-config",
     "crates/ui/generic/big-search-settings",

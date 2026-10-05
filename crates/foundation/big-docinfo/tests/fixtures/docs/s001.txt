@@ -1,0 +1,30 @@
+NOTA FISCAL DE SERVIÇOS ELETRÔNICA — NFS-e
+Número da nota: 004127
+Data de emissão: 14/03/2026
+Município de prestação: Curitiba — PR
+
+PRESTADOR DE SERVIÇOS
+Razão social: Lumen Manutenção Predial Ltda.
+CNPJ: 12.345.678/0001-90
+Endereço: Rua das Araucárias, 455 — Bairro Portão — Curitiba/PR
+
+TOMADOR DE SERVIÇOS
+Razão social: Condomínio Edifício Vale Verde
+CNPJ: 98.765.432/0001-10
+Endereço: Avenida Sete de Setembro, 2100 — Curitiba/PR
+
+DISCRIMINAÇÃO DOS SERVIÇOS
+Manutenção preventiva trimestral dos dois elevadores do bloco A, incluindo
+lubrificação de guias, ajuste de portas de pavimento e teste do freio de
+segurança. Substituição de um contator do quadro de comando do elevador 2.
+
+Valor dos serviços: R$ 3.480,00
+Deduções: R$ 0,00
+Base de cálculo: R$ 3.480,00
+Alíquota do ISS: 5%
+Valor do ISS: R$ 174,00
+Valor líquido da nota: R$ 3.480,00
+
+Vencimento: 30/03/2026
+Forma de pagamento: boleto bancário
+Código de verificação: 8F3A-22C1
