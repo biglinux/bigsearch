@@ -613,18 +613,18 @@ fn office_text_with<R: std::io::Read + std::io::Seek>(
     }
 }
 
-/// Lowercase and strip accents in one pass over the text.
+/// Lowercase and fold `s` the way every comparison of names and pages does,
+/// so a person types a word the way they would write it by hand:
 ///
-/// Everything that compares text does `fold(&s.to_lowercase())`, which walks the
-/// string twice and builds two strings of it. Page text runs to hundreds of
-/// kilobytes, so the second copy is real work for nothing.
+/// - accents and other marks go, whether the text carries them precomposed
+///   ("relatório") or decomposed, as names unpacked from macOS archives do
+///   ("relato\u{301}rio"); so does the dot that "İ" lowercases with;
+/// - Latin letters fold through tantivy's `AsciiFoldingFilter`, the table the
+///   content analyzer uses: "ß" is "ss", "Ł" is "l", "Æ" is "ae";
+/// - "ё" is "е", as Russian is mostly typed; Greek loses its tonos and writes
+///   final "ς" as "σ".
 ///
-/// Two details keep the result identical to the two-step version:
-///
-/// - ASCII text needs no folding at all, so it is only lowercased;
-/// - Greek capital sigma lowercases differently at the end of a word, which is a
-///   rule about the string and not about the character. That case is rare enough
-///   to notice while passing and redo properly.
+/// Each other script is left as it is. ASCII text is only lowercased.
 #[must_use]
 pub fn fold_lower(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -637,34 +637,41 @@ pub fn fold_lower(s: &str) -> String {
 pub fn fold_lower_into(s: &str, out: &mut String) {
     if s.is_ascii() {
         out.extend(s.chars().map(|c| c.to_ascii_lowercase()));
-    } else if s.contains('Σ') {
-        out.push_str(&fold(&s.to_lowercase()));
-    } else {
-        for c in s.chars() {
-            out.extend(c.to_lowercase().map(fold_char));
+        return;
+    }
+    let mut lowered = String::with_capacity(s.len());
+    for c in s.chars().flat_map(char::to_lowercase) {
+        match c {
+            '\u{0300}'..='\u{036F}' => {}
+            'ё' => lowered.push('е'),
+            'ς' => lowered.push('σ'),
+            'ά' => lowered.push('α'),
+            'έ' => lowered.push('ε'),
+            'ή' => lowered.push('η'),
+            'ί' | 'ϊ' | 'ΐ' => lowered.push('ι'),
+            'ό' => lowered.push('ο'),
+            'ύ' | 'ϋ' | 'ΰ' => lowered.push('υ'),
+            'ώ' => lowered.push('ω'),
+            c => lowered.push(c),
         }
     }
+    ASCII_FOLDING.with(|analyzer| {
+        let mut analyzer = analyzer.borrow_mut();
+        let mut stream = analyzer.token_stream(&lowered);
+        if stream.advance() {
+            out.push_str(&stream.token().text);
+        }
+    });
 }
 
-/// Fold common Latin accents to ASCII (mirrors the analyzers' `AsciiFoldingFilter`)
-/// so substring/page matching is accent-insensitive. Expects lowercase input.
-#[must_use]
-fn fold(s: &str) -> String {
-    s.chars().map(fold_char).collect()
-}
-
-fn fold_char(c: char) -> char {
-    match c {
-        'á' | 'à' | 'â' | 'ã' | 'ä' | 'å' => 'a',
-        'é' | 'è' | 'ê' | 'ë' => 'e',
-        'í' | 'ì' | 'î' | 'ï' => 'i',
-        'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
-        'ú' | 'ù' | 'û' | 'ü' => 'u',
-        'ç' => 'c',
-        'ñ' => 'n',
-        'ý' | 'ÿ' => 'y',
-        other => other,
-    }
+thread_local! {
+    /// The whole text as one token through `AsciiFoldingFilter`.
+    static ASCII_FOLDING: std::cell::RefCell<tantivy::tokenizer::TextAnalyzer> =
+        std::cell::RefCell::new(
+            tantivy::tokenizer::TextAnalyzer::builder(tantivy::tokenizer::RawTokenizer::default())
+                .filter(tantivy::tokenizer::AsciiFoldingFilter)
+                .build(),
+        );
 }
 
 /// 1-based page (PDF) / slide (PPTX) numbers whose text contains *all* `terms`.
@@ -1003,26 +1010,24 @@ mod tests {
         assert_eq!(out, "Ata da reunião\nPauta\t1 item\n");
     }
 
-    /// The one-pass version has to answer exactly what the two-step one did,
-    /// including the Greek sigma that changes shape at the end of a word.
+    /// What a person types matches what the name or page writes, in every script
+    /// the folding covers; other scripts pass through untouched.
     #[test]
-    fn one_pass_folding_matches_the_two_step_version() {
-        for text in [
-            "",
-            "Relatorio FINAL 2026",
-            "Avaliação Neuropsicológica ÀS TRÊS",
-            "ÇÃO çao ÑÖÜ",
-            "ΣΟΦΟΣ ΟΔΟΣ",
-            "Straße GROSS",
-            "İstanbul TÜRKÇE",
-            "中文内容 ABC",
-            "🙂 EMOJI Ölçü",
+    fn folding_matches_what_people_type() {
+        for (written, typed) in [
+            ("Relatório FINAL 2026", "relatorio final 2026"),
+            ("Relato\u{301}rio", "relatorio"),
+            ("ÇÃO çao ÑÖÜ", "cao cao nou"),
+            ("Straße GROSS", "strasse gross"),
+            ("Łódź Ørsted Æble", "lodz orsted aeble"),
+            ("İstanbul ılık", "istanbul ilik"),
+            ("Отчёт ЁЛКА", "отчет елка"),
+            ("Αναφορά ΟΔΟΣ οδός", "αναφορα οδοσ οδοσ"),
+            ("中文内容 ABC", "中文内容 abc"),
+            ("🙂 EMOJI", "🙂 emoji"),
+            ("", ""),
         ] {
-            assert_eq!(
-                fold_lower(text),
-                fold(&text.to_lowercase()),
-                "differs for {text:?}"
-            );
+            assert_eq!(fold_lower(written), typed, "for {written:?}");
         }
     }
 

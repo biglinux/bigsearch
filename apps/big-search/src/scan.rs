@@ -247,7 +247,7 @@ pub fn add_name_only(
     if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
         let mut document = TantivyDocument::default();
         document.add_text(f.path, path.to_string_lossy());
-        document.add_text(f.name, name);
+        document.add_text(f.name, crate::index::name_text(name));
         document.add_text(f.source, crate::settings::source_name(path));
         // The root holds everything: a term for it would only cost postings.
         for dir in path

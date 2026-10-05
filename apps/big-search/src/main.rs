@@ -564,9 +564,15 @@ fn cmd_daemon() -> Result<()> {
                 .reader()
                 .map(|r| r.searcher().num_docs() == 0)
                 .unwrap_or(true);
+            // An empty name index is rebuilt from the walk below. The content
+            // index is another matter: its rows are kept unless it is empty too,
+            // the same rule as for a full one — a new name schema (which
+            // recreates the name index) must not re-extract every document,
+            // hours on a slow disk. Rows of files gone by then are pruned after
+            // the walk.
             let mut state = if empty {
-                if let Err(e) = content::clear_content_state() {
-                    log::warn!("clear content state for empty index: {e:#}");
+                if let Err(e) = ensure_content_state_matches_index(&watch_content_index) {
+                    log::warn!("check content index state: {e:#}");
                 }
                 state::State::empty(config::state_path())
             } else {

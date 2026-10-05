@@ -13,7 +13,7 @@ use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 /// Scripts written without inter-word spaces — Han/kana/Hangul plus the
 /// space-less SE-Asian abugidas — get bigram tokenization. Punctuation and
 /// symbols are treated as separators (not folded into runs).
-fn is_unspaced(c: char) -> bool {
+pub(crate) fn is_unspaced(c: char) -> bool {
     matches!(c as u32,
         0x0E00..=0x0E7F      // Thai
         | 0x0E80..=0x0EFF    // Lao

@@ -1,10 +1,10 @@
 //! Name search: ngram recall via Tantivy, then exact substring post-filter.
-use crate::index::{BODY, NGRAM, content_fields, fields};
+use crate::index::{BODY, content_fields, fields};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, ConstScoreQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::tokenizer::TokenStream;
 use tantivy::{IndexReader, TantivyDocument, Term};
@@ -197,8 +197,6 @@ fn is_under(path: &str, dir: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-use crate::extract::fold_lower;
-
 /// Substring filename search. Returns up to `limit` paths whose file name contains
 /// `q` (case-insensitive). Queries shorter than 2 chars yield nothing (ngram floor).
 pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
@@ -209,32 +207,64 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
     let searcher = reader.searcher();
     let index = searcher.index();
     let f = fields(index)?;
-    let needle = fold_lower(q.trim());
-    if needle.len() < 2 {
+    let words = crate::index::name_words(q);
+    if words.is_empty() {
         return Ok(Vec::new());
     }
-    // Each word is matched on its own, so a name holds all of them in any order.
-    // Treating the whole query as one substring made `raio bruno` miss
-    // `Raio-X Bruno ….pdf`, which either word alone found: the space, and the
-    // grams straddling it, are only in the query.
-    let words: Vec<&str> = needle.split_whitespace().collect();
 
-    // Tokenize each word with the same ngram analyzer the field uses, AND the grams.
-    let mut analyzer = index.tokenizers().get(NGRAM).context("ngram tokenizer")?;
+    // Each word is matched on its own, so a name holds all of them in any order
+    // (`raio bruno` finds `Raio-X Bruno ….pdf`). The grams are cut from the same
+    // text the field indexes (`index::name_text`), spaces at word edges included.
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    let term = |gram: &str| -> Box<dyn Query> {
+        Box::new(TermQuery::new(
+            Term::from_field_text(f.name, gram),
+            IndexRecordOption::Basic,
+        ))
+    };
     for word in &words {
-        let mut stream = analyzer.token_stream(word);
-        while stream.advance() {
-            let term = Term::from_field_text(f.name, stream.token().text.as_str());
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
-            ));
+        let chars: Vec<char> = word.chars().collect();
+        if is_whole_word_query(word) {
+            // One or two letters stand for a name or a word that is exactly them:
+            // "go" is "GO.pdf" or "Contrato GO.pdf", not "Google.pdf".
+            let grams = if chars.len() == 1 {
+                vec![format!(" {word} ")]
+            } else {
+                vec![format!(" {word}"), format!("{word} ")]
+            };
+            for gram in grams {
+                clauses.push((Occur::Must, term(&gram)));
+            }
+            continue;
+        }
+        // Three-letter grams only: they imply the two-letter ones, whose
+        // posting lists are the longest reads on a cold disk.
+        let mut grams: Vec<String> = if chars.len() < 3 {
+            vec![word.clone()]
+        } else {
+            chars.windows(3).map(|w| w.iter().collect()).collect()
+        };
+        grams.sort_unstable();
+        grams.dedup();
+        for gram in &grams {
+            clauses.push((Occur::Must, term(gram)));
+        }
+        // A word that starts or ends where the query does ranks above one that
+        // only contains it, so the best names are among the candidates even when
+        // thousands match.
+        if chars.len() >= 2 {
+            let start: String = chars[..2].iter().collect();
+            let end: String = chars[chars.len() - 2..].iter().collect();
+            for edge in [format!(" {start}"), format!("{end} ")] {
+                clauses.push((
+                    Occur::Should,
+                    Box::new(ConstScoreQuery::new(term(&edge), WORD_EDGE_SCORE)),
+                ));
+            }
         }
     }
-    // Only single-character words were typed: the ngram floor is 2, so the index
-    // cannot narrow anything and scanning every document is not worth it.
-    if clauses.is_empty() {
+    // A single CJK character: the index holds no one-character grams.
+    if !clauses.iter().any(|(occur, _)| *occur == Occur::Must) {
         return Ok(Vec::new());
     }
     // The folder and the extensions narrow the index's own answer: filtered
@@ -243,15 +273,15 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
     clauses.extend(filter_clauses(&f, filter));
     let query = BooleanQuery::new(clauses);
 
-    // Over-fetch for the substring post-filter, but cap the candidate pool so a
-    // huge `limit` (e.g. -a) doesn't allocate an enormous TopDocs heap.
+    // Over-fetch for the post-filter, but cap the candidate pool so a huge
+    // `limit` (e.g. -a) doesn't allocate an enormous TopDocs heap.
     let candidate_limit = limit.saturating_mul(4).clamp(40, 50_000);
     let candidates = searcher.search(
         &query,
         &TopDocs::with_limit(candidate_limit).order_by_score(),
     )?;
 
-    let mut hits = Vec::with_capacity(limit.min(1024));
+    let mut ranked: Vec<(NameMatch, Hit)> = Vec::with_capacity(limit.min(1024));
     let mut seen_paths = HashSet::with_capacity(limit.min(1024));
     for (score, addr) in candidates {
         let doc: TantivyDocument = searcher.doc(addr)?;
@@ -265,28 +295,85 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let folded_name = fold_lower(&name);
-        if words.iter().all(|word| folded_name.contains(word)) {
-            seen_paths.insert(path.to_string());
-            let source = doc
-                .get_first(f.source)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            hits.push(Hit {
+        // The grams only say the letters are there; this says how.
+        let Some(quality) = name_match(&name, &words) else {
+            continue;
+        };
+        seen_paths.insert(path.to_string());
+        let source = doc
+            .get_first(f.source)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        ranked.push((
+            quality,
+            Hit {
                 path: path.to_string(),
                 name,
                 score,
                 source,
                 mime: stored_mime(&doc, &f),
                 ..Default::default()
-            });
-            if hits.len() >= limit {
-                break;
-            }
+            },
+        ));
+        if ranked.len() >= limit {
+            break;
         }
     }
-    Ok(hits)
+    // Best match first; within one kind of match, the index's order (a
+    // shorter name first) stays.
+    ranked.sort_by_key(|(quality, _)| std::cmp::Reverse(*quality));
+    Ok(ranked.into_iter().map(|(_, hit)| hit).collect())
+}
+
+/// Score added for each query word whose start or end is a word edge in the
+/// name — far above what the grams' own BM25 adds, so it orders kinds of match
+/// before name length does.
+const WORD_EDGE_SCORE: f32 = 1000.0;
+
+/// Whether `word` (folded) stands for a whole word of a name: one or two
+/// letters of a spaced script. Two CJK characters are a word on their own and
+/// are searched inside names like any longer word.
+fn is_whole_word_query(word: &str) -> bool {
+    word.chars().count() <= 2 && !word.chars().any(crate::cjk_tokenizer::is_unspaced)
+}
+
+/// How a name answers the query: the whole name (without its extension) is
+/// the query; then the sum, over the query words, of 3 for a word of the name,
+/// 2 for the start of one, 1 for a part of one. Ordered best last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct NameMatch {
+    whole_name: bool,
+    words: u32,
+}
+
+/// `None` when the name does not hold every query word the way it must: a
+/// short word as a word of its own, a longer one anywhere.
+fn name_match(name: &str, words: &[String]) -> Option<NameMatch> {
+    let text = crate::index::name_text(name);
+    let name_words: Vec<&str> = text.split(' ').filter(|w| !w.is_empty()).collect();
+    let mut quality = 0;
+    for word in words {
+        quality += if name_words.iter().any(|w| w == word) {
+            3
+        } else if is_whole_word_query(word) {
+            return None;
+        } else if name_words.iter().any(|w| w.starts_with(word.as_str())) {
+            2
+        } else if text.contains(word.as_str()) {
+            1
+        } else {
+            return None;
+        };
+    }
+    let stem = Path::new(name)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(NameMatch {
+        whole_name: crate::index::name_words(&stem) == words,
+        words: quality,
+    })
 }
 
 /// The index clauses for `filter.under`, `filter.ext` and `filter.mime`, none
@@ -852,15 +939,105 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn names(hits: Vec<Hit>) -> Vec<String> {
+        hits.into_iter().map(|hit| hit.name).collect()
+    }
+
+    /// One or two letters find the names that are exactly them, then the names
+    /// where they stand as a word — never a name that merely contains them.
+    #[test]
+    fn short_queries_find_whole_names_then_whole_words() {
+        let index = index_with(
+            "short-words",
+            &[
+                "/h/Contrato GO.pdf",
+                "/h/Google.pdf",
+                "/h/algoritmo.odt",
+                "/h/GO.pdf",
+                "/h/Relatório-SP-2026.odt",
+                "/h/a.txt",
+                "/h/casa.txt",
+            ],
+        );
+        let found = names(search(&index, "go", &Filter::default(), 20).unwrap());
+        assert_eq!(found, ["GO.pdf", "Contrato GO.pdf"]);
+        assert_eq!(
+            names(search(&index, "SP", &Filter::default(), 20).unwrap()),
+            ["Relatório-SP-2026.odt"]
+        );
+        assert_eq!(
+            names(search(&index, "a", &Filter::default(), 20).unwrap()),
+            ["a.txt"]
+        );
+    }
+
+    /// A name is found the way a person types it, whatever script, accents,
+    /// decomposition or letter forms it was written with.
+    #[test]
+    fn names_match_across_scripts_and_letter_forms() {
+        let index = index_with(
+            "scripts",
+            &[
+                "/h/Straße Bericht.txt",
+                "/h/İstanbul raporu.txt",
+                "/h/Отчёт о продажах.txt",
+                "/h/Αναφορά πωλήσεων.txt",
+                "/h/Łódź.pdf",
+                "/h/Relato\u{301}rio de vendas.pdf",
+            ],
+        );
+        for (query, name) in [
+            ("strasse", "Straße Bericht.txt"),
+            ("istanbul", "İstanbul raporu.txt"),
+            ("отчет", "Отчёт о продажах.txt"),
+            ("αναφορα", "Αναφορά πωλήσεων.txt"),
+            ("lodz", "Łódź.pdf"),
+            ("relatorio", "Relato\u{301}rio de vendas.pdf"),
+        ] {
+            assert_eq!(
+                names(search(&index, query, &Filter::default(), 20).unwrap()),
+                [name],
+                "query {query:?}"
+            );
+        }
+    }
+
+    /// The whole name first, then names holding the word, then names where a
+    /// word starts with it, then the rest.
+    #[test]
+    fn names_rank_by_how_they_match() {
+        let index = index_with(
+            "name-rank",
+            &[
+                "/h/xrelatoriox.txt",
+                "/h/pre-relatorios-antigos.pdf",
+                "/h/meu relatorio de vendas.pdf",
+                "/h/relatorio a.md",
+                // The whole name, though longer than "relatorio a.md".
+                "/h/relatorio.markdown",
+            ],
+        );
+        assert_eq!(
+            names(search(&index, "relatorio", &Filter::default(), 20).unwrap()),
+            [
+                "relatorio.markdown",
+                "relatorio a.md",
+                "meu relatorio de vendas.pdf",
+                "pre-relatorios-antigos.pdf",
+                "xrelatoriox.txt"
+            ]
+        );
+    }
+
     #[test]
     fn a_name_search_finds_videos_past_a_ceiling_of_other_files() {
         let mut paths: Vec<String> = (0..40)
             .map(|i| format!("/home/u/src/prompt-{i}.rs"))
             .collect();
         paths.extend([
-            "/home/u/Videos/Predator.mkv".to_string(),
+            "/home/u/Videos/Promo.mkv".to_string(),
             "/home/u/Videos/prores.mov".to_string(),
-            "/home/u/Music/prelude.mp4".to_string(),
+            "/home/u/Music/prologue.mp4".to_string(),
         ]);
         let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
         let index = index_with("name-ceiling", &refs);
@@ -870,7 +1047,7 @@ mod tests {
             ..Default::default()
         };
         // A ceiling smaller than the other files that match the word.
-        let mut found: Vec<String> = search(&index, "pr", &filter, 5)
+        let mut found: Vec<String> = search(&index, "pro", &filter, 5)
             .unwrap()
             .into_iter()
             .map(|hit| hit.path)
@@ -878,7 +1055,7 @@ mod tests {
         found.sort();
         assert_eq!(
             found,
-            ["/home/u/Videos/Predator.mkv", "/home/u/Videos/prores.mov"]
+            ["/home/u/Videos/Promo.mkv", "/home/u/Videos/prores.mov"]
         );
         // No filter, no narrowing: the words alone decide.
         assert_eq!(

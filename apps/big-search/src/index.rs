@@ -11,8 +11,10 @@ use tantivy::tokenizer::{
 };
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
-/// Registered analyzer for the `name` field (ngram substring, accent-folded).
-pub const NGRAM: &str = "name_ngram";
+/// Registered analyzer for the `name` field: 2- and 3-character grams of
+/// [`name_text`]. Bumped from `name_ngram` (which folded after cutting the
+/// grams), so the on-disk schema differs and the name index rebuilds.
+pub const NGRAM: &str = "name_grams";
 /// Registered analyzer for the `body` field: CJK-bigram aware, word-splitting
 /// otherwise, accent-folded. Bumped from `body_text` (SimpleTokenizer) so the
 /// on-disk schema differs → the index auto-rebuilds with the new analyzer.
@@ -37,10 +39,11 @@ pub fn content_record_option() -> IndexRecordOption {
 fn build_name_schema() -> Schema {
     let mut sb = Schema::builder();
     sb.add_text_field("path", raw_identifier_options(true));
+    // Field norms make a shorter name rank above a longer one with the same
+    // grams, which is most often the one meant: "go" -> "GO.pdf" first.
     let name_indexing = TextFieldIndexing::default()
         .set_tokenizer(NGRAM)
-        .set_index_option(IndexRecordOption::Basic)
-        .set_fieldnorms(false);
+        .set_index_option(IndexRecordOption::Basic);
     sb.add_text_field(
         "name",
         TextOptions::default().set_indexing_options(name_indexing),
@@ -91,17 +94,69 @@ fn raw_identifier_options(stored: bool) -> TextOptions {
     }
 }
 
-/// Register the name ngram analyzer.
+/// Register the name analyzer: plain grams, because [`name_text`] already
+/// folded the text. Folding after cutting the grams changed their length
+/// ("ß" -> "ss") and broke every gram across the letter.
 fn register_name_tokenizer(index: &Index) -> Result<()> {
     let ngram = NgramTokenizer::all_ngrams(2, 3).context("ngram tokenizer")?;
-    index.tokenizers().register(
-        NGRAM,
-        TextAnalyzer::builder(ngram)
-            .filter(LowerCaser)
-            .filter(AsciiFoldingFilter)
-            .build(),
-    );
+    index
+        .tokenizers()
+        .register(NGRAM, TextAnalyzer::builder(ngram).build());
     Ok(())
+}
+
+/// The text the `name` field indexes and every name comparison reads: folded
+/// (see [`crate::extract::fold_lower`]), separators as spaces, and a space at
+/// each end. The spaces make the edges of words grams of their own — " go"
+/// exists only where a word starts with "go", "go " only where one ends with
+/// it — so one or two letters find the names that are those letters
+/// ("GO.pdf", "Contrato GO.pdf") instead of every name containing them.
+pub fn name_text(name: &str) -> String {
+    let mut text = String::with_capacity(name.len() + 2);
+    text.push(' ');
+    for word in name_words(name) {
+        text.push_str(&word);
+        text.push(' ');
+    }
+    text
+}
+
+/// The folded words of a name or of a name query, split at separators.
+pub fn name_words(text: &str) -> Vec<String> {
+    crate::extract::fold_lower(text)
+        .split(is_name_separator)
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// What separates the words of a file name: spaces, ASCII punctuation
+/// ("relatorio_final-v2.pdf") and the common dashes, quotes and CJK marks.
+fn is_name_separator(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_ascii_punctuation()
+        || matches!(
+            c,
+            '–' | '—'
+                | '‐'
+                | '·'
+                | '•'
+                | '«'
+                | '»'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '、'
+                | '。'
+                | '，'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '「'
+                | '」'
+        )
 }
 
 /// Register the content word analyzer.
@@ -565,7 +620,8 @@ mod tests {
         let source_entry = schema.get_field_entry(source);
 
         assert_eq!(name_record, IndexRecordOption::Basic);
-        assert!(!name_entry.has_fieldnorms());
+        // Norms rank a shorter name first among names with the same grams.
+        assert!(name_entry.has_fieldnorms());
         assert!(!source_entry.is_indexed());
         assert!(source_entry.is_stored());
     }
