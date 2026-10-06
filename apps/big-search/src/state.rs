@@ -8,8 +8,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const STATE_PATH_BATCH: usize = 2048;
-
 /// Namespace of the content-extraction state inside the shared state database.
 pub const CONTENT_NAMESPACE: &str = "content";
 /// Namespace of the name-catalogue state inside the shared state database.
@@ -319,21 +317,26 @@ impl State {
         Ok(entries)
     }
 
-    /// Persisted paths after `after`, sorted, plus pending changes. This is used by
-    /// bounded catalogue backfills instead of materialising the full path list.
-    pub fn paths_after(&self, after: Option<&str>, limit: usize) -> Result<Vec<PathBuf>> {
+    /// Recorded `(path, mtime, size)` after `after`, sorted, pending changes
+    /// included. Used by bounded catalogue passes instead of materialising the
+    /// full catalogue.
+    pub fn entries_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(PathBuf, i64, u64)>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let after_text = after.unwrap_or_default();
-        let mut paths: Vec<String> = if self.clear_before_persist {
+        let mut entries: Vec<(String, i64, u64)> = if self.clear_before_persist {
             Vec::new()
         } else {
             let mut stmt = self
                 .conn
-                .prepare(
+                .prepare_cached(
                     "
-                    SELECT path FROM file_state
+                    SELECT path, mtime, size FROM file_state
                     WHERE namespace = ?1 AND path > ?2
                     ORDER BY path
                     LIMIT ?3
@@ -342,7 +345,11 @@ impl State {
                 .context("prepare path batch query")?;
             let rows = stmt
                 .query_map(params![self.namespace, after_text, limit as i64], |row| {
-                    row.get::<_, String>(0)
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        db_size_to_u64(row.get::<_, i64>(2)?),
+                    ))
                 })
                 .context("query path batch")?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -352,35 +359,17 @@ impl State {
             if !after_text.is_empty() && path.as_str() <= after_text {
                 continue;
             }
-            match change {
-                PendingChange::Set(_, _) if !paths.iter().any(|known| known == path) => {
-                    paths.push(path.clone());
-                }
-                PendingChange::Set(_, _) => {}
-                PendingChange::Remove => paths.retain(|known| known != path),
+            entries.retain(|(known, _, _)| known != path);
+            if let PendingChange::Set(mtime, size) = *change {
+                entries.push((path.clone(), mtime, size));
             }
         }
-        paths.sort();
-        paths.dedup();
-        paths.truncate(limit);
-        Ok(paths.into_iter().map(PathBuf::from).collect())
-    }
-
-    /// All recorded paths (snapshot). Prefer [`Self::paths_after`] for large catalogues.
-    pub fn paths(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let mut after: Option<String> = None;
-        loop {
-            let Ok(batch) = self.paths_after(after.as_deref(), STATE_PATH_BATCH) else {
-                break;
-            };
-            if batch.is_empty() {
-                break;
-            }
-            after = batch.last().map(|path| path.to_string_lossy().into_owned());
-            out.extend(batch);
-        }
-        out
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        entries.truncate(limit);
+        Ok(entries
+            .into_iter()
+            .map(|(path, mtime, size)| (PathBuf::from(path), mtime, size))
+            .collect())
     }
 
     pub fn len(&self) -> usize {
@@ -645,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn paths_after_merges_pending_changes_with_persisted_rows() {
+    fn entries_after_merges_pending_changes_with_persisted_rows() {
         let dir = std::env::temp_dir().join(format!("bs-state-paths-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -656,15 +645,19 @@ mod tests {
 
         state.remove(Path::new("/b/removed.md")); // pending removal
         state.set(Path::new("/c/added.md"), 2, 2); // pending addition
+        state.set(Path::new("/a/kept.md"), 3, 3); // pending change wins
 
-        let all = state.paths_after(None, 10).unwrap();
+        let all = state.entries_after(None, 10).unwrap();
         assert_eq!(
             all,
-            vec![PathBuf::from("/a/kept.md"), PathBuf::from("/c/added.md")]
+            vec![
+                (PathBuf::from("/a/kept.md"), 3, 3),
+                (PathBuf::from("/c/added.md"), 2, 2)
+            ]
         );
         // Keyset cursor applies to pending entries too.
-        let after = state.paths_after(Some("/a/kept.md"), 10).unwrap();
-        assert_eq!(after, vec![PathBuf::from("/c/added.md")]);
+        let after = state.entries_after(Some("/a/kept.md"), 10).unwrap();
+        assert_eq!(after, vec![(PathBuf::from("/c/added.md"), 2, 2)]);
         assert_eq!(state.len(), 2);
         assert!(!state.is_empty());
 
@@ -731,11 +724,11 @@ mod tests {
         assert_eq!(state.len(), 3, "a updated, c+d added, b removed, x ignored");
         assert!(!state.is_empty());
         assert_eq!(
-            state.paths(),
+            state.entries_after(None, 10).unwrap(),
             vec![
-                PathBuf::from("/p/a.md"),
-                PathBuf::from("/p/c.md"),
-                PathBuf::from("/p/d.md"),
+                (PathBuf::from("/p/a.md"), 2, 2),
+                (PathBuf::from("/p/c.md"), 1, 1),
+                (PathBuf::from("/p/d.md"), 1, 1),
             ]
         );
 

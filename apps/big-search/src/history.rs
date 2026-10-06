@@ -462,6 +462,39 @@ impl History {
         }))
     }
 
+    /// The catalogue entries no version holds yet: a document whose newest
+    /// version has the catalogue's `(mtime, size)` is left out. Seconds, as the
+    /// catalogue keeps them: a change at the same size within the second of the
+    /// last version waits for the document's next event.
+    pub fn unkept(&self, entries: Vec<(PathBuf, i64, u64)>) -> Vec<PathBuf> {
+        let Some(conn) = &self.conn else {
+            return Vec::new();
+        };
+        // One read transaction for the page rather than one per document.
+        let read = conn.unchecked_transaction();
+        let newest = conn.prepare_cached(
+            "SELECT v.mtime_s, v.size FROM files f JOIN versions v ON v.file_id = f.id
+              WHERE f.current_path = ?1 ORDER BY v.saved_at DESC, v.id DESC LIMIT 1",
+        );
+        let (Ok(_read), Ok(mut newest)) = (read, newest) else {
+            return entries.into_iter().map(|(path, _, _)| path).collect();
+        };
+        entries
+            .into_iter()
+            .filter(|(path, mtime, size)| {
+                let kept = newest
+                    .query_row(params![path.to_string_lossy()], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                    })
+                    .optional()
+                    .ok()
+                    .flatten();
+                kept != Some((*mtime, i64::try_from(*size).unwrap_or(i64::MAX)))
+            })
+            .map(|(path, _, _)| path)
+            .collect()
+    }
+
     /// Find or create the catalogue row for this document.
     ///
     /// Two rules, in order. The path comes first because that is what an atomic
@@ -472,8 +505,11 @@ impl History {
         let conn = self.conn.as_ref().expect("checked by the caller");
         let key = path.to_string_lossy().into_owned();
         if let Some(id) = file_id_for_path(conn, path)? {
+            // Only on a change: an UPDATE that rewrites the same values still
+            // writes the page to the WAL, and every save passes through here.
             conn.execute(
-                "UPDATE files SET dev = ?2, ino = ?3, missing_since = NULL WHERE id = ?1",
+                "UPDATE files SET dev = ?2, ino = ?3, missing_since = NULL
+                  WHERE id = ?1 AND (dev IS NOT ?2 OR ino IS NOT ?3 OR missing_since IS NOT NULL)",
                 params![id, metadata.dev() as i64, metadata.ino() as i64],
             )?;
             return Ok(id);
@@ -1276,8 +1312,9 @@ pub enum HistoryEvent {
     Changed(PathBuf),
     /// The kernel reported both names of a rename in one event.
     Renamed(PathBuf, PathBuf),
-    /// A page of the catalogue, for the pass that covers what no event did.
-    Catalogued(Vec<PathBuf>),
+    /// A page of the catalogue's documents with the `(mtime, size)` it holds,
+    /// for the pass that covers what no event did.
+    Catalogued(Vec<(PathBuf, i64, u64)>),
 }
 
 /// How long a document has to be quiet before its version is written.
@@ -1367,11 +1404,12 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
                 pending.note(to, QUIET_PERIOD);
             }
             // The pass that covers what no event could: the queue overflowed, or
-            // the service was not running when somebody saved. `save_version`
-            // compares against the newest version, so a document that has not
-            // changed costs one `stat`.
-            Ok(HistoryEvent::Catalogued(paths)) => {
-                for path in paths {
+            // the service was not running when somebody saved. The catalogue
+            // was just reconciled with the disk, so a document whose newest
+            // version it matches is skipped without touching the disk.
+            Ok(HistoryEvent::Catalogued(entries)) => {
+                let unkept = history.lock().expect("versions store lock").unkept(entries);
+                for path in unkept {
                     pending.note(path, std::time::Duration::ZERO);
                 }
             }
@@ -1592,6 +1630,52 @@ mod tests {
         assert!(matches!(of(libc::EDQUOT), Refusal::OutOfSpace));
         assert!(matches!(of(libc::EINVAL), Refusal::File));
         assert!(matches!(of(libc::EPERM), Refusal::File));
+    }
+
+    /// After a restart the pass over the catalogue checks only what the newest
+    /// version does not already hold, without touching the disk.
+    #[test]
+    fn the_catalogue_pass_skips_documents_already_kept() {
+        let dir = std::env::temp_dir().join(format!("bs-history-unkept-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        for (id, path) in [(1, "/d/kept.md"), (2, "/d/edited.md")] {
+            conn.execute(
+                "INSERT INTO files(id, current_path, created_at) VALUES (?1, ?2, 0)",
+                params![id, path],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO versions(file_id, saved_at, mtime_s, mtime_ns, size, object, reason)
+                 VALUES (?1, 0, 10, 0, 5, 'x', 'saved')",
+                params![id],
+            )
+            .unwrap();
+        }
+        let store = History {
+            conn: Some(conn),
+            objects: dir.join("objects"),
+            support: Support::Ready,
+            hopeless_devices: Vec::new(),
+            budget_bytes: 0,
+            keep_versions: 1,
+            keep_days: 1,
+            paused_for_space: false,
+            budget_unchecked: false,
+            skip_git_repositories: false,
+            respect_gitignore: false,
+        };
+
+        let unkept = store.unkept(vec![
+            (PathBuf::from("/d/kept.md"), 10, 5),
+            (PathBuf::from("/d/edited.md"), 11, 5),
+            (PathBuf::from("/d/new.md"), 10, 5),
+        ]);
+        assert_eq!(
+            unkept,
+            [PathBuf::from("/d/edited.md"), PathBuf::from("/d/new.md")]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Only documents, and never the files somebody keeps their passwords in.

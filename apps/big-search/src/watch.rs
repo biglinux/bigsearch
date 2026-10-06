@@ -985,19 +985,21 @@ fn send_history_page(
     cursor: &mut Option<String>,
 ) -> bool {
     const PAGE: usize = 256;
-    let Ok(paths) = state.paths_after(cursor.as_deref(), PAGE) else {
+    let Ok(entries) = state.entries_after(cursor.as_deref(), PAGE) else {
         return true;
     };
-    if paths.is_empty() {
+    if entries.is_empty() {
         return true;
     }
-    *cursor = paths.last().map(|path| path.to_string_lossy().into_owned());
-    let done = paths.len() < PAGE;
+    *cursor = entries
+        .last()
+        .map(|(path, _, _)| path.to_string_lossy().into_owned());
+    let done = entries.len() < PAGE;
     // The catalogue is mostly not documents, and the worker would learn that one
     // path at a time, after a clone and a queue insert each.
-    let documents: Vec<PathBuf> = paths
+    let documents: Vec<(PathBuf, i64, u64)> = entries
         .into_iter()
-        .filter(|path| crate::history::may_be_a_document(path))
+        .filter(|(path, _, _)| crate::history::may_be_a_document(path))
         .collect();
     if !documents.is_empty() {
         let _ = history.send(crate::history::HistoryEvent::Catalogued(documents));
