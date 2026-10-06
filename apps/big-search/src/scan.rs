@@ -409,63 +409,65 @@ pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncO
     let mut writer = crate::index::bulk_writer(index)?;
     let mut content_candidates = 0usize;
     let mut visible_dirs = Vec::new();
-    state.begin_scan()?;
+    state.scan_pass(|state| {
+        state.begin_scan()?;
 
-    for root in roots {
-        visible_dirs.push(root.clone());
-        for entry in walker(root).flatten() {
-            if entry.depth() == 0 {
-                continue;
+        for root in roots {
+            visible_dirs.push(root.clone());
+            for entry in walker(root).flatten() {
+                if entry.depth() == 0 {
+                    continue;
+                }
+                let path = entry.path();
+                if entry.file_type().is_some_and(|t| t.is_dir()) {
+                    visible_dirs.push(path.to_path_buf());
+                }
+                let Ok(md) = entry.metadata() else { continue };
+                state.mark_seen(path)?;
+                let (mtime, size) = state::meta_pair(&md);
+                let recorded = state.recorded(path);
+                if recorded == Some((mtime, size)) {
+                    continue; // doc (and body) already current
+                }
+                if name_doc_stale(recorded, mtime) {
+                    // A new path, or one changed on another day: (re)index its name.
+                    // Otherwise only content work is scheduled.
+                    delete_path(&writer, &f, path);
+                    add_name_only(&writer, &f, path, Some(&md))?;
+                }
+                state.set(path, mtime, size);
+                let (do_content, do_metadata) = crate::settings::policy_for(path);
+                if (do_content && crate::extract::is_content_path(path))
+                    || (do_metadata && crate::meta::is_meta_candidate(path))
+                {
+                    content_candidates = content_candidates.saturating_add(1);
+                }
+                persist_state_if_needed(state)?;
             }
-            let path = entry.path();
-            if entry.file_type().is_some_and(|t| t.is_dir()) {
-                visible_dirs.push(path.to_path_buf());
-            }
-            let Ok(md) = entry.metadata() else { continue };
-            state.mark_seen(path)?;
-            let (mtime, size) = state::meta_pair(&md);
-            let recorded = state.recorded(path);
-            if recorded == Some((mtime, size)) {
-                continue; // doc (and body) already current
-            }
-            if name_doc_stale(recorded, mtime) {
-                // A new path, or one changed on another day: (re)index its name.
-                // Otherwise only content work is scheduled.
-                delete_path(&writer, &f, path);
-                add_name_only(&writer, &f, path, Some(&md))?;
-            }
-            state.set(path, mtime, size);
-            let (do_content, do_metadata) = crate::settings::policy_for(path);
-            if (do_content && crate::extract::is_content_path(path))
-                || (do_metadata && crate::meta::is_meta_candidate(path))
-            {
-                content_candidates = content_candidates.saturating_add(1);
-            }
-            persist_state_if_needed(state)?;
         }
-    }
 
-    // Offline removable/network sources: keep their catalogue rather than treat
-    // the unmounted tree as deleted, so their files stay findable (and, later,
-    // are reported as living on that device).
-    state.mark_seen_prefixes(&retained_offline_roots())?;
+        // Offline removable/network sources: keep their catalogue rather than treat
+        // the unmounted tree as deleted, so their files stay findable (and, later,
+        // are reported as living on that device).
+        state.mark_seen_prefixes(&retained_offline_roots())?;
 
-    // Deletions: cached paths no longer on disk. Query in ordered batches so the
-    // daemon never allocates a HashSet/Vec containing the whole catalogue.
-    let mut after: Option<String> = None;
-    loop {
-        let stale = state.unseen_paths_after(after.as_deref(), STALE_DELETE_BATCH)?;
-        if stale.is_empty() {
-            break;
+        // Deletions: cached paths no longer on disk. Query in ordered batches so the
+        // daemon never allocates a HashSet/Vec containing the whole catalogue.
+        let mut after: Option<String> = None;
+        loop {
+            let stale = state.unseen_paths_after(after.as_deref(), STALE_DELETE_BATCH)?;
+            if stale.is_empty() {
+                break;
+            }
+            after = stale.last().map(|path| path.to_string_lossy().into_owned());
+            for old in stale {
+                delete_path(&writer, &f, &old);
+                state.remove(&old);
+                persist_state_if_needed(state)?;
+            }
         }
-        after = stale.last().map(|path| path.to_string_lossy().into_owned());
-        for old in stale {
-            delete_path(&writer, &f, &old);
-            state.remove(&old);
-            persist_state_if_needed(state)?;
-        }
-    }
-
+        Ok(())
+    })?;
     writer.commit().context("commit sync")?;
     state.persist()?;
     Ok(SyncOutcome {
@@ -484,47 +486,50 @@ pub fn reconcile_inline(
     roots: &[PathBuf],
 ) -> Result<ReconcileOutcome> {
     let mut outcome = ReconcileOutcome::default();
-    state.begin_scan()?;
-    for root in roots {
-        for entry in walker(root).flatten() {
-            if entry.depth() == 0 {
-                continue;
+    state.scan_pass(|state| {
+        state.begin_scan()?;
+        for root in roots {
+            for entry in walker(root).flatten() {
+                if entry.depth() == 0 {
+                    continue;
+                }
+                let path = entry.path();
+                let Ok(md) = entry.metadata() else { continue };
+                state.mark_seen(path)?;
+                let (mtime, size) = state::meta_pair(&md);
+                let recorded = state.recorded(path);
+                if recorded == Some((mtime, size)) {
+                    continue;
+                }
+                if name_doc_stale(recorded, mtime) {
+                    upsert_path(writer, f, path, Some(&md))?;
+                    outcome.index_changed = true;
+                }
+                state.set(path, mtime, size);
+                outcome.state_changed = true;
+                persist_state_if_needed(state)?;
             }
-            let path = entry.path();
-            let Ok(md) = entry.metadata() else { continue };
-            state.mark_seen(path)?;
-            let (mtime, size) = state::meta_pair(&md);
-            let recorded = state.recorded(path);
-            if recorded == Some((mtime, size)) {
-                continue;
+        }
+        // Keep offline removable/network sources catalogued (see `sync`).
+        state.mark_seen_prefixes(&retained_offline_roots())?;
+        let mut after: Option<String> = None;
+        loop {
+            let stale = state.unseen_paths_after(after.as_deref(), STALE_DELETE_BATCH)?;
+            if stale.is_empty() {
+                break;
             }
-            if name_doc_stale(recorded, mtime) {
-                upsert_path(writer, f, path, Some(&md))?;
+            after = stale.last().map(|path| path.to_string_lossy().into_owned());
+            for old in stale {
+                delete_path(writer, f, &old);
+                state.remove(&old);
                 outcome.index_changed = true;
+                outcome.state_changed = true;
+                outcome.deleted = true;
+                persist_state_if_needed(state)?;
             }
-            state.set(path, mtime, size);
-            outcome.state_changed = true;
-            persist_state_if_needed(state)?;
         }
-    }
-    // Keep offline removable/network sources catalogued (see `sync`).
-    state.mark_seen_prefixes(&retained_offline_roots())?;
-    let mut after: Option<String> = None;
-    loop {
-        let stale = state.unseen_paths_after(after.as_deref(), STALE_DELETE_BATCH)?;
-        if stale.is_empty() {
-            break;
-        }
-        after = stale.last().map(|path| path.to_string_lossy().into_owned());
-        for old in stale {
-            delete_path(writer, f, &old);
-            state.remove(&old);
-            outcome.index_changed = true;
-            outcome.state_changed = true;
-            outcome.deleted = true;
-            persist_state_if_needed(state)?;
-        }
-    }
+        Ok(())
+    })?;
     Ok(outcome)
 }
 

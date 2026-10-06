@@ -131,6 +131,26 @@ impl State {
         self.pending.len()
     }
 
+    /// Run a reconciliation pass in one transaction. Each lookup and seen-mark
+    /// would otherwise take and release the database's locks on its own: two
+    /// `fcntl` and an `fstat` apiece, 324 000 system calls for a walk over
+    /// 109 000 paths. Batches persisted meanwhile commit with the pass, failed
+    /// or not, as each committed on its own before.
+    pub fn scan_pass<T>(&mut self, pass: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.conn
+            .execute_batch("BEGIN")
+            .context("begin scan transaction")?;
+        let result = pass(self);
+        if let Err(error) = self.conn.execute_batch("COMMIT") {
+            // Never leave it open: every later flush would nest in it unseen.
+            let _ = self.conn.execute_batch("ROLLBACK");
+            // The pass's own failure, if any, says more than the commit's.
+            result?;
+            return Err(error).context("commit scan transaction");
+        }
+        result
+    }
+
     /// Start a low-RAM reconciliation pass. Seen paths are recorded in a SQLite
     /// temporary B-tree instead of a process-wide `HashSet<String>`.
     pub fn begin_scan(&mut self) -> Result<()> {
@@ -421,7 +441,9 @@ impl State {
         if let Some(parent) = self.db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tx = self.conn.transaction().context("begin state transaction")?;
+        // A savepoint, so a flush inside a scan pass nests in its transaction
+        // (see [`Self::scan_pass`]); on its own it is a transaction like any.
+        let tx = self.conn.savepoint().context("begin state transaction")?;
         if self.clear_before_persist {
             tx.execute(
                 "DELETE FROM file_state WHERE namespace = ?1",
