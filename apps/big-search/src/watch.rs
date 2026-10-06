@@ -140,9 +140,10 @@ struct ContentBackfill {
     /// All remaining pending files are inside their cooldown: sleep until the
     /// earliest one becomes eligible instead of polling every idle tick.
     snooze_until: Option<Instant>,
-    /// When the next batch of a running pass is due, set from how long the
-    /// last batch took and how busy the machine is. A deadline, not a delay:
-    /// file events that arrive meanwhile must not keep pushing it back.
+    /// When the next batch is due: in a running pass, set from how long the
+    /// last batch took and how busy the machine is; before one, by the first
+    /// content search (see [`Self::warm`]). A deadline, not a delay: file
+    /// events and searches that arrive meanwhile must not keep pushing it back.
     next_batch_at: Option<Instant>,
     /// Shared gauge read by the IPC thread: files currently deferred by the
     /// cooldown (the "content results may be incomplete" hint).
@@ -194,11 +195,14 @@ impl ContentBackfill {
         self.snooze_until = None;
     }
 
-    /// A content search happened: run a cooldown-free pass as soon as idle.
+    /// A content search happened: run a cooldown-free pass once the idle delay
+    /// has passed since the first search. A deadline: searches typed faster
+    /// than the delay must not keep pushing the pass back.
     fn warm(&mut self) {
         self.bypass_cooldown = true;
-        self.snooze_until = None;
         self.request();
+        self.next_batch_at
+            .get_or_insert_with(|| Instant::now() + self.idle_delay);
     }
 
     fn clear(&mut self) {
@@ -1004,6 +1008,18 @@ fn send_history_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Searches typed faster than the idle delay once kept restarting it, and
+    /// the bodies they asked for were never extracted.
+    #[test]
+    fn content_searches_do_not_push_the_warm_pass_back() {
+        let mut backfill = ContentBackfill::new(Arc::new(AtomicU64::new(0)));
+        backfill.warm();
+        let first = backfill.wait_before_batch();
+        std::thread::sleep(Duration::from_millis(20));
+        backfill.warm();
+        assert!(backfill.wait_before_batch() < first);
+    }
 
     /// The merge is left running on the writer's merge thread; it must still
     /// land, and an index with nothing to tidy must be left alone.
