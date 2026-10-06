@@ -713,7 +713,7 @@ pub fn max_repairable_name_deficit(cached_paths: u64) -> u64 {
 pub fn repair_deflated_against_state(index: &Index, state: &mut State) -> Result<u64> {
     let f = fields(index)?;
     state.begin_scan()?;
-    for_each_indexed_path(index, |path| state.mark_seen(path))?;
+    for_each_indexed_path(index, |path| state.mark_seen(path, None))?;
 
     let mut writer = bulk_writer(index)?;
     let mut repaired = 0u64;

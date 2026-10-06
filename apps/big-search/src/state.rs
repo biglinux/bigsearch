@@ -22,6 +22,21 @@ pub struct State {
     dirty: bool,
 }
 
+/// A difference a reconciliation pass found (see [`State::scan_changes_after`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScanChange {
+    /// On disk with this `(mtime, size)`, which the catalogue records otherwise
+    /// (`recorded`) or not at all.
+    Seen {
+        path: PathBuf,
+        mtime: i64,
+        size: u64,
+        recorded: Option<(i64, u64)>,
+    },
+    /// In the catalogue, not seen by the pass.
+    Gone(PathBuf),
+}
+
 #[derive(Clone, Copy)]
 enum PendingChange {
     Set(i64, u64),
@@ -159,20 +174,125 @@ impl State {
                 "
                 DROP TABLE IF EXISTS temp.current_scan_seen;
                 CREATE TEMP TABLE current_scan_seen (
-                    path TEXT PRIMARY KEY
+                    path TEXT PRIMARY KEY,
+                    mtime INTEGER,
+                    size INTEGER
                 ) WITHOUT ROWID;
                 ",
             )
             .context("initialize scan seen table")
     }
 
-    /// Mark `path` as observed in the current reconciliation pass.
-    pub fn mark_seen(&mut self, path: &Path) -> Result<()> {
+    /// Mark `path` as observed in the current reconciliation pass, with the
+    /// `(mtime, size)` found on disk when the pass compares them (see
+    /// [`Self::scan_changes_after`]).
+    pub fn mark_seen(&mut self, path: &Path, found: Option<(i64, u64)>) -> Result<()> {
+        let (mtime, size) = found.map_or((None, None), |(mtime, size)| {
+            (Some(mtime), Some(u64_to_db_size(size)))
+        });
         self.conn
-            .prepare_cached("INSERT OR IGNORE INTO temp.current_scan_seen(path) VALUES (?1)")
-            .and_then(|mut stmt| stmt.execute(params![key(path)]))
+            .prepare_cached(
+                "INSERT OR REPLACE INTO temp.current_scan_seen(path, mtime, size)
+                 VALUES (?1, ?2, ?3)",
+            )
+            .and_then(|mut stmt| stmt.execute(params![key(path), mtime, size]))
             .map(|_| ())
             .context("mark path seen")
+    }
+
+    /// What this pass saw that the catalogue does not hold, in path order and
+    /// strictly after `after`, with the cursor to continue from (`None` once
+    /// both sides are read).
+    ///
+    /// Both lists are read a page at a time in path order and merged here. A
+    /// lookup per path cost a B-tree descent of string comparisons for every
+    /// path, three per path with the seen-mark and the deletion check: 38 % of
+    /// a restart walk over 109 000 paths. The catalogue must be persisted when
+    /// the pass starts; rows written meanwhile all sort at or before `after`.
+    pub fn scan_changes_after(
+        &self,
+        after: &str,
+        limit: usize,
+    ) -> Result<(Vec<ScanChange>, Option<String>)> {
+        let page = |sql: &str,
+                    namespace: Option<&str>|
+         -> Result<Vec<(String, Option<i64>, Option<i64>)>> {
+            let mut stmt = self.conn.prepare_cached(sql).context("prepare scan page")?;
+            let row = |row: &rusqlite::Row<'_>| Ok((row.get(0)?, row.get(1)?, row.get(2)?));
+            let rows = match namespace {
+                Some(namespace) => stmt.query_map(params![namespace, after, limit as i64], row),
+                None => stmt.query_map(params![after, limit as i64], row),
+            }
+            .context("query scan page")?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+        let seen = page(
+            "SELECT path, mtime, size FROM temp.current_scan_seen
+              WHERE path > ?1 ORDER BY path LIMIT ?2",
+            None,
+        )?;
+        let known = if self.clear_before_persist {
+            Vec::new()
+        } else {
+            page(
+                "SELECT path, mtime, size FROM file_state
+                  WHERE namespace = ?1 AND path > ?2 ORDER BY path LIMIT ?3",
+                Some(&self.namespace),
+            )?
+        };
+        // Past the last row of a full page the other side may still hold
+        // smaller paths: stop there and continue from it next time.
+        let full_end = |rows: &[(String, Option<i64>, Option<i64>)]| {
+            (rows.len() == limit)
+                .then(|| rows.last().map(|row| row.0.clone()))
+                .flatten()
+        };
+        let end = match (full_end(&seen), full_end(&known)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let within = |path: &String| end.as_ref().is_none_or(|end| path <= end);
+
+        let mut changes = Vec::new();
+        let mut seen = seen.into_iter().filter(|row| within(&row.0)).peekable();
+        let mut known = known.into_iter().filter(|row| within(&row.0)).peekable();
+        loop {
+            let order = match (seen.peek(), known.peek()) {
+                (None, None) => break,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(s), Some(k)) => s.0.cmp(&k.0),
+            };
+            match order {
+                std::cmp::Ordering::Greater => {
+                    let (path, _, _) = known.next().expect("peeked");
+                    changes.push(ScanChange::Gone(PathBuf::from(path)));
+                }
+                order => {
+                    let (path, mtime, size) = seen.next().expect("peeked");
+                    let recorded = if order.is_eq() {
+                        let (_, mtime, size) = known.next().expect("peeked");
+                        Some((mtime.unwrap_or(0), db_size_to_u64(size.unwrap_or(0))))
+                    } else {
+                        None
+                    };
+                    // Marked without metadata: seen, nothing to compare.
+                    let (Some(mtime), Some(size)) = (mtime, size) else {
+                        continue;
+                    };
+                    let size = db_size_to_u64(size);
+                    if recorded != Some((mtime, size)) {
+                        changes.push(ScanChange::Seen {
+                            path: PathBuf::from(path),
+                            mtime,
+                            size,
+                            recorded,
+                        });
+                    }
+                }
+            }
+        }
+        Ok((changes, end))
     }
 
     /// Mark every cached path under the retained prefixes as seen. Used for
@@ -186,8 +306,8 @@ impl State {
             self.conn
                 .execute(
                     "
-                    INSERT OR IGNORE INTO temp.current_scan_seen(path)
-                    SELECT path FROM file_state
+                    INSERT OR IGNORE INTO temp.current_scan_seen(path, mtime, size)
+                    SELECT path, mtime, size FROM file_state
                     WHERE namespace = ?1
                       AND (path = ?2
                            OR (length(path) > ?3
@@ -652,6 +772,49 @@ mod tests {
         let empty = State::empty(&file, NAME_NAMESPACE);
         assert!(!empty.contains(path));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The pages of the two sides end at different paths; whatever the page
+    /// size, the merge must report each difference once and nothing else.
+    #[test]
+    fn scan_changes_are_the_same_whatever_the_page_size() {
+        let dir = std::env::temp_dir().join(format!("bs-state-scan-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
+        for (path, mtime) in [("/a", 1), ("/b", 1), ("/d", 1), ("/e", 1), ("/g", 1)] {
+            state.set(Path::new(path), mtime, 1);
+        }
+        state.persist().unwrap();
+        state.begin_scan().unwrap();
+        for (path, mtime) in [("/a", 1), ("/b", 2), ("/c", 1), ("/e", 1), ("/f", 1)] {
+            state.mark_seen(Path::new(path), Some((mtime, 1))).unwrap();
+        }
+        state.mark_seen(Path::new("/g"), None).unwrap();
+
+        let seen = |path: &str, mtime, recorded| ScanChange::Seen {
+            path: PathBuf::from(path),
+            mtime,
+            size: 1,
+            recorded,
+        };
+        let expected = vec![
+            seen("/b", 2, Some((1, 1))),
+            seen("/c", 1, None),
+            ScanChange::Gone(PathBuf::from("/d")),
+            seen("/f", 1, None),
+        ];
+        for limit in 1..=6 {
+            let mut changes = Vec::new();
+            let mut after = Some(String::new());
+            while let Some(cursor) = after {
+                let (page, next) = state.scan_changes_after(&cursor, limit).unwrap();
+                changes.extend(page);
+                after = next;
+            }
+            assert_eq!(changes, expected, "page size {limit}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

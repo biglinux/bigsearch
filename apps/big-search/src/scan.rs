@@ -1,7 +1,7 @@
 //! Walk visible (non-hidden, non-gitignored) entries and (re)index them.
 //! Shared by the full reindex and the incremental watcher.
 use crate::index::Fields;
-use crate::state::{self, State};
+use crate::state::{self, ScanChange, State};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
@@ -64,7 +64,9 @@ pnpm-lock.yaml
 ";
 
 const STATE_FLUSH_ROWS: usize = 2048;
-const STALE_DELETE_BATCH: usize = 2048;
+/// Paths read from each side per page when a pass compares the disk with the
+/// catalogue: bounded memory on a catalogue of millions.
+const SCAN_PAGE: usize = 2048;
 
 /// Documented per-user ignore file, seeded once at `~/.config/big-search/ignore`
 /// so the customisation point is discoverable and self-explaining. Commented out
@@ -329,6 +331,8 @@ pub struct ReconcileOutcome {
     /// document, so this is what decides whether the orphan prune has anything
     /// to look for.
     pub deleted: bool,
+    /// Changed files whose content or metadata may need extracting, for the log.
+    pub content_candidates: usize,
 }
 
 impl ReconcileOutcome {
@@ -340,6 +344,9 @@ impl ReconcileOutcome {
         self.index_changed |= other.index_changed;
         self.state_changed |= other.state_changed;
         self.deleted |= other.deleted;
+        self.content_candidates = self
+            .content_candidates
+            .saturating_add(other.content_candidates);
     }
 }
 
@@ -407,71 +414,12 @@ pub fn visible_dirs(root: &Path) -> Vec<PathBuf> {
 pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncOutcome> {
     let f = crate::index::fields(index)?;
     let mut writer = crate::index::bulk_writer(index)?;
-    let mut content_candidates = 0usize;
     let mut visible_dirs = Vec::new();
-    state.scan_pass(|state| {
-        state.begin_scan()?;
-
-        for root in roots {
-            visible_dirs.push(root.clone());
-            for entry in walker(root).flatten() {
-                if entry.depth() == 0 {
-                    continue;
-                }
-                let path = entry.path();
-                if entry.file_type().is_some_and(|t| t.is_dir()) {
-                    visible_dirs.push(path.to_path_buf());
-                }
-                let Ok(md) = entry.metadata() else { continue };
-                state.mark_seen(path)?;
-                let (mtime, size) = state::meta_pair(&md);
-                let recorded = state.recorded(path);
-                if recorded == Some((mtime, size)) {
-                    continue; // doc (and body) already current
-                }
-                if name_doc_stale(recorded, mtime) {
-                    // A new path, or one changed on another day: (re)index its name.
-                    // Otherwise only content work is scheduled.
-                    delete_path(&writer, &f, path);
-                    add_name_only(&writer, &f, path, Some(&md))?;
-                }
-                state.set(path, mtime, size);
-                let (do_content, do_metadata) = crate::settings::policy_for(path);
-                if (do_content && crate::extract::is_content_path(path))
-                    || (do_metadata && crate::meta::is_meta_candidate(path))
-                {
-                    content_candidates = content_candidates.saturating_add(1);
-                }
-                persist_state_if_needed(state)?;
-            }
-        }
-
-        // Offline removable/network sources: keep their catalogue rather than treat
-        // the unmounted tree as deleted, so their files stay findable (and, later,
-        // are reported as living on that device).
-        state.mark_seen_prefixes(&retained_offline_roots())?;
-
-        // Deletions: cached paths no longer on disk. Query in ordered batches so the
-        // daemon never allocates a HashSet/Vec containing the whole catalogue.
-        let mut after: Option<String> = None;
-        loop {
-            let stale = state.unseen_paths_after(after.as_deref(), STALE_DELETE_BATCH)?;
-            if stale.is_empty() {
-                break;
-            }
-            after = stale.last().map(|path| path.to_string_lossy().into_owned());
-            for old in stale {
-                delete_path(&writer, &f, &old);
-                state.remove(&old);
-                persist_state_if_needed(state)?;
-            }
-        }
-        Ok(())
-    })?;
+    let outcome = reconcile_roots(&writer, &f, state, roots, &mut visible_dirs)?;
     writer.commit().context("commit sync")?;
     state.persist()?;
     Ok(SyncOutcome {
-        content_candidates,
+        content_candidates: outcome.content_candidates,
         visible_dirs,
     })
 }
@@ -485,46 +433,83 @@ pub fn reconcile_inline(
     state: &mut State,
     roots: &[PathBuf],
 ) -> Result<ReconcileOutcome> {
+    // The watcher already watches the directories this finds.
+    reconcile_roots(writer, f, state, roots, &mut Vec::new())
+}
+
+/// One pass over `roots`: walk the disk recording each entry's `(mtime, size)`,
+/// then compare that with the catalogue in path order (see
+/// [`State::scan_changes_after`]) and update name documents and `state`.
+/// `visible_dirs` receives every directory walked.
+fn reconcile_roots(
+    writer: &IndexWriter,
+    f: &Fields,
+    state: &mut State,
+    roots: &[PathBuf],
+    visible_dirs: &mut Vec<PathBuf>,
+) -> Result<ReconcileOutcome> {
     let mut outcome = ReconcileOutcome::default();
     state.scan_pass(|state| {
+        // The comparison reads the catalogue as persisted.
+        state.persist()?;
         state.begin_scan()?;
         for root in roots {
+            visible_dirs.push(root.clone());
             for entry in walker(root).flatten() {
                 if entry.depth() == 0 {
                     continue;
                 }
                 let path = entry.path();
+                if entry.file_type().is_some_and(|t| t.is_dir()) {
+                    visible_dirs.push(path.to_path_buf());
+                }
                 let Ok(md) = entry.metadata() else { continue };
-                state.mark_seen(path)?;
-                let (mtime, size) = state::meta_pair(&md);
-                let recorded = state.recorded(path);
-                if recorded == Some((mtime, size)) {
-                    continue;
-                }
-                if name_doc_stale(recorded, mtime) {
-                    upsert_path(writer, f, path, Some(&md))?;
-                    outcome.index_changed = true;
-                }
-                state.set(path, mtime, size);
-                outcome.state_changed = true;
-                persist_state_if_needed(state)?;
+                state.mark_seen(path, Some(state::meta_pair(&md)))?;
             }
         }
-        // Keep offline removable/network sources catalogued (see `sync`).
+        // Offline removable/network sources: keep their catalogue rather than treat
+        // the unmounted tree as deleted, so their files stay findable (and, later,
+        // are reported as living on that device).
         state.mark_seen_prefixes(&retained_offline_roots())?;
-        let mut after: Option<String> = None;
-        loop {
-            let stale = state.unseen_paths_after(after.as_deref(), STALE_DELETE_BATCH)?;
-            if stale.is_empty() {
-                break;
-            }
-            after = stale.last().map(|path| path.to_string_lossy().into_owned());
-            for old in stale {
-                delete_path(writer, f, &old);
-                state.remove(&old);
-                outcome.index_changed = true;
-                outcome.state_changed = true;
-                outcome.deleted = true;
+
+        let mut after = Some(String::new());
+        while let Some(cursor) = after {
+            let (changes, next) = state.scan_changes_after(&cursor, SCAN_PAGE)?;
+            after = next;
+            for change in changes {
+                match change {
+                    ScanChange::Seen {
+                        path,
+                        mtime,
+                        size,
+                        recorded,
+                    } => {
+                        if name_doc_stale(recorded, mtime) {
+                            // A new path, or one changed on another day: (re)index
+                            // its name. Otherwise only content work is scheduled.
+                            // The walk kept no metadata; only changed paths get here.
+                            let md = std::fs::symlink_metadata(&path).ok();
+                            upsert_path(writer, f, &path, md.as_ref())?;
+                            outcome.index_changed = true;
+                        }
+                        state.set(&path, mtime, size);
+                        outcome.state_changed = true;
+                        let (do_content, do_metadata) = crate::settings::policy_for(&path);
+                        if (do_content && crate::extract::is_content_path(&path))
+                            || (do_metadata && crate::meta::is_meta_candidate(&path))
+                        {
+                            outcome.content_candidates =
+                                outcome.content_candidates.saturating_add(1);
+                        }
+                    }
+                    ScanChange::Gone(path) => {
+                        delete_path(writer, f, &path);
+                        state.remove(&path);
+                        outcome.index_changed = true;
+                        outcome.state_changed = true;
+                        outcome.deleted = true;
+                    }
+                }
                 persist_state_if_needed(state)?;
             }
         }
