@@ -1286,7 +1286,9 @@ pub enum HistoryEvent {
 /// times in a row, produces one version rather than three; short enough that
 /// somebody who saves and immediately looks finds it there.
 const QUIET_PERIOD: std::time::Duration = std::time::Duration::from_secs(3);
-/// How often the worker looks at the disk and at documents that disappeared.
+/// How often, at most, the worker looks at the disk and at documents that
+/// disappeared. Only after something happened: with nothing saved or changed
+/// there is nothing new to find, and the worker sleeps until an event.
 const HOUSEKEEPING: std::time::Duration = std::time::Duration::from_secs(60);
 /// How often the store checks whether documents it knows are still there.
 ///
@@ -1329,18 +1331,30 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
     let mut pending = Pending::new();
     let mut next_housekeeping = std::time::Instant::now() + HOUSEKEEPING;
     let mut next_missing_sweep = std::time::Instant::now() + MISSING_SWEEP;
+    // The disk and documents gone missing are looked at once after a start,
+    // then after each event or saved version.
+    let mut housekeeping_owed = true;
 
     loop {
         // With a backlog, come back quickly; with none, sleep until there is
         // something to do. The first version of every document is written this
         // way, and a worker that waited out the whole quiet period between
         // batches would take hours over what should take minutes.
-        let wait = if pending.is_empty() {
-            HOUSEKEEPING
+        let received = if !pending.is_empty() {
+            events.recv_timeout(BACKLOG_PAUSE)
+        } else if housekeeping_owed {
+            events.recv_timeout(
+                next_housekeeping.saturating_duration_since(std::time::Instant::now()),
+            )
         } else {
-            BACKLOG_PAUSE
+            events
+                .recv()
+                .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
         };
-        match events.recv_timeout(wait) {
+        if received.is_ok() {
+            housekeeping_owed = true;
+        }
+        match received {
             Ok(HistoryEvent::Changed(path)) => pending.note(path, QUIET_PERIOD),
             Ok(HistoryEvent::Renamed(from, to)) => {
                 if let Err(error) = history
@@ -1376,13 +1390,17 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
                 .expect("versions store lock")
                 .save_version(&path, Reason::Saved);
             match kept {
-                Ok(true) => log::debug!("kept a version of {}", path.display()),
+                Ok(true) => {
+                    log::debug!("kept a version of {}", path.display());
+                    housekeeping_owed = true;
+                }
                 Ok(false) => {}
                 Err(error) => log::debug!("no version of {}: {error:#}", path.display()),
             }
         }
 
-        if std::time::Instant::now() >= next_housekeeping {
+        if housekeeping_owed && std::time::Instant::now() >= next_housekeeping {
+            housekeeping_owed = false;
             next_housekeeping = std::time::Instant::now() + HOUSEKEEPING;
             let mut store = history.lock().expect("versions store lock");
             if let Err(error) = store.watch_free_space() {
