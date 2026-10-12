@@ -1,0 +1,117 @@
+# Maintainer: Bruno Gonçalves <bigbruno@gmail.com>
+# shellcheck shell=bash disable=SC2034,SC2154
+#
+# ─── Offline-first build ──────────────────────────────────────────────────
+# When this PKGBUILD lives inside a checkout, the working tree beside
+# pkgbuild/ is mirrored into ${srcdir} instead of cloning from GitHub.
+# CI/AUR builds fall back to git+url. Force network: `BIGSEARCH_FORCE_GIT=1`.
+
+pkgbase=bigsearch
+pkgname=(big-search big-docinfo)
+pkgver=0.1.0
+pkgrel=1
+arch=('x86_64')
+url="https://github.com/biglinux/bigsearch"
+license=('MIT')
+makedepends=('cargo' 'git' 'pkgconf' 'python' 'rsync')
+
+# ─── Local-source detection ───────────────────────────────────────────────
+_local_root=""
+if [ "${BIGSEARCH_FORCE_GIT:-0}" != "1" ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
+    _candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"
+    if [ -f "${_candidate}/Cargo.toml" ] && [ -d "${_candidate}/apps/big-search" ]; then
+        _local_root="${_candidate}"
+    fi
+    unset _candidate
+fi
+
+if [ -n "${_local_root}" ]; then
+    echo "==> Local source detected at ${_local_root} — skipping git fetch" >&2
+    source=()
+    sha256sums=()
+else
+    echo "==> No local source found, will fetch from ${url}.git" >&2
+    source=("git+${url}.git")
+    sha256sums=('SKIP')
+fi
+
+prepare() {
+    if [ -n "${_local_root}" ]; then
+        printf '==> Mirroring local source tree from %s\n' "${_local_root}"
+        mkdir -p "${srcdir}/${pkgbase}"
+        rsync -a --delete \
+            --exclude='/target' \
+            --exclude='/.git' \
+            --exclude='*.pkg.tar.*' \
+            --exclude='*.log' \
+            --exclude='/pkgbuild/src/' \
+            --exclude='/pkgbuild/pkg/' \
+            "${_local_root}/" "${srcdir}/${pkgbase}/"
+    fi
+    cd "${srcdir}/${pkgbase}" || return
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+# Cargo builds into ${srcdir}/target, outside the mirrored tree, so a rebuild
+# after an edit recompiles only the crates that changed.
+build() {
+    cd "${srcdir}/${pkgbase}" || return
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR="${srcdir}/target"
+    export CARGO_INCREMENTAL=0
+    export RUSTFLAGS="${RUSTFLAGS} --remap-path-prefix=${srcdir}=/build"
+    cargo build --frozen --release -p big-search -p big-docinfo-cli
+}
+
+check() {
+    cd "${srcdir}/${pkgbase}" || return
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR="${srcdir}/target"
+    export CARGO_INCREMENTAL=0
+    # Doctests run binaries from TMPDIR, which may be mounted noexec.
+    export TMPDIR="${srcdir}/test-tmp"
+    mkdir -p "${TMPDIR}"
+    # The daemon IPC integration tests start real daemons on Unix sockets;
+    # they run in CI, not in makepkg.
+    cargo test --frozen --release -p big-search --lib --bins --test cli
+    cargo test --frozen --release -p big-search --doc
+    cargo test --frozen --release -p big-docinfo-cli -p big-docinfo
+}
+
+package_big-search() {
+    pkgdesc="Lean unprivileged filename + content search daemon for the Linux desktop"
+    depends=('glibc' 'libgcc' 'sqlite' 'poppler' 'antiword')
+
+    cd "${srcdir}/${pkgbase}" || return
+    install -Dm755 "${srcdir}/target/release/big-search" "${pkgdir}/usr/bin/big-search"
+
+    install -Dm644 /dev/null "${pkgdir}/usr/lib/systemd/user/big-search.service"
+    sed 's|%h/.local/bin/big-search|/usr/bin/big-search|' apps/big-search/packaging/big-search.service \
+        >"${pkgdir}/usr/lib/systemd/user/big-search.service"
+
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/big-search/README.md"
+    install -Dm644 apps/big-search/DESIGN.md "${pkgdir}/usr/share/doc/big-search/DESIGN.md"
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/big-search/LICENSE"
+    CARGO_NET_OFFLINE=true python scripts/third-party-notices.py \
+        --target "$(rustc -vV | sed -n 's/host: //p')" \
+        >"${pkgdir}/usr/share/licenses/big-search/THIRD-PARTY-NOTICES"
+}
+
+package_big-docinfo() {
+    pkgdesc="Suggests a file name for a document from what it says, with a Dolphin menu; no AI model"
+    depends=('glibc' 'libgcc' 'poppler' 'antiword' 'kdialog' 'sh')
+    optdepends=('dolphin: the "Suggest a name…" menu')
+
+    cd "${srcdir}/${pkgbase}" || return
+    install -Dm755 "${srcdir}/target/release/big-docinfo" "${pkgdir}/usr/bin/big-docinfo"
+    install -Dm755 apps/big-docinfo/packaging/suggest-name "${pkgdir}/usr/lib/big-docinfo/suggest-name"
+    install -Dm644 apps/big-docinfo/packaging/big-docinfo.desktop \
+        "${pkgdir}/usr/share/kio/servicemenus/big-docinfo.desktop"
+
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/big-docinfo/LICENSE"
+    CARGO_NET_OFFLINE=true python scripts/third-party-notices.py \
+        --package big-docinfo-cli \
+        --target "$(rustc -vV | sed -n 's/host: //p')" \
+        >"${pkgdir}/usr/share/licenses/big-docinfo/THIRD-PARTY-NOTICES"
+}

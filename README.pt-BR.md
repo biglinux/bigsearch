@@ -54,8 +54,8 @@ systemctl --user enable --now big-search.service
 
 A unit é endurecida: `ProtectSystem=strict`, `ProtectHome=read-only` com um
 diretório de dados gravável, `RestrictAddressFamilies=AF_UNIX` e filtro de
-syscalls. Em distribuições baseadas no Arch,
-[`apps/big-search/packaging/arch`](apps/big-search/packaging/arch) gera um pacote.
+syscalls. Em distribuições baseadas no Arch, `cd pkgbuild && makepkg -si` gera
+e instala os pacotes `big-search` e `big-docinfo` a partir desta cópia.
 
 ## Uso
 
@@ -77,8 +77,9 @@ no terminal; `--color never`, `NO_COLOR` e `CLICOLOR` são respeitados.
 
 ## Configuração
 
-`~/.config/big-search/config.toml` é criado na primeira execução, com cada
-chave explicada. Sem nenhum bloco `[[source]]`, a pasta pessoal é indexada. A
+`~/.config/big-search/config.toml` é criado, com cada chave explicada, pelo
+primeiro comando `big-search config` ou `big-search reindex`; o serviço nunca
+grava nele. Sem nenhum bloco `[[source]]`, a pasta pessoal é indexada. A
 CLI cobre as mudanças mais comuns:
 
 ```sh
@@ -102,6 +103,8 @@ gitignore. Uma linha com `!` traz de volta algo que as regras embutidas pulam
 | [`crates/foundation/big-indexd-client`](crates/foundation/big-indexd-client) | Tipos do protocolo do socket e um cliente pequeno para outros programas. |
 | [`crates/foundation/big-search-config`](crates/foundation/big-search-config) | Lê e grava o `config.toml` sem perder os comentários do usuário. |
 | [`crates/ui/generic/big-search-settings`](crates/ui/generic/big-search-settings) | A página de configurações em GTK que outros programas incorporam. |
+| [`apps/big-docinfo`](apps/big-docinfo) | O comando `big-docinfo`: sugere um nome para um documento a partir do que ele diz e o renomeia sem sobrescrever. |
+| [`crates/foundation/big-docinfo`](crates/foundation/big-docinfo) | Lê o tipo, a data, o autor e as frases principais de um documento a partir do texto, sem modelo. |
 
 `cargo build` compila só o daemon; use `--workspace` para incluir a página de
 configurações.
