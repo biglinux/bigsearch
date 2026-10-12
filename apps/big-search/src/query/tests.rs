@@ -140,11 +140,12 @@ fn type_filter_finds_videos_by_content() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut stream = vec![0_u8; 188 * 4];
     stream.iter_mut().step_by(188).for_each(|byte| *byte = 0x47);
-    let files: [(&str, &[u8]); 4] = [
+    // Only types the bytes tell: a type known by its name alone needs the
+    // system's MIME database, which mime.rs tests on its own.
+    let files: [(&str, &[u8]); 3] = [
         ("clip.ts", &stream),
         ("recording", &stream),
         ("app.ts", b"export const clip = 1;\n"),
-        ("film.mp4", b"not read: the name tells"),
     ];
     let paths: Vec<String> = files
         .iter()
@@ -180,7 +181,6 @@ fn type_filter_finds_videos_by_content() {
         found,
         [
             ("clip.ts".to_string(), "video/mp2t".to_string()),
-            ("film.mp4".to_string(), "video/mp4".to_string()),
             ("recording".to_string(), "video/mp2t".to_string()),
         ]
     );
