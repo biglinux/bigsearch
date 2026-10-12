@@ -19,7 +19,7 @@ big-search-config = { path = "../../crates/foundation/big-search-config", versio
 env_logger = { version = "0.11.11" }
 file-format = { version = "0.29" }
 ignore = { version = "0.4.27" }
-imagesize = { version = "0.14" }
+imagesize = { version = "0.15" }
 libc = { version = "0.2.186" }
 log = { version = "0.4.33" }
 notify = { version = "8.2" }
