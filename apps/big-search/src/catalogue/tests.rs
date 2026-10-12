@@ -197,7 +197,7 @@ fn entries_after_merges_pending_rows() {
     let dir = std::env::temp_dir().join(format!("bs-state-paths-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
-    let mut state = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+    let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
     state.set(Path::new("/a/kept.md"), 1, 1);
     state.set(Path::new("/b/removed.md"), 1, 1);
     state.persist().unwrap();
@@ -228,8 +228,11 @@ fn stale_entries_stream_pending_work() {
     let dir = std::env::temp_dir().join(format!("bs-state-stale-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
-    let mut names = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
-    let mut content = State::empty(&dir.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
+    let mut names = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+    let mut content = State::empty(
+        &dir.join("state.sqlite"),
+        crate::catalogue::CONTENT_NAMESPACE,
+    );
 
     names.set(Path::new("/a/extracted.md"), 100, 5);
     names.set(Path::new("/b/changed.md"), 200, 9);
@@ -267,7 +270,7 @@ fn len_tracks_pending_overlaps_and_removals() {
     let dir = std::env::temp_dir().join(format!("bs-state-len-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
-    let mut state = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+    let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
     state.set(Path::new("/p/a.md"), 1, 1);
     state.set(Path::new("/p/b.md"), 1, 1);
     state.persist().unwrap();
@@ -309,7 +312,7 @@ fn on_disk_state_uses_wal_journal() {
     let dir = std::env::temp_dir().join(format!("bs-state-wal-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
-    let state = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+    let state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
     assert_eq!(state.journal_mode(), "wal");
     std::fs::remove_dir_all(&dir).ok();
 }

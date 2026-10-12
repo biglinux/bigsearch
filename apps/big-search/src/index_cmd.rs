@@ -87,7 +87,7 @@ fn print_reindex_summary(t0: Instant, names: u64, c: u64) {
 fn reconcile_plan(
     index: &mut tantivy::Index,
     content_index: &mut tantivy::Index,
-) -> Result<(Vec<PathBuf>, state::State, bool)> {
+) -> Result<(Vec<PathBuf>, catalogue::State, bool)> {
     recover_inflated_index(index)?;
     // Config-driven: reconcile the available sources, keeping offline
     // removable/network sources catalogued (a reindex while a device is
@@ -108,15 +108,15 @@ fn reconcile_plan(
     let state = if index_empty {
         *content_index = index::recreate_content_on_disk(&config::content_index_dir())?;
         content::clear_content_state()?;
-        state::State::empty(
+        catalogue::State::empty(
             &crate::config::state_db_path(),
-            crate::state::NAME_NAMESPACE,
+            crate::catalogue::NAME_NAMESPACE,
         )
     } else {
         ensure_content_state_matches_index(content_index)?;
-        state::State::load(
+        catalogue::State::load(
             &crate::config::state_db_path(),
-            crate::state::NAME_NAMESPACE,
+            crate::catalogue::NAME_NAMESPACE,
         )
     };
     Ok((
@@ -131,7 +131,7 @@ fn explicit_rebuild_plan(
     roots: &[String],
     index: &tantivy::Index,
     content_index: &mut tantivy::Index,
-) -> Result<(Vec<PathBuf>, state::State, bool)> {
+) -> Result<(Vec<PathBuf>, catalogue::State, bool)> {
     let explicit: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
     log::info!("scan roots (explicit): {explicit:?}");
     let mut writer = index::bulk_writer(index)?;
@@ -141,9 +141,9 @@ fn explicit_rebuild_plan(
     content::clear_content_state()?;
     Ok((
         explicit,
-        state::State::empty(
+        catalogue::State::empty(
             &crate::config::state_db_path(),
-            crate::state::NAME_NAMESPACE,
+            crate::catalogue::NAME_NAMESPACE,
         ),
         false,
     ))
@@ -161,9 +161,9 @@ fn ensure_content_state_matches_index(content_index: &tantivy::Index) -> Result<
     if index::is_content_state_synced(&config::content_index_dir()) {
         return Ok(());
     }
-    let cached_content_paths = state::State::load(
+    let cached_content_paths = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::CONTENT_NAMESPACE,
+        crate::catalogue::CONTENT_NAMESPACE,
     )
     .len();
     if cached_content_paths == 0 {
@@ -357,7 +357,7 @@ fn spawn_watcher(
 /// What the startup reconcile hands to the incremental watcher.
 struct StartupSync {
     roots: Vec<PathBuf>,
-    state: state::State,
+    state: catalogue::State,
     initial_dirs: Vec<PathBuf>,
     walk_started: std::time::SystemTime,
 }
@@ -419,7 +419,7 @@ fn startup_sync(
 }
 
 /// The name state the startup walk reconciles against.
-fn startup_name_state(empty: bool, content_index: &tantivy::Index) -> state::State {
+fn startup_name_state(empty: bool, content_index: &tantivy::Index) -> catalogue::State {
     // An empty name index is rebuilt from the walk below. The content
     // index is another matter: its rows are kept unless it is empty too,
     // the same rule as for a full one: a new name schema (which
@@ -430,17 +430,17 @@ fn startup_name_state(empty: bool, content_index: &tantivy::Index) -> state::Sta
         if let Err(e) = ensure_content_state_matches_index(content_index) {
             log::warn!("check content index state: {e:#}");
         }
-        state::State::empty(
+        catalogue::State::empty(
             &crate::config::state_db_path(),
-            crate::state::NAME_NAMESPACE,
+            crate::catalogue::NAME_NAMESPACE,
         )
     } else {
         if let Err(e) = ensure_content_state_matches_index(content_index) {
             log::warn!("check content index state: {e:#}");
         }
-        state::State::load(
+        catalogue::State::load(
             &crate::config::state_db_path(),
-            crate::state::NAME_NAMESPACE,
+            crate::catalogue::NAME_NAMESPACE,
         )
     }
 }
@@ -545,7 +545,7 @@ impl Drop for WatcherExitGuard {
 fn sync_with_retry(
     index: &tantivy::Index,
     roots: &[PathBuf],
-    state: &mut state::State,
+    state: &mut catalogue::State,
 ) -> Result<scan::SyncOutcome> {
     const ATTEMPTS: u32 = 3;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
@@ -566,9 +566,9 @@ fn sync_with_retry(
 }
 
 fn recover_inflated_index(index: &mut tantivy::Index) -> Result<()> {
-    let mut cached_state = state::State::load(
+    let mut cached_state = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::NAME_NAMESPACE,
+        crate::catalogue::NAME_NAMESPACE,
     );
     let cached_paths = cached_state.len() as u64;
     let indexed_documents = index::document_count(&index.reader()?)?;

@@ -1,7 +1,7 @@
 //! Walk visible (non-hidden, non-gitignored) entries and (re)index them.
 //! Shared by the full reindex and the incremental watcher.
+use crate::catalogue::{self, ScanChange, State};
 use crate::index::Fields;
-use crate::state::{self, ScanChange, State};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
@@ -262,11 +262,11 @@ pub fn add_name_only(
             document.add_text(f.ext, ext.to_lowercase());
         }
         let modified = metadata
-            .map(state::meta_pair)
+            .map(catalogue::meta_pair)
             .or_else(|| {
                 std::fs::symlink_metadata(path)
                     .ok()
-                    .map(|m| state::meta_pair(&m))
+                    .map(|m| catalogue::meta_pair(&m))
             })
             .map_or(0, |(mtime, _)| mtime);
         document.add_u64(f.mtime_day, mtime_day(modified));
@@ -392,7 +392,7 @@ pub fn reconcile_subtree_inline(
             continue;
         }
         let Ok(md) = entry.metadata() else { continue };
-        let (mtime, size) = state::meta_pair(&md);
+        let (mtime, size) = catalogue::meta_pair(&md);
         if entry.file_type().is_some_and(|t| t.is_dir()) {
             on_dir(path);
         }
@@ -518,7 +518,7 @@ fn mark_walked_entries(
                 on_dir(path);
             }
             let Ok(md) = entry.metadata() else { continue };
-            state.mark_seen(path, Some(state::meta_pair(&md)))?;
+            state.mark_seen(path, Some(catalogue::meta_pair(&md)))?;
         }
     }
     Ok(())
@@ -612,7 +612,7 @@ mod tests {
         let mut writer = index.writer(15_000_000).unwrap();
         // The production walk, not a parallel one: `reconcile_subtree_inline` is
         // what the watcher calls when a directory appears.
-        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
         let mut dirs = Vec::new();
         let _ = reconcile_subtree_inline(
             &writer,
@@ -652,7 +652,7 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
         let mut writer = index.writer(15_000_000).unwrap();
 
         let outcome = reconcile_subtree_inline(
@@ -719,7 +719,7 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
         let mut writer = index.writer(15_000_000).unwrap();
         let mut dirs = Vec::new();
         let outcome = reconcile_subtree_inline(
@@ -750,7 +750,7 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
         let writer = index.writer(15_000_000).unwrap();
         let first = reconcile_subtree_inline(
             &writer,
@@ -819,7 +819,7 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
         let writer = index.writer(15_000_000).unwrap();
 
         let mut dirs = Vec::new();

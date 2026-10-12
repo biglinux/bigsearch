@@ -1,6 +1,6 @@
-//! big-search: lean unprivileged search: filename (P1) + incremental (P2) + content (P3).
+//! big-search: lean unprivileged search of file names and contents, kept current by watching the disk.
 use big_search::{
-    config, content, extract, index, ipc, origin, query, scan, settings, state, throttle, watch,
+    catalogue, config, content, extract, index, ipc, origin, query, scan, settings, throttle, watch,
 };
 
 use anyhow::{Context, Result};

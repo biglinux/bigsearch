@@ -3,7 +3,7 @@
 //! Workers run extraction concurrently; a single writer applies the results.
 use crate::content_dedupe::{ContentClaim, ContentSignatures};
 use crate::index::{ContentFields, content_fields};
-use crate::{extract, state, throttle};
+use crate::{catalogue, extract, throttle};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -52,9 +52,9 @@ pub fn record_skipped_candidates(entries: &[(PathBuf, i64, u64)]) -> Result<()> 
     if entries.is_empty() {
         return Ok(());
     }
-    let mut content_state = state::State::load(
+    let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::CONTENT_NAMESPACE,
+        crate::catalogue::CONTENT_NAMESPACE,
     );
     for (path, mtime, size) in entries {
         content_state.set(path, *mtime, *size);
@@ -81,9 +81,9 @@ pub fn prune_unreferenced_content_docs(index: &Index) -> Result<usize> {
     if crate::index::is_unreferenced_pruned(&index_dir) {
         return Ok(0); // swept, and nothing has cleared content state since
     }
-    let catalog = state::State::load(
+    let catalog = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::NAME_NAMESPACE,
+        crate::catalogue::NAME_NAMESPACE,
     );
     // Fail safe, not deadly. `State::load` degrades to an empty in-memory state
     // when the database will not open (disk full, permissions), and an empty
@@ -145,9 +145,9 @@ pub const ORPHAN_PRUNE_STEADY_LIMIT: usize = 8192;
 pub fn prune_orphaned_content(index: &Index, limit: usize) -> Result<(usize, bool)> {
     const FLUSH_EVERY: usize = 16 * ORPHAN_PRUNE_BATCH;
 
-    let mut content_state = state::State::load(
+    let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::CONTENT_NAMESPACE,
+        crate::catalogue::CONTENT_NAMESPACE,
     );
     let f = content_fields(index)?;
     let mut writer: Option<IndexWriter> = None;
@@ -159,7 +159,7 @@ pub fn prune_orphaned_content(index: &Index, limit: usize) -> Result<(usize, boo
     while removed < limit {
         let want = ORPHAN_PRUNE_BATCH.min(limit - removed);
         let orphans =
-            content_state.paths_missing_from(state::NAME_NAMESPACE, cursor.as_deref(), want)?;
+            content_state.paths_missing_from(catalogue::NAME_NAMESPACE, cursor.as_deref(), want)?;
         if orphans.is_empty() {
             break;
         }
@@ -295,9 +295,9 @@ pub fn index_content_limited_with_writer(
     if !crate::settings::content_index_enabled() {
         return Ok(0);
     }
-    let mut content_state = state::State::load(
+    let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::CONTENT_NAMESPACE,
+        crate::catalogue::CONTENT_NAMESPACE,
     );
     let files = pending_files(files, &content_state, limit);
     if files.is_empty() {
@@ -362,7 +362,7 @@ fn run_extraction_worker(
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             continue;
         };
-        let (mtime, size) = state::meta_pair(&metadata);
+        let (mtime, size) = catalogue::meta_pair(&metadata);
         if metadata.is_symlink() {
             let _ = tx.send(ContentResult {
                 path,
@@ -434,7 +434,7 @@ fn write_content_results(
     writer: &mut IndexWriter,
     f: &ContentFields,
     rx: mpsc::Receiver<ContentResult>,
-    content_state: &mut state::State,
+    content_state: &mut catalogue::State,
 ) -> Result<u64> {
     // State is persisted only after the commit that holds its documents: a row
     // persisted first would mark a file done that a crash leaves unindexed.
@@ -496,9 +496,9 @@ pub fn pending_catalog_batch_after(
     if !crate::settings::content_index_enabled() {
         return Ok((PendingContentBatch::empty(), None));
     }
-    let catalog_state = state::State::load(
+    let catalog_state = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::NAME_NAMESPACE,
+        crate::catalogue::NAME_NAMESPACE,
     );
     pending_catalog_batch_with_byte_limit(
         &catalog_state,
@@ -528,9 +528,9 @@ fn catalog_content_batch_limit() -> usize {
 /// Without this, the forced reindex commits a name-index document with nothing
 /// new in it, the content pass declines the work, and the tag is never findable.
 pub fn forget_content_state(path: &Path) -> Result<()> {
-    let mut content_state = state::State::load(
+    let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::CONTENT_NAMESPACE,
+        crate::catalogue::CONTENT_NAMESPACE,
     );
     content_state.remove(path);
     content_state.persist()
@@ -540,9 +540,9 @@ pub fn clear_content_state() -> Result<()> {
     // These rows are the only thing referencing the content documents, so
     // dropping them is exactly what strands documents. Re-arm the sweep.
     crate::index::clear_unreferenced_pruned(&crate::config::content_index_dir());
-    let mut content_state = state::State::load(
+    let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::CONTENT_NAMESPACE,
+        crate::catalogue::CONTENT_NAMESPACE,
     );
     content_state.clear();
     content_state.persist()?;
@@ -584,7 +584,7 @@ pub fn daemon_idle_delay() -> Duration {
 }
 
 fn pending_catalog_batch_with_byte_limit(
-    catalog_state: &state::State,
+    catalog_state: &catalogue::State,
     cursor: CatalogCursor,
     limit: usize,
     byte_limit: u64,
@@ -613,7 +613,7 @@ fn pending_catalog_batch_with_byte_limit(
     };
     'pass: loop {
         let pending = catalog_state.entries_stale_against(
-            state::CONTENT_NAMESPACE,
+            catalogue::CONTENT_NAMESPACE,
             selection.after.as_deref(),
             CATALOG_PATH_BATCH,
         )?;
@@ -656,7 +656,7 @@ impl CatalogSelection {
         // All get a tombstone.
         //
         // The vanished case has to be caught here, not in the worker: there
-        // `state::meta` fails and the path is skipped with no result, so no
+        // `catalogue::meta` fails and the path is skipped with no result, so no
         // content row is ever written and every later pass re-lists it. That
         // is the pass which kept reporting "processed 4 files, indexed 0
         // bodies" every few minutes forever, each one a full catalogue walk.
@@ -731,7 +731,7 @@ impl CatalogSelection {
 
 fn pending_files(
     files: Vec<PathBuf>,
-    content_state: &state::State,
+    content_state: &catalogue::State,
     limit: Option<usize>,
 ) -> Vec<PathBuf> {
     pending_batch(files, content_state, limit.unwrap_or(usize::MAX)).files
@@ -739,7 +739,7 @@ fn pending_files(
 
 fn pending_batch(
     files: Vec<PathBuf>,
-    content_state: &state::State,
+    content_state: &catalogue::State,
     limit: usize,
 ) -> PendingContentBatch {
     pending_batch_with_byte_limit(files, content_state, limit, u64::MAX)
@@ -747,7 +747,7 @@ fn pending_batch(
 
 fn pending_batch_with_byte_limit(
     files: Vec<PathBuf>,
-    content_state: &state::State,
+    content_state: &catalogue::State,
     limit: usize,
     byte_limit: u64,
 ) -> PendingContentBatch {
@@ -760,7 +760,7 @@ fn pending_batch_with_byte_limit(
         if !is_extraction_candidate(&path) {
             continue;
         }
-        let Some((mtime, size)) = state::meta(&path) else {
+        let Some((mtime, size)) = catalogue::meta(&path) else {
             continue;
         };
         if content_state.unchanged(&path, mtime, size) {

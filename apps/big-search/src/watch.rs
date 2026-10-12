@@ -9,11 +9,11 @@
 mod content_backfill;
 mod event_batch;
 
+use crate::catalogue::{self, State};
 use crate::content;
 use crate::index::{ContentFields, Fields, content_fields, fields};
 use crate::origin;
 use crate::scan;
-use crate::state::{self, State};
 use anyhow::{Context, Result};
 use content_backfill::{ContentBackfill, compact_when_worth_it, run_content_backfill_batch};
 use event_batch::{WatchBatch, ingest, observe_origin_batch};
@@ -835,7 +835,7 @@ fn reconcile(
         // one, so the rules also evict what an earlier version indexed before
         // they covered it. Skipping it instead would strand those documents.
         if let Some(metadata) = metadata.filter(|_| !out_of_scope) {
-            let (mtime, size) = state::meta_pair(&metadata);
+            let (mtime, size) = catalogue::meta_pair(&metadata);
             if recorded == Some((mtime, size)) {
                 continue; // metadata-only event (e.g. ATTRIB) → nothing to reindex
             }

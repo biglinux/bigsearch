@@ -81,7 +81,7 @@ wants (section 7).
 | `extract*.rs`, `mime.rs`, `meta.rs` | text, media type and metadata of an untrusted file |
 | `index.rs`, `nosync_dir.rs`, `cjk_tokenizer.rs` | the two tantivy indexes, their analyzers and directory |
 | `query.rs` | name, content and combined search, ranking, page lookup |
-| `state.rs` | the `path -> (mtime, size)` catalogue |
+| `catalogue.rs` | the `path -> (mtime, size)` catalogue |
 | `ipc.rs` | the socket server |
 | `throttle.rs` | background priority, the indexer's cgroup, backfill pacing |
 | `history.rs`, `origin.rs`, `browser_downloads.rs` | earlier versions and where a file came from |
@@ -463,7 +463,7 @@ such as a stalled network mount.
 
 ## 8. State
 
-`state.rs` keeps `namespace, path -> (mtime, size)` in SQLite, a `WITHOUT ROWID`
+`catalogue.rs` keeps `namespace, path -> (mtime, size)` in SQLite, a `WITHOUT ROWID`
 table keyed by `(namespace, path)`, with separate `name` and `content`
 namespaces. It drives incremental dedup, delete detection and the reconcile on
 start. Writes are batched in transactions; SQLite runs WAL with `NORMAL` sync.

@@ -1,7 +1,7 @@
 //! Tantivy indexes: a compact name index (`path`, `name`, `source`) and a
 //! separate content index (`path`, `body`).
+use crate::catalogue::State;
 use crate::cjk_tokenizer::CjkFriendlyTokenizer;
-use crate::state::State;
 use anyhow::{Context, Result};
 use std::path::Path;
 use tantivy::indexer::IndexWriterOptions;
@@ -915,12 +915,12 @@ mod tests {
         writer.commit().unwrap();
         drop(writer);
 
-        let mut state = State::empty(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+        let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
         state.set(Path::new("/catalog/keep-alpha.txt"), 10, 1);
         state.set(Path::new("/catalog/missing-beta.txt"), 20, 2);
         state.set(Path::new("/catalog/missing-gamma.txt"), 30, 3);
         state.persist().unwrap();
-        let mut state = State::load(&dir.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+        let mut state = State::load(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
 
         assert_eq!(
             repair_deflated_against_state(&index, &mut state).unwrap(),

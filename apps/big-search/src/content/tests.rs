@@ -13,8 +13,10 @@ fn pending_batch_reports_more_work() {
     std::fs::write(&first, b"first body").unwrap();
     std::fs::write(&second, b"second body").unwrap();
 
-    let content_state =
-        state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
+    let content_state = catalogue::State::empty(
+        &base.join("state.sqlite"),
+        crate::catalogue::CONTENT_NAMESPACE,
+    );
     let batch = pending_batch(vec![first.clone(), second.clone()], &content_state, 1);
     assert_eq!(batch.files, vec![first]);
     assert!(batch.has_more);
@@ -37,10 +39,12 @@ fn forgotten_row_is_read_again() {
     std::fs::create_dir_all(&base).unwrap();
     let note = base.join("note.md");
     std::fs::write(&note, b"a body").unwrap();
-    let (mtime, size) = state::meta(&note).unwrap();
+    let (mtime, size) = catalogue::meta(&note).unwrap();
 
-    let mut content_state =
-        state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
+    let mut content_state = catalogue::State::empty(
+        &base.join("state.sqlite"),
+        crate::catalogue::CONTENT_NAMESPACE,
+    );
     content_state.set(&note, mtime, size);
     assert!(
         pending_batch(vec![note.clone()], &content_state, 10)
@@ -72,8 +76,10 @@ fn pending_batch_stops_at_byte_budget() {
     std::fs::write(&first, vec![b'a'; 1024 * 1024]).unwrap();
     std::fs::write(&second, vec![b'b'; 1024 * 1024]).unwrap();
 
-    let content_state =
-        state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
+    let content_state = catalogue::State::empty(
+        &base.join("state.sqlite"),
+        crate::catalogue::CONTENT_NAMESPACE,
+    );
     let batch =
         pending_batch_with_byte_limit(vec![first.clone(), second], &content_state, 50, 1024 * 1024);
     assert_eq!(batch.files, vec![first]);
@@ -95,8 +101,10 @@ fn pending_batch_prioritizes_low_cost_files() {
     drop(large);
     std::fs::write(&small_note, b"small personal note").unwrap();
 
-    let content_state =
-        state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
+    let content_state = catalogue::State::empty(
+        &base.join("state.sqlite"),
+        crate::catalogue::CONTENT_NAMESPACE,
+    );
     let batch = pending_batch_with_byte_limit(
         vec![large_pdf, small_note.clone()],
         &content_state,
@@ -127,7 +135,8 @@ fn catalog_batch_defers_recent_edits() {
     std::fs::write(&quiet, b"conteudo").unwrap();
     std::fs::write(&editing, b"conteudo").unwrap();
 
-    let mut catalog = state::State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+    let mut catalog =
+        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
     catalog.set(&quiet, now - 3_600, 10); // untouched for 1h
     catalog.set(&editing, now - 10, 20); // saved 10s ago
     catalog.persist().unwrap();
@@ -170,12 +179,12 @@ fn deleted_files_stop_answering_content_searches() {
     std::fs::write(&kept, b"palavrachave em um arquivo que fica").unwrap();
     std::fs::write(&removed, b"palavrachave em um arquivo que some").unwrap();
 
-    let mut catalog = state::State::load(
+    let mut catalog = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::NAME_NAMESPACE,
+        crate::catalogue::NAME_NAMESPACE,
     );
     for path in [&kept, &removed] {
-        let (mtime, size) = state::meta(path).unwrap();
+        let (mtime, size) = catalogue::meta(path).unwrap();
         catalog.set(path, mtime, size);
     }
     catalog.persist().unwrap();
@@ -192,9 +201,9 @@ fn deleted_files_stop_answering_content_searches() {
     // The file goes, and so does its catalogue row, as the
     // watcher and the scan sweeps do on a delete.
     std::fs::remove_file(&removed).unwrap();
-    let mut catalog = state::State::load(
+    let mut catalog = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::NAME_NAMESPACE,
+        crate::catalogue::NAME_NAMESPACE,
     );
     catalog.remove(&removed);
     catalog.persist().unwrap();
@@ -262,7 +271,8 @@ fn skipped_entries_become_tombstones() {
     std::fs::write(&note, b"texto").unwrap();
     std::fs::create_dir_all(&folder).unwrap();
 
-    let mut catalog = state::State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+    let mut catalog =
+        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
     catalog.set(&movie, 100, 50); // never an extraction candidate
     catalog.set(&note, 100, 10);
     catalog.set(&vanished, 100, 10);
@@ -286,8 +296,10 @@ fn skipped_entries_become_tombstones() {
 
     // Record the tombstones + the extracted file in the content namespace:
     // the next pass must report nothing.
-    let mut content_state =
-        state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
+    let mut content_state = catalogue::State::empty(
+        &base.join("state.sqlite"),
+        crate::catalogue::CONTENT_NAMESPACE,
+    );
     for (path, mtime, size) in &batch.non_candidates {
         content_state.set(path, *mtime, *size);
     }
@@ -429,7 +441,8 @@ fn catalog_byte_budget_is_exclusive() {
     for path in [&a, &b, &c] {
         std::fs::write(path, b"x").unwrap();
     }
-    let mut catalog = state::State::empty(&base.join("state.sqlite"), crate::state::NAME_NAMESPACE);
+    let mut catalog =
+        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
     catalog.set(&a, 1_000, mib);
     catalog.set(&b, 1_000, mib);
     catalog.set(&c, 1_000, mib);
@@ -465,8 +478,10 @@ fn pending_byte_budget_is_exclusive() {
     for file in [&first, &second, &third] {
         std::fs::write(file, vec![b'x'; mib]).unwrap();
     }
-    let content_state =
-        state::State::empty(&base.join("state.sqlite"), crate::state::CONTENT_NAMESPACE);
+    let content_state = catalogue::State::empty(
+        &base.join("state.sqlite"),
+        crate::catalogue::CONTENT_NAMESPACE,
+    );
 
     let files = vec![first.clone(), second.clone(), third.clone()];
     let batch = pending_batch_with_byte_limit(files.clone(), &content_state, 50, 2 * mib as u64);
@@ -502,12 +517,12 @@ fn catalog_pass_indexes_every_batch() {
     let movie = base.join("files").join("movie.bin");
     std::fs::write(&movie, b"not text").unwrap();
 
-    let mut catalog = state::State::load(
+    let mut catalog = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::NAME_NAMESPACE,
+        crate::catalogue::NAME_NAMESPACE,
     );
     for path in notes.iter().chain(std::iter::once(&movie)) {
-        let (mtime, size) = state::meta(path).unwrap();
+        let (mtime, size) = catalogue::meta(path).unwrap();
         catalog.set(path, mtime, size);
     }
     catalog.persist().unwrap();
@@ -518,9 +533,9 @@ fn catalog_pass_indexes_every_batch() {
         3,
         "every batch of the pass is extracted"
     );
-    let content_state = state::State::load(
+    let content_state = catalogue::State::load(
         &crate::config::state_db_path(),
-        crate::state::CONTENT_NAMESPACE,
+        crate::catalogue::CONTENT_NAMESPACE,
     );
     assert!(
         content_state.contains(&movie),

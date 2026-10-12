@@ -2,6 +2,7 @@
 //! re-exported so test and fuzz harnesses can call into them directly (notably
 //! `extract`, the untrusted-document parsing path the fuzz targets exercise).
 pub mod browser_downloads;
+pub mod catalogue;
 pub mod cjk_tokenizer;
 pub mod config;
 pub mod content;
@@ -24,7 +25,6 @@ pub mod scan;
 pub mod scan_roots;
 pub mod settings;
 mod simplified_chinese;
-pub mod state;
 #[cfg(test)]
 mod test_env;
 pub mod throttle;

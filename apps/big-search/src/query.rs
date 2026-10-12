@@ -211,7 +211,7 @@ fn keep_type_matches(
 fn keep_stat_matches(kept: &mut Vec<Hit>, filter: &Filter) {
     if filter.mtime.is_some() || filter.size.is_some() {
         kept.retain(|h| {
-            let Some((mt, sz)) = crate::state::meta(Path::new(&h.path)) else {
+            let Some((mt, sz)) = crate::catalogue::meta(Path::new(&h.path)) else {
                 return false; // vanished between index and query
             };
             filter.mtime.is_none_or(|[lo, hi]| mt >= lo && mt <= hi)
@@ -235,7 +235,7 @@ fn enrich_page(hits: &mut Vec<Hit>, names: &tantivy::Searcher, name_fields: &cra
         if h.mime.is_empty() {
             h.mime = indexed_mime(names, name_fields, &h.path);
         }
-        if let Some((mt, sz)) = crate::state::meta(Path::new(&h.path)) {
+        if let Some((mt, sz)) = crate::catalogue::meta(Path::new(&h.path)) {
             h.mtime = mt;
             h.size = sz;
             h.available = true;

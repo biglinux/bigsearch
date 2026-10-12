@@ -504,7 +504,7 @@ impl History {
             )
             .optional()?;
         // Nanoseconds, not the seconds the search index keeps: two saves inside
-        // one second are one save to `state::meta_pair`, and here they are two.
+        // one second are one save to `catalogue::meta_pair`, and here they are two.
         Ok(newest.is_some_and(|(mtime_s, mtime_ns, size)| {
             mtime_s == metadata.mtime()
                 && mtime_ns == metadata.mtime_nsec()
