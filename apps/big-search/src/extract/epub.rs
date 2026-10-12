@@ -67,15 +67,15 @@ pub(super) fn read_epub(path: &Path) -> Option<(String, Option<String>)> {
 }
 
 /// The local name of an XML element, without its namespace prefix.
-fn local_name(e: &quick_xml::events::BytesStart<'_>) -> Vec<u8> {
-    e.local_name().as_ref().to_vec()
+fn local_name(e: &quick_xml::events::BytesStart<'_>) -> String {
+    e.local_name().as_ref().to_owned()
 }
 
-fn xml_attribute(e: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String> {
+fn xml_attribute(e: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.local_name().as_ref() == name)
-        .map(|a| decode_entities(&String::from_utf8_lossy(&a.value)))
+        .map(|a| decode_entities(&a.value))
 }
 
 /// The package document `META-INF/container.xml` points to.
@@ -85,8 +85,8 @@ fn epub_package(container: &[u8]) -> Option<String> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e) | Event::Empty(e)) if local_name(&e) == b"rootfile" => {
-                return xml_attribute(&e, b"full-path");
+            Ok(Event::Start(e) | Event::Empty(e)) if local_name(&e) == "rootfile" => {
+                return xml_attribute(&e, "full-path");
             }
             Ok(Event::Eof) | Err(_) => return None,
             _ => {}
@@ -105,22 +105,22 @@ fn epub_spine(opf: &[u8]) -> (Option<String>, Vec<String>) {
     let mut title_text = String::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e) | Event::Empty(e)) => match local_name(&e).as_slice() {
-                b"item" => {
+            Ok(Event::Start(e) | Event::Empty(e)) => match local_name(&e).as_str() {
+                "item" => {
                     if let (Some(id), Some(href)) =
-                        (xml_attribute(&e, b"id"), xml_attribute(&e, b"href"))
+                        (xml_attribute(&e, "id"), xml_attribute(&e, "href"))
                     {
                         hrefs.insert(id, href);
                     }
                 }
-                b"itemref" => order.extend(xml_attribute(&e, b"idref")),
-                b"title" if title.is_none() => in_title = true,
+                "itemref" => order.extend(xml_attribute(&e, "idref")),
+                "title" if title.is_none() => in_title = true,
                 _ => {}
             },
             Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) if in_title => {
                 push_xml_text(&e, &mut title_text);
             }
-            Ok(Event::End(e)) if in_title && e.local_name().as_ref() == b"title" => {
+            Ok(Event::End(e)) if in_title && e.local_name().as_ref() == "title" => {
                 in_title = false;
                 let text = title_text.trim();
                 if !text.is_empty() {
