@@ -95,22 +95,8 @@ static IDLE_CGROUP: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLoc
 /// thread at normal weight; `main/index`, threaded, gets `cpu.idle` (Linux
 /// 5.15), or the lowest weight on older kernels.
 pub fn prepare_idle_cgroup() -> Option<&'static str> {
-    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
-    let own = std::path::Path::new("/sys/fs/cgroup").join(
-        own.lines()
-            .find_map(|line| line.strip_prefix("0::"))?
-            .trim_start_matches('/'),
-    );
+    let own = delegated_cgroup()?;
     let unit = own.parent()?;
-    let delegated = own.file_name()? == "main"
-        && (unit == std::path::Path::new("/sys/fs/cgroup")
-            || unit
-                .file_name()?
-                .to_str()
-                .is_some_and(|name| name.ends_with(".service")));
-    if !delegated {
-        return None;
-    }
     let index = own.join("index");
     let step = |result: std::io::Result<()>, what: &str| {
         result
@@ -150,6 +136,24 @@ pub fn prepare_idle_cgroup() -> Option<&'static str> {
     };
     IDLE_CGROUP.set(index).ok()?;
     Some(how)
+}
+
+/// This process's cgroup, when systemd delegated it as `<unit>.service/main`.
+fn delegated_cgroup() -> Option<std::path::PathBuf> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let own = std::path::Path::new("/sys/fs/cgroup").join(
+        own.lines()
+            .find_map(|line| line.strip_prefix("0::"))?
+            .trim_start_matches('/'),
+    );
+    let unit = own.parent()?;
+    let delegated = own.file_name()? == "main"
+        && (unit == std::path::Path::new("/sys/fs/cgroup")
+            || unit
+                .file_name()?
+                .to_str()
+                .is_some_and(|name| name.ends_with(".service")));
+    delegated.then_some(own)
 }
 
 /// Return freed heap pages to the kernel. glibc retains them by default, so a
@@ -539,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_rest_scales_with_load() {
+    fn load_class_follows_signals() {
         let calm = Pressure {
             some: 1.0,
             full: 0.0,
@@ -600,7 +604,10 @@ mod tests {
             ..idle
         };
         assert_eq!(classify_load(with(0.3, one_core)), Load::Busy);
+    }
 
+    #[test]
+    fn backfill_rest_scales_with_load() {
         let work = Duration::from_secs(2);
         assert_eq!(pause_after(work, Load::Calm), Duration::from_millis(500));
         assert_eq!(pause_after(work, Load::Moderate), work);

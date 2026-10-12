@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,46 @@ fn wait_socket(sock: &Path, timeout: Duration) -> bool {
     false
 }
 
+fn seed_index(home: &Path, xdg_storage_home: &Path, run: &Path) {
+    let reindex = Command::new(env!("CARGO_BIN_EXE_big-search"))
+        .arg("reindex")
+        .arg(home)
+        .env("RUST_LOG", "off")
+        .env("HOME", home)
+        .env("XDG_DATA_HOME", xdg_storage_home)
+        .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
+        .env("XDG_RUNTIME_DIR", run)
+        .status()
+        .unwrap();
+    assert!(reindex.success());
+}
+
+/// The exit status of a daemon that has to give up on its own, within 8 s.
+fn wait_for_refusal(child: &mut Child) -> ExitStatus {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if Instant::now() > deadline {
+            child.kill().ok();
+            panic!("second daemon did not exit — it should refuse the singleton lock");
+        }
+        sleep(Duration::from_millis(50));
+    }
+}
+
+/// The raw reply line to a name query for "conf".
+fn query_conf(sock: &Path) -> String {
+    let mut stream = UnixStream::connect(sock).expect("connect d1");
+    stream
+        .write_all(b"{\"v\":2,\"cmd\":\"query\",\"q\":\"conf\",\"mode\":\"name\",\"page\":{\"limit\":5}}\n")
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(&stream).read_line(&mut line).unwrap();
+    line
+}
+
 #[test]
 fn second_daemon_leaves_first_intact() {
     let base = scratch::scratch_dir("bs-singleton");
@@ -61,17 +101,7 @@ fn second_daemon_leaves_first_intact() {
     std::fs::write(home.join("docs/conf.txt"), "config alpha").unwrap();
 
     // Seed the index so the daemon has something to serve immediately.
-    let reindex = Command::new(env!("CARGO_BIN_EXE_big-search"))
-        .arg("reindex")
-        .arg(&home)
-        .env("RUST_LOG", "off")
-        .env("HOME", &home)
-        .env("XDG_DATA_HOME", &xdg_storage_home)
-        .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", &run)
-        .status()
-        .unwrap();
-    assert!(reindex.success());
+    seed_index(&home, &xdg_storage_home, &run);
 
     let sock = run.join("biglinux/indexd.sock");
     let d1 = KillOnDrop(daemon(&home, &xdg_storage_home, &run));
@@ -83,17 +113,7 @@ fn second_daemon_leaves_first_intact() {
 
     // Second daemon must exit on its own (refused) within a few seconds.
     let mut d2 = daemon(&home, &xdg_storage_home, &run);
-    let deadline = Instant::now() + Duration::from_secs(8);
-    let status = loop {
-        if let Some(s) = d2.try_wait().unwrap() {
-            break s;
-        }
-        if Instant::now() > deadline {
-            d2.kill().ok();
-            panic!("second daemon did not exit — it should refuse the singleton lock");
-        }
-        sleep(Duration::from_millis(50));
-    };
+    let status = wait_for_refusal(&mut d2);
     assert!(
         status.success(),
         "refused daemon should exit 0, got {status:?}"
@@ -107,12 +127,7 @@ fn second_daemon_leaves_first_intact() {
     );
 
     // The first daemon still answers a query (versioned protocol v2).
-    let mut stream = UnixStream::connect(&sock).expect("connect d1");
-    stream
-        .write_all(b"{\"v\":2,\"cmd\":\"query\",\"q\":\"conf\",\"mode\":\"name\",\"page\":{\"limit\":5}}\n")
-        .unwrap();
-    let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line).unwrap();
+    let line = query_conf(&sock);
     assert!(
         line.contains("\"kind\":\"query\""),
         "d1 response not a query reply: {line}"

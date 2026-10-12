@@ -90,18 +90,8 @@ def license_files(package: dict) -> list[Path]:
     return sorted(set(files))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--package", default="big-search", help="workspace package to describe"
-    )
-    parser.add_argument(
-        "--target", default="x86_64-unknown-linux-gnu", help="target triple"
-    )
-    arguments = parser.parse_args()
-
-    metadata = cargo_metadata(arguments.target)
-    packages = shipped_packages(metadata, arguments.package)
+def license_texts(metadata: dict, packages: list[dict]) -> dict[str, list[str]]:
+    """Map each license text to the crates it covers; exit if one has none."""
     files = {p["id"]: license_files(p) for p in metadata["packages"]}
 
     by_repository = defaultdict(list)
@@ -144,8 +134,13 @@ def main() -> None:
 
     if problems:
         sys.exit("no license text for:\n  " + "\n  ".join(problems))
+    return texts
 
-    print(f"Third-party software in {arguments.package} ({arguments.target})")
+
+def print_notices(
+    package_name: str, target: str, packages: list[dict], texts: dict[str, list[str]]
+) -> None:
+    print(f"Third-party software in {package_name} ({target})")
     print()
     print("The crates below are compiled into this program. Each one's source is")
     print("available from crates.io at the version listed.")
@@ -158,6 +153,22 @@ def main() -> None:
         print("\n".join(sorted(set(covered))))
         print("-" * 78)
         print(text)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--package", default="big-search", help="workspace package to describe"
+    )
+    parser.add_argument(
+        "--target", default="x86_64-unknown-linux-gnu", help="target triple"
+    )
+    arguments = parser.parse_args()
+
+    metadata = cargo_metadata(arguments.target)
+    packages = shipped_packages(metadata, arguments.package)
+    texts = license_texts(metadata, packages)
+    print_notices(arguments.package, arguments.target, packages, texts)
 
 
 if __name__ == "__main__":

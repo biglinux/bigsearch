@@ -74,6 +74,58 @@ pub fn serve(
     origin_db: std::path::PathBuf,
     history: crate::history::SharedHistory,
 ) -> Result<()> {
+    let listener = bind_private_socket(sock)?;
+
+    // One thread per connection. Served inline, a client holding its connection
+    // open (which the client crate supports) would block every other client, and
+    // a handler panic would take the whole daemon down; a connection thread only
+    // takes itself.
+    let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for stream in listener.incoming() {
+        let s = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("accept error: {e}");
+                // Out of descriptors or memory: the pending connection stays
+                // queued and accept fails again at once, so wait for a
+                // connection thread to finish instead of spinning.
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+                ) {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                continue;
+            }
+        };
+        if !peer_is_self(&s) {
+            log::warn!("rejected connection from a different uid");
+            continue;
+        }
+        let _ = s.set_read_timeout(Some(IDLE_TIMEOUT));
+        let _ = s.set_write_timeout(Some(WRITE_TIMEOUT));
+        if live.load(Ordering::Relaxed) >= MAX_LIVE_CONNECTIONS {
+            refuse_busy(s);
+            continue;
+        }
+
+        live.fetch_add(1, Ordering::Relaxed);
+        let slot = ConnectionSlot(live.clone());
+        spawn_connection(
+            s,
+            slot,
+            &index,
+            &content_index,
+            &control,
+            &origin_db,
+            &history,
+        );
+    }
+    Ok(())
+}
+
+/// Bind the socket in a runtime directory that only this user can reach.
+fn bind_private_socket(sock: &Path) -> Result<UnixListener> {
     if let Some(dir) = sock.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         // Must be ours, a real directory, and private: clients do not
@@ -111,89 +163,68 @@ pub fn serve(
         "listening on {} (protocol v{PROTOCOL_VERSION})",
         sock.display()
     );
+    Ok(listener)
+}
 
-    // One thread per connection. Served inline, a client holding its connection
-    // open (which the client crate supports) would block every other client, and
-    // a handler panic would take the whole daemon down; a connection thread only
-    // takes itself.
-    let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    for stream in listener.incoming() {
-        let s = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("accept error: {e}");
-                // Out of descriptors or memory: the pending connection stays
-                // queued and accept fails again at once, so wait for a
-                // connection thread to finish instead of spinning.
-                if matches!(
-                    e.raw_os_error(),
-                    Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
-                ) {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                continue;
+/// Say so instead of closing silently: a bare EOF looks to the client like a
+/// crashed daemon, and the caller cannot tell "busy" from "gone".
+fn refuse_busy(mut s: UnixStream) {
+    log::warn!("refusing connection: {MAX_LIVE_CONNECTIONS} already live");
+    let busy = err(format!(
+        "daemon busy: {MAX_LIVE_CONNECTIONS} connections already open"
+    ));
+    let _ = serde_json::to_writer(&mut s, &busy);
+    let _ = s.write_all(b"\n");
+}
+
+/// Serve one admitted connection on its own thread; `slot` is released when the
+/// thread ends.
+fn spawn_connection(
+    s: UnixStream,
+    slot: ConnectionSlot,
+    index: &IndexReader,
+    content_index: &IndexReader,
+    control: &Control,
+    origin_db: &Path,
+    history: &crate::history::SharedHistory,
+) {
+    let index = index.clone();
+    let content_index = content_index.clone();
+    let control = Control {
+        commands: control.commands.clone(),
+        paused: control.paused.clone(),
+        activity: control.activity.clone(),
+        pending_content: control.pending_content.clone(),
+        unwatched_dirs: control.unwatched_dirs.clone(),
+    };
+    // One reader per connection: it holds a `RefCell<Connection>`, so it is
+    // not shareable, and it opens nothing until first use.
+    let origin_reader = origin::OriginReader::new(origin_db.to_path_buf());
+    // The one versions store, shared with the thread that writes versions.
+    // A second store opened here would answer from a fresh state: whether
+    // this disk can share blocks at all, and whether space ran out, are
+    // things only the thread that has tried to write a version knows.
+    let history = std::sync::Arc::clone(history);
+    let spawned = std::thread::Builder::new()
+        .name("ipc-conn".into())
+        .spawn(move || {
+            let _slot = slot;
+            if let Err(e) = handle(
+                &index,
+                &content_index,
+                s,
+                &control,
+                &origin_reader,
+                &history,
+            ) {
+                log::warn!("connection error: {e:#}");
             }
-        };
-        if !peer_is_self(&s) {
-            log::warn!("rejected connection from a different uid");
-            continue;
-        }
-        let _ = s.set_read_timeout(Some(IDLE_TIMEOUT));
-        let _ = s.set_write_timeout(Some(WRITE_TIMEOUT));
-        if live.load(Ordering::Relaxed) >= MAX_LIVE_CONNECTIONS {
-            // Say so instead of closing silently: a bare EOF looks to the client
-            // like a crashed daemon, and the caller cannot tell "busy" from "gone".
-            log::warn!("refusing connection: {MAX_LIVE_CONNECTIONS} already live");
-            let mut s = s;
-            let busy = err(format!(
-                "daemon busy: {MAX_LIVE_CONNECTIONS} connections already open"
-            ));
-            let _ = serde_json::to_writer(&mut s, &busy);
-            let _ = s.write_all(b"\n");
-            continue;
-        }
-
-        live.fetch_add(1, Ordering::Relaxed);
-        let slot = ConnectionSlot(live.clone());
-        let index = index.clone();
-        let content_index = content_index.clone();
-        let control = Control {
-            commands: control.commands.clone(),
-            paused: control.paused.clone(),
-            activity: control.activity.clone(),
-            pending_content: control.pending_content.clone(),
-            unwatched_dirs: control.unwatched_dirs.clone(),
-        };
-        // One reader per connection: it holds a `RefCell<Connection>`, so it is
-        // not shareable, and it opens nothing until first use.
-        let origin_reader = origin::OriginReader::new(origin_db.clone());
-        // The one versions store, shared with the thread that writes versions.
-        // A second store opened here would answer from a fresh state: whether
-        // this disk can share blocks at all, and whether space ran out, are
-        // things only the thread that has tried to write a version knows.
-        let history = std::sync::Arc::clone(&history);
-        let spawned = std::thread::Builder::new()
-            .name("ipc-conn".into())
-            .spawn(move || {
-                let _slot = slot;
-                if let Err(e) = handle(
-                    &index,
-                    &content_index,
-                    s,
-                    &control,
-                    &origin_reader,
-                    &history,
-                ) {
-                    log::warn!("connection error: {e:#}");
-                }
-            });
-        if let Err(e) = spawned {
-            // The closure (and with it the slot guard) is dropped on failure, so
-            // the count is already corrected; decrementing here would underflow.
-            log::warn!("could not spawn connection thread: {e}");
-        }
+        });
+    if let Err(e) = spawned {
+        // The closure (and with it the slot guard) is dropped on failure, so
+        // the count is already corrected; decrementing here would underflow.
+        log::warn!("could not spawn connection thread: {e}");
     }
-    Ok(())
 }
 
 /// Whether the connected peer runs as the same UID as this daemon (SO_PEERCRED).
@@ -302,152 +333,30 @@ fn dispatch(
 ) -> Reply {
     match body {
         RequestBody::Query(query_request) => {
-            let wants_content = matches!(query_request.mode.as_str(), "content" | "both");
-            if wants_content {
-                // A content search is the strongest signal that deferred bodies
-                // are wanted now: nudge the watcher to extract them, cooldown-free.
-                let _ = control.commands.send(WatchMessage::ControlCommand(
-                    WatchControlCommand::WarmContent,
-                ));
-            }
-            match query::run_query(
-                query::QueryIndexes {
-                    name: index,
-                    content: Some(content_index),
-                },
-                &query_request.q,
-                &query_request.mode,
-                &query_request.filter,
-                &query_request.page,
-                query_request.include_origin,
-                Some(origin_reader),
-            ) {
-                Ok(mut query_outcome) => {
-                    if wants_content {
-                        query_outcome.content_pending =
-                            control.pending_content.load(Ordering::Relaxed);
-                    }
-                    Reply::Query {
-                        v: PROTOCOL_VERSION,
-                        outcome: query_outcome,
-                    }
-                }
-                Err(e) => err(format!("query failed: {e}")),
-            }
+            query_reply(index, content_index, query_request, control, origin_reader)
         }
         RequestBody::Origin(origin_request) => Reply::Origin {
             v: PROTOCOL_VERSION,
             origin: origin_reader.origin(Path::new(&origin_request.path)),
         },
-        RequestBody::RegisterCopy(register_copy_request) => register_origin(|writer| {
-            writer.register_copy(
-                Path::new(&register_copy_request.src),
-                Path::new(&register_copy_request.dst),
-                register_copy_request.app_id.as_deref(),
-            )
-        }),
-        RequestBody::RegisterMove(register_move_request) => register_origin(|writer| {
-            writer.register_move(
-                Path::new(&register_move_request.src),
-                Path::new(&register_move_request.dst),
-                register_move_request.app_id.as_deref(),
-            )
-        }),
-        RequestBody::RegisterCreated(register_created_request) => register_origin(|writer| {
-            writer.register_created(
-                Path::new(&register_created_request.path),
-                register_created_request.app_id.as_deref(),
-            )
-        }),
-        RequestBody::RegisterDerived(register_derived_request) => register_origin(|writer| {
-            writer.register_derived(
-                Path::new(&register_derived_request.src),
-                Path::new(&register_derived_request.dst),
-                register_derived_request.app_id.as_deref(),
-                register_derived_request.action.as_deref(),
-            )
-        }),
-        RequestBody::Status => {
-            let paused = control.paused.load(Ordering::Relaxed);
-            Reply::Status {
-                v: PROTOCOL_VERSION,
-                indexed: index::document_count(index).unwrap_or(0),
-                paused,
-                activity: crate::watch::activity_label(
-                    paused,
-                    control.activity.load(Ordering::Relaxed),
-                )
-                .to_string(),
-                capabilities: daemon_capabilities(),
-                pending_content: control.pending_content.load(Ordering::Relaxed),
-                content_docs: index::document_count(content_index).unwrap_or(0),
-                name_index_bytes: flat_directory_file_bytes(&config::index_dir()),
-                content_index_bytes: flat_directory_file_bytes(&config::content_index_dir()),
-                unwatched_dirs: control.unwatched_dirs.load(Ordering::Relaxed),
-            }
-        }
+        RequestBody::RegisterCopy(request) => register_copy_reply(request),
+        RequestBody::RegisterMove(request) => register_move_reply(request),
+        RequestBody::RegisterCreated(request) => register_created_reply(request),
+        RequestBody::RegisterDerived(request) => register_derived_reply(request),
+        RequestBody::Status => status_reply(index, content_index, control),
         // Hand the command to the watcher thread over the shared channel; it applies
         // it between batches. Accepted asynchronously (the work may be long).
         RequestBody::Pause => send_control_command(control, WatchControlCommand::Pause),
         RequestBody::Resume => send_control_command(control, WatchControlCommand::Resume),
         RequestBody::Rebuild => send_control_command(control, WatchControlCommand::Rebuild),
-        RequestBody::Reindex(request) => {
-            let path = std::path::PathBuf::from(request.path);
-            if control.paused.load(Ordering::Relaxed) {
-                return err("indexing is paused".to_string());
-            }
-            // A forced read walks and watches the path: never one the person
-            // did not ask to have searched, nor one relative to the daemon.
-            if !path.is_absolute() || settings::sources().owner(&path).is_none() {
-                return err(format!("{} is not in a searched folder", path.display()));
-            }
-            send_control_command(control, WatchControlCommand::ReindexPath(path))
-        }
+        RequestBody::Reindex(request) => reindex_reply(control, request),
         // Done here so the reply says whether the rows are gone.
-        RequestBody::ClearOrigin => match origin::forget_all(&config::origin_db_path()) {
-            Ok(()) => Reply::Ok {
-                v: PROTOCOL_VERSION,
-            },
-            Err(e) => err(format!("origins could not be forgotten: {e:#}")),
-        },
-        RequestBody::Versions(request) => {
-            let store = history.lock().expect("versions store lock");
-            let versions = match store.versions(std::path::Path::new(&request.path)) {
-                Ok(versions) => versions,
-                Err(e) => return err(format!("versions: {e:#}")),
-            };
-            let versions = versions
-                .into_iter()
-                .map(|version| big_indexd_client::FileVersion {
-                    id: version.id,
-                    saved_at: version.saved_at,
-                    size: version.size,
-                    reason: version.reason.as_str().to_string(),
-                    object: version.object.to_string_lossy().into_owned(),
-                    was_named: version.was_named,
-                })
-                .collect();
-            Reply::Versions {
-                v: PROTOCOL_VERSION,
-                versions,
-                unavailable: match store.support() {
-                    crate::history::Support::Unavailable(reason) => reason.as_str().to_string(),
-                    _ => String::new(),
-                },
-                paused_for_space: store.is_paused_for_space(),
-            }
-        }
+        RequestBody::ClearOrigin => clear_origin_reply(),
+        RequestBody::Versions(request) => versions_reply(history, request),
         // Done here rather than handed to the worker: a file manager asks for
         // this immediately before it overwrites the document, and an answer that
         // arrives after the overwrite is no answer at all.
-        RequestBody::SaveVersion(request) => history_reply(history, |store| {
-            store
-                .save_version(
-                    std::path::Path::new(&request.path),
-                    crate::history::Reason::BeforeRestore,
-                )
-                .map(|_| ())
-        }),
+        RequestBody::SaveVersion(request) => save_version_reply(history, request),
         RequestBody::ForgetVersions(request) => history_reply(history, |store| {
             store.forget(std::path::Path::new(&request.path))
         }),
@@ -459,6 +368,174 @@ fn dispatch(
             roots: indexed_roots(),
         },
     }
+}
+
+fn query_reply(
+    index: &IndexReader,
+    content_index: &IndexReader,
+    query_request: big_indexd_client::QueryRequest,
+    control: &Control,
+    origin_reader: &origin::OriginReader,
+) -> Reply {
+    let wants_content = matches!(query_request.mode.as_str(), "content" | "both");
+    if wants_content {
+        // A content search is the strongest signal that deferred bodies
+        // are wanted now: nudge the watcher to extract them, cooldown-free.
+        let _ = control.commands.send(WatchMessage::ControlCommand(
+            WatchControlCommand::WarmContent,
+        ));
+    }
+    match query::run_query(
+        query::QueryIndexes {
+            name: index,
+            content: Some(content_index),
+        },
+        &query_request.q,
+        &query_request.mode,
+        &query_request.filter,
+        &query_request.page,
+        query_request.include_origin,
+        Some(origin_reader),
+    ) {
+        Ok(mut query_outcome) => {
+            if wants_content {
+                query_outcome.content_pending = control.pending_content.load(Ordering::Relaxed);
+            }
+            Reply::Query {
+                v: PROTOCOL_VERSION,
+                outcome: query_outcome,
+            }
+        }
+        Err(e) => err(format!("query failed: {e}")),
+    }
+}
+
+fn register_copy_reply(register_copy_request: big_indexd_client::RegisterCopyRequest) -> Reply {
+    register_origin(|writer| {
+        writer.register_copy(
+            Path::new(&register_copy_request.src),
+            Path::new(&register_copy_request.dst),
+            register_copy_request.app_id.as_deref(),
+        )
+    })
+}
+
+fn register_move_reply(register_move_request: big_indexd_client::RegisterMoveRequest) -> Reply {
+    register_origin(|writer| {
+        writer.register_move(
+            Path::new(&register_move_request.src),
+            Path::new(&register_move_request.dst),
+            register_move_request.app_id.as_deref(),
+        )
+    })
+}
+
+fn register_created_reply(
+    register_created_request: big_indexd_client::RegisterCreatedRequest,
+) -> Reply {
+    register_origin(|writer| {
+        writer.register_created(
+            Path::new(&register_created_request.path),
+            register_created_request.app_id.as_deref(),
+        )
+    })
+}
+
+fn register_derived_reply(
+    register_derived_request: big_indexd_client::RegisterDerivedRequest,
+) -> Reply {
+    register_origin(|writer| {
+        writer.register_derived(
+            Path::new(&register_derived_request.src),
+            Path::new(&register_derived_request.dst),
+            register_derived_request.app_id.as_deref(),
+            register_derived_request.action.as_deref(),
+        )
+    })
+}
+
+fn status_reply(index: &IndexReader, content_index: &IndexReader, control: &Control) -> Reply {
+    let paused = control.paused.load(Ordering::Relaxed);
+    Reply::Status {
+        v: PROTOCOL_VERSION,
+        indexed: index::document_count(index).unwrap_or(0),
+        paused,
+        activity: crate::watch::activity_label(paused, control.activity.load(Ordering::Relaxed))
+            .to_string(),
+        capabilities: daemon_capabilities(),
+        pending_content: control.pending_content.load(Ordering::Relaxed),
+        content_docs: index::document_count(content_index).unwrap_or(0),
+        name_index_bytes: flat_directory_file_bytes(&config::index_dir()),
+        content_index_bytes: flat_directory_file_bytes(&config::content_index_dir()),
+        unwatched_dirs: control.unwatched_dirs.load(Ordering::Relaxed),
+    }
+}
+
+fn reindex_reply(control: &Control, request: big_indexd_client::ReindexRequest) -> Reply {
+    let path = std::path::PathBuf::from(request.path);
+    if control.paused.load(Ordering::Relaxed) {
+        return err("indexing is paused".to_string());
+    }
+    // A forced read walks and watches the path: never one the person
+    // did not ask to have searched, nor one relative to the daemon.
+    if !path.is_absolute() || settings::sources().owner(&path).is_none() {
+        return err(format!("{} is not in a searched folder", path.display()));
+    }
+    send_control_command(control, WatchControlCommand::ReindexPath(path))
+}
+
+fn clear_origin_reply() -> Reply {
+    match origin::forget_all(&config::origin_db_path()) {
+        Ok(()) => Reply::Ok {
+            v: PROTOCOL_VERSION,
+        },
+        Err(e) => err(format!("origins could not be forgotten: {e:#}")),
+    }
+}
+
+fn versions_reply(
+    history: &crate::history::SharedHistory,
+    request: big_indexd_client::PathRequest,
+) -> Reply {
+    let store = history.lock().expect("versions store lock");
+    let versions = match store.versions(std::path::Path::new(&request.path)) {
+        Ok(versions) => versions,
+        Err(e) => return err(format!("versions: {e:#}")),
+    };
+    let versions = versions
+        .into_iter()
+        .map(|version| big_indexd_client::FileVersion {
+            id: version.id,
+            saved_at: version.saved_at,
+            size: version.size,
+            reason: version.reason.as_str().to_string(),
+            object: version.object.to_string_lossy().into_owned(),
+            was_named: version.was_named,
+        })
+        .collect();
+    Reply::Versions {
+        v: PROTOCOL_VERSION,
+        versions,
+        unavailable: match store.support() {
+            crate::history::Support::Unavailable(reason) => reason.as_str().to_string(),
+            _ => String::new(),
+        },
+        paused_for_space: store.is_paused_for_space(),
+    }
+}
+
+fn save_version_reply(
+    history: &crate::history::SharedHistory,
+    request: big_indexd_client::PathRequest,
+) -> Reply {
+    history_reply(history, |store| {
+        store
+            .save_version(
+                std::path::Path::new(&request.path),
+                crate::history::Reason::BeforeRestore,
+            )
+            .map(|_| ())
+    })
 }
 
 /// The catalogued directories, as a caller standing in a folder needs them.

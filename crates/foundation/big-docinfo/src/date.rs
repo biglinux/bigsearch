@@ -187,7 +187,7 @@ fn number(words: &[&str]) -> Option<u32> {
     let (mut total, mut current, mut any) = (0, 0, false);
     for word in words {
         let word = fold_lower(word);
-        let value = match word.as_str() {
+        match word.as_str() {
             "e" | "y" => continue,
             "mil" => {
                 total += current.max(1) * 1000;
@@ -195,57 +195,65 @@ fn number(words: &[&str]) -> Option<u32> {
                 any = true;
                 continue;
             }
-            "um" | "uma" | "un" | "uno" | "una" | "primeiro" | "primero" => 1,
-            "dois" | "duas" | "dos" => 2,
-            "tres" => 3,
-            "quatro" | "cuatro" => 4,
-            "cinco" => 5,
-            "seis" => 6,
-            "sete" | "siete" => 7,
-            "oito" | "ocho" => 8,
-            "nove" | "nueve" => 9,
-            "dez" | "diez" => 10,
-            "onze" | "once" => 11,
-            "doze" | "doce" => 12,
-            "treze" | "trece" => 13,
-            "catorze" | "quatorze" | "catorce" => 14,
-            "quinze" | "quince" => 15,
-            "dezesseis" | "dezasseis" | "dieciseis" => 16,
-            "dezessete" | "dezassete" | "diecisiete" => 17,
-            "dezoito" | "dieciocho" => 18,
-            "dezenove" | "dezanove" | "diecinueve" => 19,
-            "vinte" | "veinte" => 20,
-            "veintiun" | "veintiuno" => 21,
-            "veintidos" => 22,
-            "veintitres" => 23,
-            "veinticuatro" => 24,
-            "veinticinco" => 25,
-            "veintiseis" => 26,
-            "veintisiete" => 27,
-            "veintiocho" => 28,
-            "veintinueve" => 29,
-            "trinta" | "treinta" => 30,
-            "quarenta" | "cuarenta" => 40,
-            "cinquenta" | "cincuenta" => 50,
-            "sessenta" | "sesenta" => 60,
-            "setenta" => 70,
-            "oitenta" | "ochenta" => 80,
-            "noventa" => 90,
-            "cem" | "cento" | "cien" | "ciento" => 100,
-            "duzentos" | "doscientos" => 200,
-            "trezentos" | "trescientos" => 300,
-            "quatrocentos" | "cuatrocientos" => 400,
-            "quinhentos" | "quinientos" => 500,
-            "seiscentos" | "seiscientos" => 600,
-            "setecentos" | "setecientos" => 700,
-            "oitocentos" | "ochocientos" => 800,
-            "novecentos" | "novecientos" => 900,
-            _ => return None,
-        };
-        current += value;
+            _ => {}
+        }
+        current += word_value(&word)?;
         any = true;
     }
     any.then_some(total + current)
+}
+
+/// Value of one Portuguese or Spanish number word below a thousand.
+fn word_value(word: &str) -> Option<u32> {
+    let value = match word {
+        "um" | "uma" | "un" | "uno" | "una" | "primeiro" | "primero" => 1,
+        "dois" | "duas" | "dos" => 2,
+        "tres" => 3,
+        "quatro" | "cuatro" => 4,
+        "cinco" => 5,
+        "seis" => 6,
+        "sete" | "siete" => 7,
+        "oito" | "ocho" => 8,
+        "nove" | "nueve" => 9,
+        "dez" | "diez" => 10,
+        "onze" | "once" => 11,
+        "doze" | "doce" => 12,
+        "treze" | "trece" => 13,
+        "catorze" | "quatorze" | "catorce" => 14,
+        "quinze" | "quince" => 15,
+        "dezesseis" | "dezasseis" | "dieciseis" => 16,
+        "dezessete" | "dezassete" | "diecisiete" => 17,
+        "dezoito" | "dieciocho" => 18,
+        "dezenove" | "dezanove" | "diecinueve" => 19,
+        "vinte" | "veinte" => 20,
+        "veintiun" | "veintiuno" => 21,
+        "veintidos" => 22,
+        "veintitres" => 23,
+        "veinticuatro" => 24,
+        "veinticinco" => 25,
+        "veintiseis" => 26,
+        "veintisiete" => 27,
+        "veintiocho" => 28,
+        "veintinueve" => 29,
+        "trinta" | "treinta" => 30,
+        "quarenta" | "cuarenta" => 40,
+        "cinquenta" | "cincuenta" => 50,
+        "sessenta" | "sesenta" => 60,
+        "setenta" => 70,
+        "oitenta" | "ochenta" => 80,
+        "noventa" => 90,
+        "cem" | "cento" | "cien" | "ciento" => 100,
+        "duzentos" | "doscientos" => 200,
+        "trezentos" | "trescientos" => 300,
+        "quatrocentos" | "cuatrocientos" => 400,
+        "quinhentos" | "quinientos" => 500,
+        "seiscentos" | "seiscientos" => 600,
+        "setecentos" | "setecientos" => 700,
+        "oitocentos" | "ochocientos" => 800,
+        "novecentos" | "novecientos" => 900,
+        _ => return None,
+    };
+    Some(value)
 }
 
 /// The year that opens `rest`: four digits, or number words up to the first word
@@ -297,6 +305,64 @@ fn month(name: &str) -> Option<u32> {
 }
 
 fn candidates(text: &str) -> Vec<Found> {
+    let mut out = Vec::new();
+    numeric_candidates(text, &mut out);
+    for c in ISO.captures_iter(text) {
+        if let Ok(m) = c[2].parse() {
+            push_calendar_date(&mut out, &c[1], m, &c[3], span(&c));
+        }
+    }
+    for c in DAY_MONTH_YEAR.captures_iter(text) {
+        if let Some(m) = month(&c[2]) {
+            push_calendar_date(&mut out, &c[3], m, &c[1], span(&c));
+        }
+    }
+    for c in MONTH_DAY_YEAR.captures_iter(text) {
+        if let Some(m) = month(&c[1]) {
+            push_calendar_date(&mut out, &c[3], m, &c[2], span(&c));
+        }
+    }
+    for c in YEAR_MONTH_DAY.captures_iter(text) {
+        if let Some(m) = month(&c[2]) {
+            push_calendar_date(&mut out, &c[1], m, &c[3], span(&c));
+        }
+    }
+    for c in CJK.captures_iter(text) {
+        if let Ok(m) = c[2].parse() {
+            push_calendar_date(&mut out, &c[1], m, &c[3], span(&c));
+        }
+    }
+    formal_candidates(text, &mut out);
+    out
+}
+
+/// Byte offset and length of the whole match.
+fn span(c: &regex::Captures<'_>) -> (usize, usize) {
+    c.get(0).map_or((0, 0), |m| (m.start(), m.len()))
+}
+
+/// Add the date written with digits for year and day, if the day exists.
+fn push_calendar_date(
+    out: &mut Vec<Found>,
+    year: &str,
+    month: u32,
+    day: &str,
+    (at, len): (usize, usize),
+) {
+    if let (Ok(y), Ok(d)) = (year.parse::<u32>(), day.parse::<u32>())
+        && is_calendar_date(y, month, d)
+    {
+        out.push(Found {
+            iso: format!("{y:04}-{month:02}-{d:02}"),
+            at,
+            len,
+            formal: false,
+        });
+    }
+}
+
+/// Dates written `04/10/2026`, `04.10.2026` or `04-10-2026`.
+fn numeric_candidates(text: &str, out: &mut Vec<Found>) {
     // English writes 04/10 both ways; another numeric date of the same document
     // that can only be read one way (03/27 or 29/08) tells which way it is.
     let order = if is_english(text) {
@@ -304,20 +370,6 @@ fn candidates(text: &str) -> Vec<Found> {
     } else {
         Some(DayFirst)
     };
-    let mut out = Vec::new();
-    let mut push = |year: &str, month: u32, day: &str, (at, len): (usize, usize)| {
-        if let (Ok(y), Ok(d)) = (year.parse::<u32>(), day.parse::<u32>())
-            && is_calendar_date(y, month, d)
-        {
-            out.push(Found {
-                iso: format!("{y:04}-{month:02}-{d:02}"),
-                at,
-                len,
-                formal: false,
-            });
-        }
-    };
-    let start = |c: &regex::Captures<'_>| c.get(0).map_or((0, 0), |m| (m.start(), m.len()));
     for c in NUMERIC.captures_iter(text) {
         let (Ok(first), Ok(second)) = (c[1].parse::<u32>(), c[2].parse::<u32>()) else {
             continue;
@@ -330,36 +382,15 @@ fn candidates(text: &str) -> Vec<Found> {
             None => continue, // swappable and nothing in the text settles it
         };
         if day_first {
-            push(&c[3], second, &c[1], start(&c));
+            push_calendar_date(out, &c[3], second, &c[1], span(&c));
         } else {
-            push(&c[3], first, &c[2], start(&c));
+            push_calendar_date(out, &c[3], first, &c[2], span(&c));
         }
     }
-    for c in ISO.captures_iter(text) {
-        if let Ok(m) = c[2].parse() {
-            push(&c[1], m, &c[3], start(&c));
-        }
-    }
-    for c in DAY_MONTH_YEAR.captures_iter(text) {
-        if let Some(m) = month(&c[2]) {
-            push(&c[3], m, &c[1], start(&c));
-        }
-    }
-    for c in MONTH_DAY_YEAR.captures_iter(text) {
-        if let Some(m) = month(&c[1]) {
-            push(&c[3], m, &c[2], start(&c));
-        }
-    }
-    for c in YEAR_MONTH_DAY.captures_iter(text) {
-        if let Some(m) = month(&c[2]) {
-            push(&c[1], m, &c[3], start(&c));
-        }
-    }
-    for c in CJK.captures_iter(text) {
-        if let Ok(m) = c[2].parse() {
-            push(&c[1], m, &c[3], start(&c));
-        }
-    }
+}
+
+/// Dates written out in words: "aos onze dias do mês de maio de dois mil e dezoito".
+fn formal_candidates(text: &str, out: &mut Vec<Found>) {
     for c in DAYS_OF.captures_iter(text) {
         let whole = c.get(0).map_or(0..0, |m| m.range());
         let day_words: Vec<&str> = c[1].split([' ', '-']).collect();
@@ -377,7 +408,6 @@ fn candidates(text: &str) -> Vec<Found> {
             });
         }
     }
-    out
 }
 
 /// A day that exists, in the years a document can carry: "31 de abril" is a
@@ -474,62 +504,14 @@ pub fn scored_date(text: &str) -> Option<(String, i32)> {
     if found_all.len() > SCORED {
         found_all.drain(SCORED / 2..found_all.len() - SCORED / 2);
     }
-    // Where the third non-empty line starts: a cited act opening a line up to
-    // there is the document's own title.
-    let mut title_end = usize::MAX;
-    let mut offset = 0;
-    let mut filled = 0;
-    for line in text.split_inclusive('\n') {
-        if !line.trim().is_empty() {
-            filled += 1;
-            if filled == 3 {
-                title_end = offset;
-                break;
-            }
-        }
-        offset += line.len();
-    }
-    // The line and the words before each date are tracked while walking the
-    // candidates in order, so a long line is scanned once, not once per date.
-    // `words` counts the words before the date on its line, up to three.
-    let (mut scanned, mut line_start, mut words, mut in_word) = (0, 0, 0, false);
-    let mut scope_of_line: Option<(usize, usize)> = None;
-    let mut header_line: Option<(usize, bool)> = None;
+    let title_end = third_line_start(text);
+    let mut cursor = LineCursor::default();
     let mut best: Option<(i32, f64, String)> = None;
     let mut first_stamp: Option<(usize, String)> = None;
     for found in found_all {
-        for (i, c) in text[scanned..found.at].char_indices() {
-            if c == '\n' {
-                (line_start, words, in_word) = (scanned + i + 1, 0, false);
-            } else if c.is_whitespace() {
-                in_word = false;
-            } else if !in_word {
-                in_word = true;
-                words = (words + 1).min(3);
-            }
-        }
-        scanned = found.at;
+        cursor.advance_to(text, found.at);
         let before_raw = &text[..found.at];
-        // The words that give the date its role sit on its line ("Data: …",
-        // "Vencimento …") or, when the date opens its line, on the line above…
-        // …or when only a word or two precede it ("nascido" / "em 13 de março").
-        let scope = if words <= 2 {
-            match scope_of_line {
-                Some((line, scope)) if line == line_start => scope,
-                _ => {
-                    let scope = before_raw[..line_start]
-                        .trim_end()
-                        .rfind('\n')
-                        .map_or(0, |i| i + 1);
-                    scope_of_line = Some((line_start, scope));
-                    scope
-                }
-            }
-        } else {
-            line_start
-        };
-        let near_text = norm(last_chars(&text[scope..found.at], 35));
-        let near = near_text.as_str();
+        let scope = cursor.role_scope(before_raw);
         // Position as a share of the text, in bytes: counting characters from the
         // start for every candidate would be quadratic on a long document.
         #[expect(
@@ -544,17 +526,7 @@ pub fn scored_date(text: &str) -> Option<(String, i32)> {
             .find_iter(window)
             .last()
             .is_some_and(|m| candidates(&window[m.end()..]).is_empty());
-        let print_header = match header_line {
-            Some((line, header)) if line == line_start => header,
-            _ => {
-                let line_end = text[found.at..]
-                    .find('\n')
-                    .map_or(text.len(), |i| found.at + i);
-                let header = PRINT_HEADER.is_match(&text[line_start..line_end]);
-                header_line = Some((line_start, header));
-                header
-            }
-        };
+        let print_header = cursor.is_print_header(text, found.at);
         if copy_stamp || print_header {
             continue;
         }
@@ -564,40 +536,7 @@ pub fn scored_date(text: &str) -> Option<(String, i32)> {
             }
             continue;
         }
-        let mut score = 0;
-        if AGAINST.is_match(near)
-            || IDENTITY.is_match(&norm(last_chars(&text[scope..found.at], 200)))
-        {
-            score -= 3;
-        }
-        if CITED_ACT.is_match(&norm(last_chars(before_raw, 120))) {
-            // Opening one of the first lines, it is the document's own title
-            // ("DECRETO Nº 010, DE 02 DE ABRIL DE 2020"); "(Lei nº 7.115, de …)"
-            // under a title is the law the document rests on.
-            let line = &text[line_start..found.at];
-            let own_title = line.len() <= 300
-                && line_start <= title_end
-                && line.trim_start().starts_with(char::is_alphabetic)
-                && CITED_ACT.find(&norm(line)).is_some_and(|m| m.start() == 0);
-            score += if own_title { 3 } else { -3 };
-        }
-        if FOR.is_match(near) && !HISTORY.is_match(near) {
-            score += 2;
-        }
-        if signature_line(&text[line_start..found.at]) || found.formal {
-            score += 3;
-        }
-        // A date may run across a line break ("26 de\nmaio de 2026"): what
-        // follows it on its line starts where the date ends.
-        let date_end = found.at + found.len;
-        if words == 0
-            && text[date_end..]
-                .chars()
-                .find(|&c| c == '\n' || !(c.is_whitespace() || c == '.'))
-                .is_none_or(|c| c == '\n')
-        {
-            score += 2; // a date alone on its line heads a letter
-        }
+        let mut score = role_score(text, &found, &cursor, scope, title_end);
         if !(0.15..=0.85).contains(&place) {
             score += 1;
         }
@@ -609,6 +548,135 @@ pub fn scored_date(text: &str) -> Option<(String, i32)> {
     best.filter(|(score, _, _)| *score >= 1)
         .map(|(score, _, iso)| (iso, score))
         .or(first_stamp.map(|(_, iso)| (iso, 0)))
+}
+
+/// Where the third non-empty line starts: a cited act opening a line up to
+/// there is the document's own title.
+fn third_line_start(text: &str) -> usize {
+    let mut offset = 0;
+    let mut filled = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim().is_empty() {
+            filled += 1;
+            if filled == 3 {
+                return offset;
+            }
+        }
+        offset += line.len();
+    }
+    usize::MAX
+}
+
+/// The line of the candidate being scored. The line and the words before each
+/// date are tracked while walking the candidates in order, so a long line is
+/// scanned once, not once per date.
+#[derive(Default)]
+struct LineCursor {
+    scanned: usize,
+    line_start: usize,
+    /// The words before the date on its line, up to three.
+    words: usize,
+    in_word: bool,
+    scope_of_line: Option<(usize, usize)>,
+    header_line: Option<(usize, bool)>,
+}
+
+impl LineCursor {
+    fn advance_to(&mut self, text: &str, at: usize) {
+        for (i, c) in text[self.scanned..at].char_indices() {
+            if c == '\n' {
+                (self.line_start, self.words, self.in_word) = (self.scanned + i + 1, 0, false);
+            } else if c.is_whitespace() {
+                self.in_word = false;
+            } else if !self.in_word {
+                self.in_word = true;
+                self.words = (self.words + 1).min(3);
+            }
+        }
+        self.scanned = at;
+    }
+
+    /// Where the words that give the date its role start.
+    fn role_scope(&mut self, before_raw: &str) -> usize {
+        // The words that give the date its role sit on its line ("Data: …",
+        // "Vencimento …") or, when the date opens its line, on the line above…
+        // …or when only a word or two precede it ("nascido" / "em 13 de março").
+        if self.words > 2 {
+            return self.line_start;
+        }
+        match self.scope_of_line {
+            Some((line, scope)) if line == self.line_start => scope,
+            _ => {
+                let scope = before_raw[..self.line_start]
+                    .trim_end()
+                    .rfind('\n')
+                    .map_or(0, |i| i + 1);
+                self.scope_of_line = Some((self.line_start, scope));
+                scope
+            }
+        }
+    }
+
+    /// Whether the date's line is a print header, which dates the printout.
+    fn is_print_header(&mut self, text: &str, at: usize) -> bool {
+        match self.header_line {
+            Some((line, header)) if line == self.line_start => header,
+            _ => {
+                let line_end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+                let header = PRINT_HEADER.is_match(&text[self.line_start..line_end]);
+                self.header_line = Some((self.line_start, header));
+                header
+            }
+        }
+    }
+}
+
+/// Evidence from the words around the date for and against it being the
+/// document's own.
+fn role_score(
+    text: &str,
+    found: &Found,
+    cursor: &LineCursor,
+    scope: usize,
+    title_end: usize,
+) -> i32 {
+    let before_raw = &text[..found.at];
+    let line_start = cursor.line_start;
+    let near_text = norm(last_chars(&text[scope..found.at], 35));
+    let near = near_text.as_str();
+    let mut score = 0;
+    if AGAINST.is_match(near) || IDENTITY.is_match(&norm(last_chars(&text[scope..found.at], 200))) {
+        score -= 3;
+    }
+    if CITED_ACT.is_match(&norm(last_chars(before_raw, 120))) {
+        // Opening one of the first lines, it is the document's own title
+        // ("DECRETO Nº 010, DE 02 DE ABRIL DE 2020"); "(Lei nº 7.115, de …)"
+        // under a title is the law the document rests on.
+        let line = &text[line_start..found.at];
+        let own_title = line.len() <= 300
+            && line_start <= title_end
+            && line.trim_start().starts_with(char::is_alphabetic)
+            && CITED_ACT.find(&norm(line)).is_some_and(|m| m.start() == 0);
+        score += if own_title { 3 } else { -3 };
+    }
+    if FOR.is_match(near) && !HISTORY.is_match(near) {
+        score += 2;
+    }
+    if signature_line(&text[line_start..found.at]) || found.formal {
+        score += 3;
+    }
+    // A date may run across a line break ("26 de\nmaio de 2026"): what
+    // follows it on its line starts where the date ends.
+    let date_end = found.at + found.len;
+    if cursor.words == 0
+        && text[date_end..]
+            .chars()
+            .find(|&c| c == '\n' || !(c.is_whitespace() || c == '.'))
+            .is_none_or(|c| c == '\n')
+    {
+        score += 2; // a date alone on its line heads a letter
+    }
+    score
 }
 
 /// Tuple order: score, then position, then the ISO string.

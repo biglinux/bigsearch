@@ -94,6 +94,57 @@ impl StatusCard {
         &self.group
     }
 
+    /// A change is written and the service has not been restarted yet.
+    pub(crate) fn show_pending_restart(&self) {
+        self.detail.set_label(&tr(
+            "Your change is saved. It starts working when you close this window.",
+        ));
+    }
+
+    pub(crate) fn show_applying(&self) {
+        if !self.answering.get() {
+            return;
+        }
+        self.applying.set(true);
+        self.headline.set_label(&tr("Applying…"));
+        self.detail.set_label("");
+    }
+
+    /// The service refused, or is not there to be asked.
+    pub(crate) fn show_forget_failed(&self) {
+        self.detail.set_label(&tr(
+            "Nothing could be forgotten: the search is not running. Turn it on and try again.",
+        ));
+    }
+
+    pub(crate) fn show_write_failed(&self) {
+        self.detail.set_label(&tr(
+            "Your change could not be saved. Check the space left on the disk.",
+        ));
+    }
+
+    /// Ask the service how it is doing, now and every couple of seconds.
+    pub(crate) fn start_polling(&self) {
+        // Never two timers: the page starts this every time it comes back on
+        // screen, and a second one would ask twice as often for ever.
+        self.stop_polling();
+        self.refresh();
+        let card = self.clone();
+        let source = glib::timeout_add_local(POLL_EVERY, move || {
+            card.refresh();
+            glib::ControlFlow::Continue
+        });
+        *self.poll.borrow_mut() = Some(source);
+    }
+
+    /// Stop asking. Called when the window closes: a timer left running keeps
+    /// waking the process up to ask about a window nobody is looking at.
+    pub(crate) fn stop_polling(&self) {
+        if let Some(source) = self.poll.borrow_mut().take() {
+            source.remove();
+        }
+    }
+
     fn connect_buttons(&self) {
         {
             let paused = Rc::clone(&self.paused);
@@ -152,57 +203,6 @@ impl StatusCard {
             ask(|client| client.rebuild(), move |_| card.refresh());
         });
         dialog.present(Some(anchor));
-    }
-
-    /// A change is written and the service has not been restarted yet.
-    pub(crate) fn show_pending_restart(&self) {
-        self.detail.set_label(&tr(
-            "Your change is saved. It starts working when you close this window.",
-        ));
-    }
-
-    pub(crate) fn show_applying(&self) {
-        if !self.answering.get() {
-            return;
-        }
-        self.applying.set(true);
-        self.headline.set_label(&tr("Applying…"));
-        self.detail.set_label("");
-    }
-
-    /// The service refused, or is not there to be asked.
-    pub(crate) fn show_forget_failed(&self) {
-        self.detail.set_label(&tr(
-            "Nothing could be forgotten: the search is not running. Turn it on and try again.",
-        ));
-    }
-
-    pub(crate) fn show_write_failed(&self) {
-        self.detail.set_label(&tr(
-            "Your change could not be saved. Check the space left on the disk.",
-        ));
-    }
-
-    /// Ask the service how it is doing, now and every couple of seconds.
-    pub(crate) fn start_polling(&self) {
-        // Never two timers: the page starts this every time it comes back on
-        // screen, and a second one would ask twice as often for ever.
-        self.stop_polling();
-        self.refresh();
-        let card = self.clone();
-        let source = glib::timeout_add_local(POLL_EVERY, move || {
-            card.refresh();
-            glib::ControlFlow::Continue
-        });
-        *self.poll.borrow_mut() = Some(source);
-    }
-
-    /// Stop asking. Called when the window closes: a timer left running keeps
-    /// waking the process up to ask about a window nobody is looking at.
-    pub(crate) fn stop_polling(&self) {
-        if let Some(source) = self.poll.borrow_mut().take() {
-            source.remove();
-        }
     }
 
     fn refresh(&self) {

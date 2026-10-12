@@ -140,26 +140,7 @@ fn run_capped(
     max_bytes: usize,
     options: &[&str],
 ) -> Option<Vec<u8>> {
-    // Prefer one direct extractor process guarded by a pidfd. The capability
-    // probe is not sufficient by itself: pidfd_open or watcher-thread creation
-    // can still fail for this specific child under fd/thread pressure. In that
-    // case, kill and reap the unguarded child before respawning through
-    // timeout(1), so every successful spawn has a wall-clock deadline.
-    let use_watchdog = pidfd_supported();
-    let mut child = spawn_capped(program, path, !use_watchdog, options)?;
-    let watchdog = if use_watchdog {
-        match SubprocessDeadline::arm(&child, Duration::from_secs(wall_deadline_secs())) {
-            Some(watchdog) => Some(watchdog),
-            None => {
-                kill_child_tree(&mut child);
-                let _ = child.wait();
-                child = spawn_capped(program, path, true, options)?;
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let (mut child, watchdog) = spawn_with_deadline(program, path, options)?;
 
     // Returning early here must still reap: `Child`'s drop does not wait, so a
     // bare `?` would leave a zombie (and the watchdog thread alive) until the
@@ -210,6 +191,35 @@ fn run_capped(
         return None;
     }
     Some(bytes)
+}
+
+/// Spawns `program` with a wall-clock deadline: a pidfd watchdog, or `timeout(1)`.
+fn spawn_with_deadline(
+    program: &'static str,
+    path: &Path,
+    options: &[&str],
+) -> Option<(Child, Option<SubprocessDeadline>)> {
+    // Prefer one direct extractor process guarded by a pidfd. The capability
+    // probe is not sufficient by itself: pidfd_open or watcher-thread creation
+    // can still fail for this specific child under fd/thread pressure. In that
+    // case, kill and reap the unguarded child before respawning through
+    // timeout(1), so every successful spawn has a wall-clock deadline.
+    let use_watchdog = pidfd_supported();
+    let mut child = spawn_capped(program, path, !use_watchdog, options)?;
+    let watchdog = if use_watchdog {
+        match SubprocessDeadline::arm(&child, Duration::from_secs(wall_deadline_secs())) {
+            Some(watchdog) => Some(watchdog),
+            None => {
+                kill_child_tree(&mut child);
+                let _ = child.wait();
+                child = spawn_capped(program, path, true, options)?;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Some((child, watchdog))
 }
 
 /// `program` and `options` are fixed strings from this file, never caller input;
@@ -291,68 +301,8 @@ impl SubprocessDeadline {
         let pidfd = pidfd as libc::c_int;
         let watcher = match std::thread::Builder::new()
             .name("big-search-pdf-deadline".to_owned())
-            .spawn(move || {
-                let deadline = std::time::Instant::now() + timeout;
-                loop {
-                    let remaining_ms = deadline
-                        .saturating_duration_since(std::time::Instant::now())
-                        .as_millis()
-                        .min(i32::MAX as u128)
-                        as libc::c_int;
-                    let mut fds = libc::pollfd {
-                        fd: pidfd,
-                        events: libc::POLLIN,
-                        revents: 0,
-                    };
-                    // SAFETY: poll on one valid pidfd; the buffer outlives the call.
-                    let rc = unsafe { libc::poll(&mut fds, 1, remaining_ms) };
-                    if rc == 0 {
-                        // Deadline reached and the child still runs (the pidfd is not
-                        // readable), so it is unreaped and its process group id (the
-                        // child's own pid) is still valid: group-kill cannot hit a
-                        // recycled pid. Also signal through the pidfd for certainty.
-                        // SAFETY: kill(-pgid) on the live child's group; the pidfd
-                        // signal targets exactly the process the fd was opened for.
-                        unsafe {
-                            libc::kill(-child_pid, libc::SIGKILL);
-                            libc::syscall(
-                                libc::SYS_pidfd_send_signal,
-                                pidfd,
-                                libc::SIGKILL,
-                                0usize,
-                                0u32,
-                            );
-                        }
-                        break;
-                    }
-                    if rc > 0 {
-                        break; // child exited
-                    }
-                    let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::EINTR) {
-                        log::warn!("PDF deadline watchdog poll failed: {error}");
-                        // Fail closed: if the deadline mechanism itself becomes
-                        // unusable, terminate the exact child and its helpers.
-                        // SAFETY: same live process-group/pidfd invariants as
-                        // the timeout branch above.
-                        unsafe {
-                            libc::kill(-child_pid, libc::SIGKILL);
-                            libc::syscall(
-                                libc::SYS_pidfd_send_signal,
-                                pidfd,
-                                libc::SIGKILL,
-                                0usize,
-                                0u32,
-                            );
-                        }
-                        break;
-                    }
-                }
-                // SAFETY: this thread owns the pidfd; closed exactly once.
-                unsafe {
-                    libc::close(pidfd);
-                }
-            }) {
+            .spawn(move || watch_deadline(pidfd, child_pid, timeout))
+        {
             Ok(watcher) => watcher,
             Err(error) => {
                 // SAFETY: no watcher thread was created, so this scope still
@@ -371,6 +321,70 @@ impl SubprocessDeadline {
     /// child has exited, even after it was reaped).
     fn reap(self) {
         let _ = self.watcher.join();
+    }
+}
+
+/// The watchdog thread body: SIGKILL the child's process group when `timeout`
+/// expires before the pidfd reports its exit, then close the pidfd it owns.
+fn watch_deadline(pidfd: libc::c_int, child_pid: libc::pid_t, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining_ms = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .as_millis()
+            .min(i32::MAX as u128) as libc::c_int;
+        let mut fds = libc::pollfd {
+            fd: pidfd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll on one valid pidfd; the buffer outlives the call.
+        let rc = unsafe { libc::poll(&mut fds, 1, remaining_ms) };
+        if rc == 0 {
+            // Deadline reached and the child still runs (the pidfd is not
+            // readable), so it is unreaped and its process group id (the
+            // child's own pid) is still valid: group-kill cannot hit a
+            // recycled pid. Also signal through the pidfd for certainty.
+            // SAFETY: kill(-pgid) on the live child's group; the pidfd
+            // signal targets exactly the process the fd was opened for.
+            unsafe {
+                libc::kill(-child_pid, libc::SIGKILL);
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    pidfd,
+                    libc::SIGKILL,
+                    0usize,
+                    0u32,
+                );
+            }
+            break;
+        }
+        if rc > 0 {
+            break; // child exited
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            log::warn!("PDF deadline watchdog poll failed: {error}");
+            // Fail closed: if the deadline mechanism itself becomes
+            // unusable, terminate the exact child and its helpers.
+            // SAFETY: same live process-group/pidfd invariants as
+            // the timeout branch above.
+            unsafe {
+                libc::kill(-child_pid, libc::SIGKILL);
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    pidfd,
+                    libc::SIGKILL,
+                    0usize,
+                    0u32,
+                );
+            }
+            break;
+        }
+    }
+    // SAFETY: this thread owns the pidfd; closed exactly once.
+    unsafe {
+        libc::close(pidfd);
     }
 }
 

@@ -135,6 +135,25 @@ fn push_event_text(event: &Event<'_>, out: &mut String) {
     }
 }
 
+/// Appends a text event to a paragraph; visible text raises the paragraph's
+/// `largest` size to the `size` it is set in.
+fn push_sized_text(event: &Event<'_>, text: &mut String, largest: &mut f32, size: f32) {
+    let before = text.len();
+    push_event_text(event, text);
+    if text[before..].chars().any(|c| !c.is_whitespace()) {
+        *largest = largest.max(size);
+    }
+}
+
+/// Keeps a finished paragraph unless it is blank; `true` once the opening
+/// paragraphs are all collected.
+fn keep_opening(lines: &mut Vec<(String, f32)>, text: String, size: f32) -> bool {
+    if !text.trim().is_empty() {
+        lines.push((text, size));
+    }
+    lines.len() == OPENING_PARAGRAPHS
+}
+
 /// Lines of page 1 with their heights. A line taller than it is wide runs
 /// vertically (a publisher's stamp up the margin) and is left out.
 fn pdf_lines(xhtml: &[u8]) -> Vec<(String, f32)> {
@@ -285,7 +304,12 @@ fn odf_lines(path: &Path) -> Vec<(String, f32)> {
         return Vec::new();
     };
     read_odf_styles(&content, &mut styles);
-    let mut reader = quick_xml::Reader::from_reader(content.as_slice());
+    odf_opening_paragraphs(&content, &styles)
+}
+
+/// The paragraph walk of [`odf_lines`] over `content.xml`; annotations are skipped.
+fn odf_opening_paragraphs(content: &[u8], styles: &Styles) -> Vec<(String, f32)> {
+    let mut reader = quick_xml::Reader::from_reader(content);
     let mut buf = Vec::new();
     let mut lines = Vec::new();
     let mut paragraph: Option<(String, f32, f32)> = None; // text, own size, largest used
@@ -305,24 +329,14 @@ fn odf_lines(path: &Path) -> Vec<(String, f32)> {
                 spans.clear();
             }
             Ok(Event::Start(e)) if e.name().as_ref() == b"text:span" => {
-                let outer = spans.last().copied().or(paragraph.as_ref().map(|p| p.1));
-                let size = attr(e, b"text:style-name")
-                    .and_then(|n| styles.by_name.get(&n).and_then(|s| s.1.clone()))
-                    .and_then(|v| odf_size(&v, outer.unwrap_or(12.0)))
-                    .or(outer)
-                    .unwrap_or(12.0);
-                spans.push(size);
+                spans.push(odf_span_size(e, styles, &spans, paragraph.as_ref()));
             }
             Ok(Event::End(e)) if e.name().as_ref() == b"text:span" => {
                 spans.pop();
             }
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) => {
                 if let Some((text, own, largest)) = paragraph.as_mut() {
-                    let before = text.len();
-                    push_event_text(ev, text);
-                    if text[before..].chars().any(|c| !c.is_whitespace()) {
-                        *largest = largest.max(spans.last().copied().unwrap_or(*own));
-                    }
+                    push_sized_text(ev, text, largest, spans.last().copied().unwrap_or(*own));
                 }
             }
             Ok(Event::Empty(e))
@@ -337,12 +351,9 @@ fn odf_lines(path: &Path) -> Vec<(String, f32)> {
             }
             Ok(Event::End(e)) if matches!(e.name().as_ref(), b"text:p" | b"text:h") => {
                 if let Some((text, _, largest)) = paragraph.take()
-                    && !text.trim().is_empty()
+                    && keep_opening(&mut lines, text, largest)
                 {
-                    lines.push((text, largest));
-                    if lines.len() == OPENING_PARAGRAPHS {
-                        break;
-                    }
+                    break;
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -353,8 +364,26 @@ fn odf_lines(path: &Path) -> Vec<(String, f32)> {
     lines
 }
 
+/// The size a `text:span` sets, relative to the span or paragraph it sits in.
+fn odf_span_size(
+    e: &BytesStart<'_>,
+    styles: &Styles,
+    spans: &[f32],
+    paragraph: Option<&(String, f32, f32)>,
+) -> f32 {
+    let outer = spans.last().copied().or(paragraph.map(|p| p.1));
+    attr(e, b"text:style-name")
+        .and_then(|n| styles.by_name.get(&n).and_then(|s| s.1.clone()))
+        .and_then(|v| odf_size(&v, outer.unwrap_or(12.0)))
+        .or(outer)
+        .unwrap_or(12.0)
+}
+
+/// A docx style id to its `w:basedOn` style and its size in half-points.
+type DocxStyles = HashMap<String, (Option<String>, Option<f32>)>;
+
 /// OOXML styles: each style's base and size in half-points; the document default.
-fn read_docx_styles(xml: &[u8]) -> (HashMap<String, (Option<String>, Option<f32>)>, f32) {
+fn read_docx_styles(xml: &[u8]) -> (DocxStyles, f32) {
     let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut styles = HashMap::new();
@@ -408,23 +437,31 @@ fn docx_lines(path: &Path) -> Vec<(String, f32)> {
     let (styles, default) = crate::extract::zip_entry_bytes(path, "word/styles.xml")
         .map(|xml| read_docx_styles(&xml))
         .unwrap_or_else(|| (HashMap::new(), 20.0));
-    let style_size = |id: Option<&str>| {
-        let mut current = id.map(str::to_owned);
-        for _ in 0..16 {
-            let Some(style) = current.as_ref().and_then(|c| styles.get(c)) else {
-                break;
-            };
-            if let Some(size) = style.1 {
-                return Some(size);
-            }
-            current = style.0.clone();
-        }
-        None
-    };
     let Some(xml) = crate::extract::zip_entry_bytes(path, "word/document.xml") else {
         return Vec::new();
     };
-    let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+    docx_opening_paragraphs(&xml, &styles, default)
+}
+
+/// The size a docx style sets, inherited through at most 16 `w:basedOn` steps.
+fn docx_style_size(styles: &DocxStyles, id: Option<&str>) -> Option<f32> {
+    let mut current = id.map(str::to_owned);
+    for _ in 0..16 {
+        let Some(style) = current.as_ref().and_then(|c| styles.get(c)) else {
+            break;
+        };
+        if let Some(size) = style.1 {
+            return Some(size);
+        }
+        current = style.0.clone();
+    }
+    None
+}
+
+/// The paragraph walk of [`docx_lines`] over `word/document.xml`; sizes are in
+/// half-points until a paragraph is kept.
+fn docx_opening_paragraphs(xml: &[u8], styles: &DocxStyles, default: f32) -> Vec<(String, f32)> {
+    let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut lines = Vec::new();
     let mut paragraph: Option<(String, Option<f32>, f32)> = None; // text, style size, largest
@@ -440,7 +477,7 @@ fn docx_lines(path: &Path) -> Vec<(String, f32)> {
             Ok(Event::End(e)) if e.name().as_ref() == b"w:pPr" => in_ppr = false,
             Ok(Event::Start(e) | Event::Empty(e)) if e.name().as_ref() == b"w:pStyle" => {
                 if let Some((_, style, _)) = paragraph.as_mut() {
-                    *style = style_size(attr(e, b"w:val").as_deref());
+                    *style = docx_style_size(styles, attr(e, b"w:val").as_deref());
                 }
             }
             Ok(Event::Start(e)) if e.name().as_ref() == b"w:r" => run = None,
@@ -448,7 +485,7 @@ fn docx_lines(path: &Path) -> Vec<(String, f32)> {
             Ok(Event::Start(e) | Event::Empty(e))
                 if !in_ppr && e.name().as_ref() == b"w:rStyle" =>
             {
-                run = run.or(style_size(attr(e, b"w:val").as_deref()));
+                run = run.or(docx_style_size(styles, attr(e, b"w:val").as_deref()));
             }
             Ok(Event::Start(e) | Event::Empty(e)) if !in_ppr && e.name().as_ref() == b"w:sz" => {
                 run = attr(e, b"w:val").and_then(|v| v.parse().ok()).or(run);
@@ -457,11 +494,7 @@ fn docx_lines(path: &Path) -> Vec<(String, f32)> {
             Ok(Event::End(e)) if e.name().as_ref() == b"w:t" => in_text = false,
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) if in_text => {
                 if let Some((text, style, largest)) = paragraph.as_mut() {
-                    let before = text.len();
-                    push_event_text(ev, text);
-                    if text[before..].chars().any(|c| !c.is_whitespace()) {
-                        *largest = largest.max(run.or(*style).unwrap_or(default));
-                    }
+                    push_sized_text(ev, text, largest, run.or(*style).unwrap_or(default));
                 }
             }
             Ok(Event::Empty(e)) if matches!(e.name().as_ref(), b"w:tab" | b"w:br" | b"w:cr") => {
@@ -471,12 +504,9 @@ fn docx_lines(path: &Path) -> Vec<(String, f32)> {
             }
             Ok(Event::End(e)) if e.name().as_ref() == b"w:p" => {
                 if let Some((text, _, largest)) = paragraph.take()
-                    && !text.trim().is_empty()
+                    && keep_opening(&mut lines, text, largest / 2.0)
                 {
-                    lines.push((text, largest / 2.0));
-                    if lines.len() == OPENING_PARAGRAPHS {
-                        break;
-                    }
+                    break;
                 }
             }
             Ok(Event::Eof) | Err(_) => break,

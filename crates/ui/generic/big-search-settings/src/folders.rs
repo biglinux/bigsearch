@@ -27,6 +27,9 @@ use crate::{SearchSettings, msgid, tr};
 pub(crate) const TITLE: &str = msgid("Where to look");
 
 /// The list of catalogued folders.
+///
+/// Its widgets own their signal handlers, so a handler holds a `Weak` to
+/// `Folders`: a strong one would keep a closed page alive.
 pub(crate) struct Folders {
     group: adw::PreferencesGroup,
     rows: RefCell<Vec<adw::ActionRow>>,
@@ -66,8 +69,12 @@ impl Folders {
         });
 
         {
-            let folders = Rc::clone(&folders);
-            add.connect_clicked(move |button| folders.choose_folder(button));
+            let folders = Rc::downgrade(&folders);
+            add.connect_clicked(move |button| {
+                if let Some(folders) = folders.upgrade() {
+                    folders.choose_folder(button);
+                }
+            });
         }
         folders.reload();
         folders.group.add(&add);
@@ -147,7 +154,7 @@ impl Folders {
             "Also look at the text inside the files",
         ))]);
         {
-            let folders = Rc::clone(self);
+            let folders = Rc::downgrade(self);
             let path = source.path.clone();
             inside.connect_state_set(move |switch, state| {
                 // Moving the switch back after a failed write asks for the
@@ -157,9 +164,11 @@ impl Folders {
                 }
                 if let Err(error) = big_search_config::set_source_content(&path, state) {
                     log::warn!("the folder setting could not be written: {error}");
-                    folders.say(&tr(
-                        "Your change could not be saved. Check the space left on the disk.",
-                    ));
+                    if let Some(folders) = folders.upgrade() {
+                        folders.say(&tr(
+                            "Your change could not be saved. Check the space left on the disk.",
+                        ));
+                    }
                     let switch = switch.downgrade();
                     glib::idle_add_local_once(move || {
                         if let Some(switch) = switch.upgrade() {
@@ -168,7 +177,7 @@ impl Folders {
                     });
                     return glib::Propagation::Stop;
                 }
-                if let Some(settings) = folders.settings() {
+                if let Some(settings) = folders.upgrade().and_then(|folders| folders.settings()) {
                     settings.folders_changed();
                 }
                 glib::Propagation::Proceed
@@ -188,9 +197,13 @@ impl Folders {
             "Take this folder out of the search",
         ))]);
         {
-            let folders = Rc::clone(self);
+            let folders = Rc::downgrade(self);
             let path = path.to_path_buf();
-            remove.connect_clicked(move |_| folders.remove_folder(&path));
+            remove.connect_clicked(move |_| {
+                if let Some(folders) = folders.upgrade() {
+                    folders.remove_folder(&path);
+                }
+            });
         }
         remove
     }

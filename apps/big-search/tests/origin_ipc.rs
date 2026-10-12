@@ -70,6 +70,31 @@ fn run_stdout(args: &[&str], home: &Path, xdg_storage_home: &Path, run: &Path) -
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn reindex(home: &Path, xdg_storage_home: &Path, run: &Path) {
+    assert!(
+        env_cmd(
+            &["reindex", home.to_str().unwrap()],
+            home,
+            xdg_storage_home,
+            run
+        )
+        .status()
+        .unwrap()
+        .success()
+    );
+}
+
+/// Start the daemon and return once it listens on `sock`.
+fn serve(home: &Path, xdg_storage_home: &Path, run: &Path, sock: &Path) -> KillOnDrop {
+    let daemon = KillOnDrop(
+        env_cmd(&["daemon"], home, xdg_storage_home, run)
+            .spawn()
+            .unwrap(),
+    );
+    wait_socket(sock);
+    daemon
+}
+
 #[test]
 fn register_created_then_query_origin() {
     let base = scratch::scratch_dir("bs-origin-ipc");
@@ -82,25 +107,10 @@ fn register_created_then_query_origin() {
     std::fs::write(&note, "remember this").unwrap();
     let note_path = note.to_string_lossy();
 
-    assert!(
-        env_cmd(
-            &["reindex", home.to_str().unwrap()],
-            &home,
-            &xdg_storage_home,
-            &run
-        )
-        .status()
-        .unwrap()
-        .success()
-    );
+    reindex(&home, &xdg_storage_home, &run);
 
     let sock = run.join("biglinux/indexd.sock");
-    let _daemon = KillOnDrop(
-        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
-            .spawn()
-            .unwrap(),
-    );
-    wait_socket(&sock);
+    let _daemon = serve(&home, &xdg_storage_home, &run, &sock);
 
     let register = format!(
         r#"{{"v":2,"cmd":"register_created","path":"{}","app_id":"big-text-editor"}}"#,
@@ -141,25 +151,10 @@ fn cli_exposes_origin_commands() {
     std::fs::write(&note, "remember this").unwrap();
     let note_path = note.to_str().unwrap();
 
-    assert!(
-        env_cmd(
-            &["reindex", home.to_str().unwrap()],
-            &home,
-            &xdg_storage_home,
-            &run
-        )
-        .status()
-        .unwrap()
-        .success()
-    );
+    reindex(&home, &xdg_storage_home, &run);
 
     let sock = run.join("biglinux/indexd.sock");
-    let _daemon = KillOnDrop(
-        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
-            .spawn()
-            .unwrap(),
-    );
-    wait_socket(&sock);
+    let _daemon = serve(&home, &xdg_storage_home, &run, &sock);
 
     let created = run_stdout(
         &["register-created", note_path, "big-text-editor"],

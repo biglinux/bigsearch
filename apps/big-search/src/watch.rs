@@ -6,19 +6,24 @@
 //! wakes us. New visible dirs get a watch + a scoped rescan. Events are
 //! coalesced over a short window, then reconciled by existence: present →
 //! upsert, gone → delete.
+mod content_backfill;
+mod event_batch;
+
 use crate::content;
 use crate::index::{ContentFields, Fields, content_fields, fields};
 use crate::origin;
 use crate::scan;
 use crate::state::{self, State};
 use anyhow::{Context, Result};
-use notify::event::{AccessKind, AccessMode, CreateKind, EventKind, ModifyKind, RenameMode};
+use content_backfill::{ContentBackfill, compact_when_worth_it, run_content_backfill_batch};
+use event_batch::{WatchBatch, ingest, observe_origin_batch};
+use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, recommended_watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 use tantivy::{Index, IndexWriter};
 
@@ -34,9 +39,6 @@ const HISTORY_PASS_TICK: Duration = Duration::from_millis(750);
 /// dropped and the loop rescans, as the kernel does when its own queue fills:
 /// a backup or a recursive copy must not queue its whole tree in memory.
 const MAX_QUEUED_EVENTS: usize = 16_384;
-/// Longest wait after content backfill batches keep failing (a full disk, a
-/// damaged index): the daemon must not wake every few seconds to fail again.
-const MAX_BACKFILL_RETRY: Duration = Duration::from_secs(600);
 pub const ACTIVITY_IDLE: u8 = 0;
 pub const ACTIVITY_INDEXING: u8 = 1;
 pub const ACTIVITY_BACKFILLING: u8 = 2;
@@ -154,231 +156,9 @@ pub enum WatchMessage {
     ControlCommand(WatchControlCommand),
 }
 
-struct WatchBatch {
-    paths: HashSet<PathBuf>,
-    origin_paths: Vec<PathBuf>,
-    origin_overflow: bool,
-    /// Files that may have just been saved, for the versions worker. Bounded,
-    /// because an unpacked archive must not grow a list the size of itself on a
-    /// machine with little memory.
-    history_paths: HashSet<PathBuf>,
-    /// Renames, kept as the pair the kernel reported. The destination alone is
-    /// not enough: the save that usually follows replaces the inode, and then
-    /// nothing connects the document to its own past.
-    history_renames: Vec<(PathBuf, PathBuf)>,
-}
-
-struct ContentBackfill {
-    batch_limit: usize,
-    idle_delay: Duration,
-    is_pending: bool,
-    /// Keyset position inside the current pass over the catalogue (`None` at
-    /// pass boundaries). Batches resume here instead of rescanning from the start.
-    cursor: content::CatalogCursor,
-    /// A change arrived while a pass was already running: run one more full
-    /// pass after the current one ends, so nothing behind the cursor is missed.
-    rescan_requested: bool,
-    /// Extract even files still inside the edit cooldown (a content search
-    /// wants them now). Reset when a pass completes with nothing deferred.
-    bypass_cooldown: bool,
-    /// All remaining pending files are inside their cooldown: sleep until the
-    /// earliest one becomes eligible instead of polling every idle tick.
-    snooze_until: Option<Instant>,
-    /// When the next batch is due: in a running pass, set from how long the
-    /// last batch took and how busy the machine is; before one, by the first
-    /// content search (see [`Self::warm`]). A deadline, not a delay: file
-    /// events and searches that arrive meanwhile must not keep pushing it back.
-    next_batch_at: Option<Instant>,
-    /// Shared gauge read by the IPC thread: files currently deferred by the
-    /// cooldown (the "content results may be incomplete" hint).
-    deferred_gauge: Arc<AtomicU64>,
-    /// A catalogue row was removed since the last orphan prune, so there may be
-    /// content documents left behind. Nothing else can create an orphan.
-    deletion_seen: bool,
-    /// Batches that failed in a row; each one doubles the wait before the next.
-    failures: u32,
-}
-
 struct ContentIndexWrite<'a> {
     index: &'a Index,
     writer: &'a mut Option<IndexWriter>,
-}
-
-impl ContentBackfill {
-    fn new(deferred_gauge: Arc<AtomicU64>) -> Self {
-        Self {
-            batch_limit: content::daemon_batch_limit(),
-            idle_delay: content::daemon_idle_delay(),
-            is_pending: false,
-            cursor: None,
-            rescan_requested: false,
-            bypass_cooldown: false,
-            snooze_until: None,
-            next_batch_at: None,
-            deferred_gauge,
-            // The first pass after a start prunes unconditionally: deletions may
-            // have happened while the daemon was down.
-            deletion_seen: true,
-            failures: 0,
-        }
-    }
-
-    /// A batch failed: try again later, waiting longer after each failure in a
-    /// row. A file change in between asks again at the normal cadence.
-    fn retry_after_failure(&mut self) {
-        self.request();
-        self.failures = self.failures.saturating_add(1);
-        let wait = self
-            .idle_delay
-            .saturating_mul(1 << self.failures.min(10))
-            .min(MAX_BACKFILL_RETRY);
-        self.snooze_until = Some(Instant::now() + wait);
-    }
-
-    fn note_deletion(&mut self) {
-        self.deletion_seen = true;
-    }
-
-    /// Whether to prune now, clearing the flag.
-    fn take_deletion_seen(&mut self) -> bool {
-        std::mem::replace(&mut self.deletion_seen, false)
-    }
-
-    fn request(&mut self) {
-        if self.is_pending {
-            self.rescan_requested = true;
-        } else {
-            self.is_pending = true;
-        }
-        // New work may be older than the deferred set: wake at the normal cadence.
-        self.snooze_until = None;
-    }
-
-    /// A content search happened: run a cooldown-free pass once the idle delay
-    /// has passed since the first search. A deadline: searches typed faster
-    /// than the delay must not keep pushing the pass back.
-    fn warm(&mut self) {
-        self.bypass_cooldown = true;
-        self.request();
-        self.next_batch_at
-            .get_or_insert_with(|| Instant::now() + self.idle_delay);
-    }
-
-    fn clear(&mut self) {
-        self.is_pending = false;
-    }
-
-    /// End-of-pass bookkeeping: `true` when the backfill is fully done, `false`
-    /// when a change arrived mid-pass and one more pass must run.
-    fn finish_pass(&mut self) -> bool {
-        self.cursor = None;
-        self.bypass_cooldown = false;
-        if self.rescan_requested {
-            self.rescan_requested = false;
-            return false;
-        }
-        self.clear();
-        true
-    }
-
-    /// End of a pass that deferred cooldown-protected files: stay pending and
-    /// sleep until the earliest one becomes eligible.
-    fn finish_pass_deferred(&mut self, retry_in: Duration) {
-        self.cursor = None;
-        self.bypass_cooldown = false;
-        if self.rescan_requested {
-            self.rescan_requested = false;
-            return; // fresh work exists; the next idle tick runs at normal cadence
-        }
-        self.snooze_until = Some(Instant::now() + retry_in.max(self.idle_delay));
-    }
-
-    fn should_run_when_idle(&self, paused: &AtomicBool) -> bool {
-        self.is_pending && !paused.load(Ordering::Relaxed)
-    }
-
-    /// How long the watcher may sleep before the next backfill attempt.
-    fn wait_before_batch(&self) -> Duration {
-        match self.snooze_until {
-            Some(deadline) => deadline
-                .saturating_duration_since(Instant::now())
-                .max(self.idle_delay),
-            None => self.next_batch_at.map_or(self.idle_delay, |at| {
-                at.saturating_duration_since(Instant::now())
-            }),
-        }
-    }
-}
-
-impl WatchBatch {
-    fn new() -> Self {
-        Self {
-            paths: HashSet::new(),
-            origin_paths: Vec::new(),
-            origin_overflow: false,
-            history_paths: HashSet::new(),
-            history_renames: Vec::new(),
-        }
-    }
-
-    fn add_origin_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        if self.origin_overflow || !origin::settings().watch_enabled {
-            return;
-        }
-        for path in paths {
-            if self.origin_paths.len() >= origin::settings().max_batch {
-                self.origin_paths.clear();
-                self.origin_overflow = true;
-                return;
-            }
-            self.origin_paths.push(path);
-        }
-    }
-
-    /// Most files one batch offers the versions worker.
-    ///
-    /// Unpacking an archive of ten thousand documents is one batch; the worker
-    /// would get to them through the catalogue pass anyway, and a list that size
-    /// is memory a small machine does not have to spare.
-    const HISTORY_LIMIT: usize = 512;
-
-    /// Note what may have been saved, and the renames as pairs.
-    fn add_history(&mut self, kind: EventKind, paths: &[PathBuf]) {
-        if let EventKind::Modify(ModifyKind::Name(RenameMode::Both)) = kind
-            && let (Some(from), Some(to)) = (paths.first(), paths.get(1))
-        {
-            self.history_renames.push((from.clone(), to.clone()));
-            self.remember_history_path(to.clone());
-            return;
-        }
-        // A close after writing is the strongest signal a save finished. Create
-        // and rename-to cover the file that arrives already written (from a
-        // download, from another folder) and never sees a close at all.
-        let worth_a_version = matches!(
-            kind,
-            EventKind::Access(notify::event::AccessKind::Close(
-                notify::event::AccessMode::Write
-            )) | EventKind::Create(_)
-                | EventKind::Modify(ModifyKind::Name(RenameMode::To | RenameMode::Any))
-        );
-        if !worth_a_version {
-            return;
-        }
-        for path in paths {
-            self.remember_history_path(path.clone());
-        }
-    }
-
-    fn remember_history_path(&mut self, path: PathBuf) {
-        // Asked here rather than in the worker: on an ordinary home folder most
-        // of what changes is not a document, and each one that is not costs a
-        // clone, a channel send and a place in the worker's queue to find out.
-        if self.history_paths.len() < Self::HISTORY_LIMIT
-            && crate::history::may_be_a_document(&path)
-        {
-            self.history_paths.insert(path);
-        }
-    }
 }
 
 /// Watch `roots` and keep `index` (and the `state` cache) in sync until the channel
@@ -401,12 +181,61 @@ pub fn run(
     // (15 MB) rather than the 64 MB bulk-reindex budget: incremental batches are
     // tiny (debounced fs events), and this is the dominant term in steady-state RSS.
     let mut writer = Some(crate::index::background_writer(&index).context("index writer")?);
-    let mut content_writer = None;
 
     // Compiled once: every event is tested against the same rules the scan walk
     // uses, so the two cannot disagree about what belongs in the index.
     let path_scope = scan::Scope::compile();
 
+    let (mut watches, queued, overflowed) = start_inotify(tx, &runtime.unwatched_dirs)?;
+    let initial_dirs = watch_initial_dirs(&mut watches, scope.roots, scope.initial_dirs);
+    catch_up_after_walk(
+        &mut writer,
+        &f,
+        &mut watches,
+        &mut state,
+        &path_scope,
+        &initial_dirs,
+        scope.walk_started,
+    )?;
+    drop(initial_dirs);
+    let origin_writer = open_origin_writer();
+    let history_tx = spawn_history_worker(&history);
+
+    let mut content_backfill = ContentBackfill::new(runtime.pending_content.clone());
+    content_backfill.request();
+    runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
+
+    WatchLoop {
+        content_backfill,
+        history_pass_done: false,
+        history_cursor: None,
+        history_tx,
+        origin_writer,
+        watches,
+        overflowed,
+        queued,
+        path_scope,
+        content_writer: None,
+        writer,
+        content_fields,
+        f,
+        rx,
+        runtime,
+        state,
+        roots: scope.roots,
+        content_index,
+        index,
+    }
+    .run_until_closed()
+}
+
+/// Start inotify. Returns the watches, the count of events the callback has
+/// sent and the loop not yet received, and the flag it raises when it had to
+/// drop one.
+fn start_inotify(
+    tx: Sender<WatchMessage>,
+    unwatched_dirs: &Arc<AtomicU64>,
+) -> Result<(Watches, Arc<AtomicUsize>, Arc<AtomicBool>)> {
     let fs_tx = tx;
     let queued = Arc::new(AtomicUsize::new(0));
     let overflowed = Arc::new(AtomicBool::new(false));
@@ -428,20 +257,28 @@ pub fn run(
         let _ = fs_tx.send(WatchMessage::Fs(watcher_result));
     })
     .context("inotify init")?;
-    let mut watches = Watches {
+    let watches = Watches {
         watcher,
-        failed: Arc::clone(&runtime.unwatched_dirs),
+        failed: Arc::clone(unwatched_dirs),
     };
+    Ok((watches, queued, overflowed))
+}
 
+/// Watch every folder the startup walk found (every visible folder under
+/// `roots` when it found none) and return that list.
+fn watch_initial_dirs(
+    watches: &mut Watches,
+    roots: &[PathBuf],
+    initial_dirs: Vec<PathBuf>,
+) -> Vec<PathBuf> {
     let mut watched = 0usize;
-    let initial_dirs = if scope.initial_dirs.is_empty() {
-        scope
-            .roots
+    let initial_dirs = if initial_dirs.is_empty() {
+        roots
             .iter()
             .flat_map(|root| scan::visible_dirs(root))
             .collect()
     } else {
-        scope.initial_dirs
+        initial_dirs
     };
     for dir in &initial_dirs {
         if watches.watch(dir) {
@@ -455,42 +292,59 @@ pub fn run(
             "{unwatched} directories could not be watched; raise fs.inotify.max_user_watches"
         );
     }
-    // What changed between the startup walk reaching a folder and its watch:
-    // a folder whose entries changed since the walk began is compared again,
-    // its entries on disk and in the catalogue. Only its direct entries; a new
-    // folder among them is walked whole, a vanished one leaves with its tree.
-    if let Some(walk_started) = scope.walk_started {
-        let since = walk_started - Duration::from_secs(1);
-        let mut missed = HashSet::new();
-        for dir in &initial_dirs {
-            let changed = std::fs::symlink_metadata(dir)
-                .and_then(|metadata| metadata.modified())
-                .is_ok_and(|modified| modified >= since);
-            if changed && let Ok(entries) = std::fs::read_dir(dir) {
-                missed.extend(entries.flatten().map(|entry| entry.path()));
-                missed.extend(state.children(dir)?);
-            }
-        }
-        if !missed.is_empty() {
-            let outcome = reconcile(
-                active_index_writer(&mut writer),
-                &f,
-                &mut watches,
-                &mut state,
-                &path_scope,
-                missed,
-            )?;
-            if outcome.index_changed {
-                active_index_writer(&mut writer)
-                    .commit()
-                    .context("commit startup catch-up")?;
-            }
-            if outcome.any() {
-                state.persist()?;
-            }
+    initial_dirs
+}
+
+/// What changed between the startup walk reaching a folder and its watch:
+/// a folder whose entries changed since the walk began is compared again,
+/// its entries on disk and in the catalogue. Only its direct entries; a new
+/// folder among them is walked whole, a vanished one leaves with its tree.
+fn catch_up_after_walk(
+    writer: &mut Option<IndexWriter>,
+    f: &Fields,
+    watches: &mut Watches,
+    state: &mut State,
+    path_scope: &scan::Scope,
+    initial_dirs: &[PathBuf],
+    walk_started: Option<std::time::SystemTime>,
+) -> Result<()> {
+    let Some(walk_started) = walk_started else {
+        return Ok(());
+    };
+    let since = walk_started - Duration::from_secs(1);
+    let mut missed = HashSet::new();
+    for dir in initial_dirs {
+        let changed = std::fs::symlink_metadata(dir)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified >= since);
+        if changed && let Ok(entries) = std::fs::read_dir(dir) {
+            missed.extend(entries.flatten().map(|entry| entry.path()));
+            missed.extend(state.children(dir)?);
         }
     }
-    drop(initial_dirs);
+    if !missed.is_empty() {
+        let outcome = reconcile(
+            active_index_writer(writer),
+            f,
+            watches,
+            state,
+            path_scope,
+            missed,
+        )?;
+        if outcome.index_changed {
+            active_index_writer(writer)
+                .commit()
+                .context("commit startup catch-up")?;
+        }
+        if outcome.any() {
+            state.persist()?;
+        }
+    }
+    Ok(())
+}
+
+/// The origin database, with what the browsers already know imported into it.
+fn open_origin_writer() -> origin::OriginWriter {
     let origin_writer = match origin::OriginWriter::open(crate::config::origin_db_path()) {
         Ok(writer) => writer,
         Err(e) => {
@@ -501,421 +355,345 @@ pub fn run(
     // What the browsers already know about where files came from, read once at
     // start. Off unless the person turned it on; see `browser_downloads`.
     crate::browser_downloads::import(&origin_writer);
-    // Earlier versions of documents live in their own thread, fed by this one.
-    // Separate on purpose: a version that cannot be written must never delay the
-    // search, and the store it writes to is the person's data rather than a
-    // cache this service can rebuild.
+    origin_writer
+}
+
+/// Earlier versions of documents live in their own thread, fed by this one.
+/// Separate on purpose: a version that cannot be written must never delay the
+/// search, and the store it writes to is the person's data rather than a
+/// cache this service can rebuild.
+fn spawn_history_worker(
+    history: &crate::history::SharedHistory,
+) -> Sender<crate::history::HistoryEvent> {
     let (history_tx, history_rx) = std::sync::mpsc::channel::<crate::history::HistoryEvent>();
-    let history_store = std::sync::Arc::clone(&history);
+    let history_store = std::sync::Arc::clone(history);
     std::thread::Builder::new()
         .name("history".into())
         .spawn(move || crate::history::run_worker(&history_store, history_rx))
         .ok();
-    // Where the pass over the catalogue has got to. It covers what no event
-    // could: the moments the service was not running, and the bursts that
-    // overflowed the kernel's queue.
-    let mut history_cursor: Option<String> = None;
-    let mut history_pass_done = false;
+    history_tx
+}
 
-    let mut content_backfill = ContentBackfill::new(runtime.pending_content.clone());
-    content_backfill.request();
-    runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
+/// What the watcher loop owns between messages.
+struct WatchLoop<'a> {
+    content_backfill: ContentBackfill,
+    history_pass_done: bool,
+    /// Where the pass over the catalogue has got to. It covers what no event
+    /// could: the moments the service was not running, and the bursts that
+    /// overflowed the kernel's queue.
+    history_cursor: Option<String>,
+    history_tx: Sender<crate::history::HistoryEvent>,
+    origin_writer: origin::OriginWriter,
+    watches: Watches,
+    /// Set by the inotify callback when it dropped an event.
+    overflowed: Arc<AtomicBool>,
+    /// Events the inotify callback sent and the loop has not received yet.
+    queued: Arc<AtomicUsize>,
+    path_scope: scan::Scope,
+    content_writer: Option<IndexWriter>,
+    writer: Option<IndexWriter>,
+    content_fields: ContentFields,
+    f: Fields,
+    rx: Receiver<WatchMessage>,
+    runtime: WatchRuntime,
+    state: State,
+    roots: &'a [PathBuf],
+    content_index: Index,
+    index: Index,
+}
 
-    loop {
-        let watch_message = if content_backfill.should_run_when_idle(&runtime.paused) {
-            match rx.recv_timeout(content_backfill.wait_before_batch()) {
-                Ok(message) => message,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    content_backfill.snooze_until = None; // slept through the cooldown
-                    content_backfill.next_batch_at = None;
-                    // One page of the catalogue per idle turn, and only while
-                    // the machine has nothing better to do.
-                    if !history_pass_done {
-                        history_pass_done =
-                            send_history_page(&state, &history_tx, &mut history_cursor);
-                    }
-                    runtime
-                        .activity
-                        .store(ACTIVITY_BACKFILLING, Ordering::Relaxed);
-                    match run_content_backfill_batch(
-                        &content_index,
-                        &mut content_writer,
-                        &content_fields,
-                        &mut content_backfill,
-                    ) {
-                        // Nothing left to read: the time to tidy the indexes, unless
-                        // the charge is someone else's.
-                        Ok(true) if !crate::throttle::on_battery() => {
-                            content_backfill.failures = 0;
-                            compact_when_worth_it(&index, active_index_writer(&mut writer), "name");
-                            match open_content_writer(&content_index, &mut content_writer) {
-                                Ok(content) => {
-                                    compact_when_worth_it(&content_index, content, "content")
-                                }
-                                Err(e) => log::warn!("content index not compacted: {e:#}"),
-                            }
-                        }
-                        Ok(_) => content_backfill.failures = 0,
-                        Err(e) => {
-                            log::error!("content backfill failed: {e:#}");
-                            // A writer that failed mid-batch is not trusted for the next one.
-                            let _ = close_index_writer(&mut content_writer);
-                            content_backfill.retry_after_failure();
-                        }
-                    }
-                    runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
-                    continue;
+impl WatchLoop<'_> {
+    fn run_until_closed(mut self) -> Result<()> {
+        while let Some(message) = self.next_message() {
+            self.handle(message)?;
+        }
+        Ok(())
+    }
+
+    /// Wait for the next message, doing idle work (a content backfill batch,
+    /// a page of the versions pass) each time the wait runs out. `None` once
+    /// the channel is closed.
+    fn next_message(&mut self) -> Option<WatchMessage> {
+        loop {
+            if self
+                .content_backfill
+                .should_run_when_idle(&self.runtime.paused)
+            {
+                match self
+                    .rx
+                    .recv_timeout(self.content_backfill.wait_before_batch())
+                {
+                    Ok(message) => return Some(message),
+                    Err(RecvTimeoutError::Timeout) => self.idle_backfill_turn(),
+                    Err(RecvTimeoutError::Disconnected) => return None,
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        } else if history_pass_done || runtime.paused.load(Ordering::Relaxed) {
-            // Paused stops the versions pass too; Resume picks it up.
-            match rx.recv() {
-                Ok(message) => message,
-                Err(_) => break,
-            }
-        } else {
-            // The pass over the catalogue also runs when there is no indexing
-            // left to do, which is most of the time: blocking on the channel
-            // would make the first version of anything wait for the next file
-            // to change.
-            match rx.recv_timeout(HISTORY_PASS_TICK) {
-                Ok(message) => message,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    history_pass_done = send_history_page(&state, &history_tx, &mut history_cursor);
-                    continue;
+            } else if self.history_pass_done || self.runtime.paused.load(Ordering::Relaxed) {
+                // Paused stops the versions pass too; Resume picks it up.
+                return self.rx.recv().ok();
+            } else {
+                // The pass over the catalogue also runs when there is no indexing
+                // left to do, which is most of the time: blocking on the channel
+                // would make the first version of anything wait for the next file
+                // to change.
+                match self.rx.recv_timeout(HISTORY_PASS_TICK) {
+                    Ok(message) => return Some(message),
+                    Err(RecvTimeoutError::Timeout) => {
+                        self.history_pass_done = send_history_page(
+                            &self.state,
+                            &self.history_tx,
+                            &mut self.history_cursor,
+                        );
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return None,
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
-        };
-        let first = match watch_message {
+        }
+    }
+
+    /// Nothing arrived before the next backfill batch was due: one page of the
+    /// versions pass, one content batch, and compaction once a pass is done.
+    fn idle_backfill_turn(&mut self) {
+        self.content_backfill.snooze_until = None; // slept through the cooldown
+        self.content_backfill.next_batch_at = None;
+        // One page of the catalogue per idle turn, and only while
+        // the machine has nothing better to do.
+        if !self.history_pass_done {
+            self.history_pass_done =
+                send_history_page(&self.state, &self.history_tx, &mut self.history_cursor);
+        }
+        self.runtime
+            .activity
+            .store(ACTIVITY_BACKFILLING, Ordering::Relaxed);
+        match run_content_backfill_batch(
+            &self.content_index,
+            &mut self.content_writer,
+            &self.content_fields,
+            &mut self.content_backfill,
+        ) {
+            // Nothing left to read: the time to tidy the indexes, unless
+            // the charge is someone else's.
+            Ok(true) if !crate::throttle::on_battery() => {
+                self.content_backfill.failures = 0;
+                compact_when_worth_it(&self.index, active_index_writer(&mut self.writer), "name");
+                match open_content_writer(&self.content_index, &mut self.content_writer) {
+                    Ok(content) => compact_when_worth_it(&self.content_index, content, "content"),
+                    Err(e) => log::warn!("content index not compacted: {e:#}"),
+                }
+            }
+            Ok(_) => self.content_backfill.failures = 0,
+            Err(e) => {
+                log::error!("content backfill failed: {e:#}");
+                // A writer that failed mid-batch is not trusted for the next one.
+                let _ = close_index_writer(&mut self.content_writer);
+                self.content_backfill.retry_after_failure();
+            }
+        }
+        self.runtime
+            .activity
+            .store(ACTIVITY_IDLE, Ordering::Relaxed);
+    }
+
+    fn handle(&mut self, message: WatchMessage) -> Result<()> {
+        let first = match message {
             WatchMessage::ControlCommand(WatchControlCommand::WarmContent) => {
-                content_backfill.warm();
-                continue;
+                self.content_backfill.warm();
+                return Ok(());
             }
             WatchMessage::ControlCommand(WatchControlCommand::ReindexPath(path)) => {
-                // ipc.rs refuses these with an answer; this is the backstop for
-                // the sources having changed since.
-                if runtime.paused.load(Ordering::Relaxed)
-                    || !path.is_absolute()
-                    || !scope.roots.iter().any(|root| path.starts_with(root))
-                {
-                    log::warn!("reindex of {} refused: outside the roots", path.display());
-                    continue;
-                }
-                runtime.activity.store(ACTIVITY_INDEXING, Ordering::Relaxed);
-                // Forgetting the path is what forces the work: the reconcile
-                // below then sees it as new instead of unchanged.
-                state.remove(&path);
-                // The content index keeps its own record of the same path, and
-                // the only reason to ask for a forced reindex is a change the
-                // file's size and modification time do not show, such as a tag. Left
-                // in place, that record makes the content pass skip the file and
-                // the tag never becomes searchable.
-                content::forget_content_state(&path).context("forget content state")?;
-                let mut forced = std::collections::HashSet::new();
-                forced.insert(path);
-                let outcome = reconcile(
-                    active_index_writer(&mut writer),
-                    &f,
-                    &mut watches,
-                    &mut state,
-                    &path_scope,
-                    forced,
-                )?;
-                if outcome.index_changed {
-                    active_index_writer(&mut writer)
-                        .commit()
-                        .context("commit forced reindex")?;
-                    recycle_background_writer(&index, &mut writer)
-                        .context("recycle index writer")?;
-                }
-                if outcome.state_changed {
-                    state.persist()?;
-                }
-                content_backfill.request();
-                runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
-                continue;
+                return self.reindex_path(path);
             }
-            WatchMessage::ControlCommand(command) => {
-                if apply_control_command(
-                    command,
-                    active_index_writer(&mut writer),
-                    ContentIndexWrite {
-                        index: &content_index,
-                        writer: &mut content_writer,
-                    },
-                    &f,
-                    &mut state,
-                    scope.roots,
-                    &runtime,
-                    &mut watches,
-                )? {
-                    recycle_background_writer(&index, &mut writer)
-                        .context("recycle index writer")?;
-                    content_backfill.request();
-                    crate::throttle::release_idle_memory();
-                }
-                continue;
-            }
+            WatchMessage::ControlCommand(command) => return self.apply_control(command),
             WatchMessage::Fs(watcher_result) => {
-                queued.fetch_sub(1, Ordering::Relaxed);
+                self.queued.fetch_sub(1, Ordering::Relaxed);
                 watcher_result
             }
         };
-        if runtime.paused.load(Ordering::Relaxed) {
-            continue; // dropped while paused; Resume reconciles what was missed
+        if self.runtime.paused.load(Ordering::Relaxed) {
+            return Ok(()); // dropped while paused; Resume reconciles what was missed
         }
+        self.index_burst(first)
+    }
 
-        runtime.activity.store(ACTIVITY_INDEXING, Ordering::Relaxed);
+    fn reindex_path(&mut self, path: PathBuf) -> Result<()> {
+        // ipc.rs refuses these with an answer; this is the backstop for
+        // the sources having changed since.
+        if self.runtime.paused.load(Ordering::Relaxed)
+            || !path.is_absolute()
+            || !self.roots.iter().any(|root| path.starts_with(root))
+        {
+            log::warn!("reindex of {} refused: outside the roots", path.display());
+            return Ok(());
+        }
+        self.runtime
+            .activity
+            .store(ACTIVITY_INDEXING, Ordering::Relaxed);
+        // Forgetting the path is what forces the work: the reconcile
+        // below then sees it as new instead of unchanged.
+        self.state.remove(&path);
+        // The content index keeps its own record of the same path, and
+        // the only reason to ask for a forced reindex is a change the
+        // file's size and modification time do not show, such as a tag. Left
+        // in place, that record makes the content pass skip the file and
+        // the tag never becomes searchable.
+        content::forget_content_state(&path).context("forget content state")?;
+        let mut forced = std::collections::HashSet::new();
+        forced.insert(path);
+        let outcome = reconcile(
+            active_index_writer(&mut self.writer),
+            &self.f,
+            &mut self.watches,
+            &mut self.state,
+            &self.path_scope,
+            forced,
+        )?;
+        if outcome.index_changed {
+            active_index_writer(&mut self.writer)
+                .commit()
+                .context("commit forced reindex")?;
+            recycle_background_writer(&self.index, &mut self.writer)
+                .context("recycle index writer")?;
+        }
+        if outcome.state_changed {
+            self.state.persist()?;
+        }
+        self.content_backfill.request();
+        self.runtime
+            .activity
+            .store(ACTIVITY_IDLE, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn apply_control(&mut self, command: WatchControlCommand) -> Result<()> {
+        if apply_control_command(
+            command,
+            active_index_writer(&mut self.writer),
+            ContentIndexWrite {
+                index: &self.content_index,
+                writer: &mut self.content_writer,
+            },
+            &self.f,
+            &mut self.state,
+            self.roots,
+            &self.runtime,
+            &mut self.watches,
+        )? {
+            recycle_background_writer(&self.index, &mut self.writer)
+                .context("recycle index writer")?;
+            self.content_backfill.request();
+            crate::throttle::release_idle_memory();
+        }
+        Ok(())
+    }
+
+    /// Index a burst of filesystem events that begins with `first`, then run
+    /// the control command that ended the burst early, if one did.
+    fn index_burst(&mut self, first: notify::Result<notify::Event>) -> Result<()> {
+        self.runtime
+            .activity
+            .store(ACTIVITY_INDEXING, Ordering::Relaxed);
         let mut batch = WatchBatch::new();
         let mut rescan = ingest(&mut batch, first);
-        // Coalesce a burst; a control command breaks the window and runs after the
-        // batch commits (no reordering of fs work, no lost command).
-        let mut deferred_control_command: Option<WatchControlCommand> = None;
+        let deferred_control_command = self.coalesce_burst(&mut batch, &mut rescan);
+        self.apply_batch(batch, rescan)?;
+        self.runtime
+            .activity
+            .store(ACTIVITY_IDLE, Ordering::Relaxed);
+        if let Some(command) = deferred_control_command {
+            match command {
+                WatchControlCommand::WarmContent => self.content_backfill.warm(),
+                command => self.apply_control(command)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Coalesce a burst; a control command breaks the window and runs after the
+    /// batch commits (no reordering of fs work, no lost command).
+    fn coalesce_burst(
+        &self,
+        batch: &mut WatchBatch,
+        rescan: &mut bool,
+    ) -> Option<WatchControlCommand> {
         let deadline = Instant::now() + DEBOUNCE;
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-            match rx.recv_timeout(remaining) {
+            match self.rx.recv_timeout(remaining) {
                 Ok(WatchMessage::Fs(event_result)) => {
-                    queued.fetch_sub(1, Ordering::Relaxed);
-                    rescan |= ingest(&mut batch, event_result);
+                    self.queued.fetch_sub(1, Ordering::Relaxed);
+                    *rescan |= ingest(batch, event_result);
                 }
-                Ok(WatchMessage::ControlCommand(command)) => {
-                    deferred_control_command = Some(command);
-                    break;
-                }
+                Ok(WatchMessage::ControlCommand(command)) => return Some(command),
                 Err(_) => break,
             }
         }
+        None
+    }
 
-        observe_origin_batch(&origin_writer, &batch);
+    /// Reconcile one coalesced batch, commit the name index and persist the
+    /// catalogue when they changed, and hand the saves it saw to the versions
+    /// worker.
+    fn apply_batch(&mut self, mut batch: WatchBatch, mut rescan: bool) -> Result<()> {
+        observe_origin_batch(&self.origin_writer, &batch);
         // Reconciled first, history second: only a file that reached a coherent
         // state is worth a version, and the search never waits on this.
         let history_paths = std::mem::take(&mut batch.history_paths);
         let history_renames = std::mem::take(&mut batch.history_renames);
-        rescan |= overflowed.swap(false, Ordering::Relaxed);
+        rescan |= self.overflowed.swap(false, Ordering::Relaxed);
         let mut outcome = reconcile(
-            active_index_writer(&mut writer),
-            &f,
-            &mut watches,
-            &mut state,
-            &path_scope,
+            active_index_writer(&mut self.writer),
+            &self.f,
+            &mut self.watches,
+            &mut self.state,
+            &self.path_scope,
             batch.paths,
         )?;
         for (from, to) in history_renames {
-            let _ = history_tx.send(crate::history::HistoryEvent::Renamed(from, to));
+            let _ = self
+                .history_tx
+                .send(crate::history::HistoryEvent::Renamed(from, to));
         }
         for path in history_paths {
-            let _ = history_tx.send(crate::history::HistoryEvent::Changed(path));
+            let _ = self
+                .history_tx
+                .send(crate::history::HistoryEvent::Changed(path));
         }
         if rescan {
-            // inotify queue overflowed → events were dropped. Re-walk to recover.
-            log::warn!("inotify overflow — full rescan");
-            // The versions worker cannot trust what it heard either, so its pass
-            // over the catalogue starts again from the top.
-            history_pass_done = false;
-            history_cursor = None;
-            outcome.absorb(scan::reconcile_inline(
-                active_index_writer(&mut writer),
-                &f,
-                &mut state,
-                scope.roots,
-                &mut |dir| {
-                    watches.watch(dir);
-                },
-            )?);
+            outcome.absorb(self.rescan_after_overflow()?);
         }
         if outcome.index_changed {
-            active_index_writer(&mut writer)
+            active_index_writer(&mut self.writer)
                 .commit()
                 .context("commit incremental")?;
-            recycle_background_writer(&index, &mut writer).context("recycle index writer")?;
+            recycle_background_writer(&self.index, &mut self.writer)
+                .context("recycle index writer")?;
         }
         if outcome.deleted {
-            content_backfill.note_deletion();
+            self.content_backfill.note_deletion();
         }
         if outcome.any() {
-            state.persist()?;
-            content_backfill.request();
+            self.state.persist()?;
+            self.content_backfill.request();
             crate::throttle::release_idle_memory();
         }
-        runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
-        if let Some(command) = deferred_control_command {
-            match command {
-                WatchControlCommand::WarmContent => content_backfill.warm(),
-                command => {
-                    if apply_control_command(
-                        command,
-                        active_index_writer(&mut writer),
-                        ContentIndexWrite {
-                            index: &content_index,
-                            writer: &mut content_writer,
-                        },
-                        &f,
-                        &mut state,
-                        scope.roots,
-                        &runtime,
-                        &mut watches,
-                    )? {
-                        recycle_background_writer(&index, &mut writer)
-                            .context("recycle index writer")?;
-                        content_backfill.request();
-                        crate::throttle::release_idle_memory();
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// One batch of the content backfill; `true` when it finished a pass with
-/// nothing left to read.
-fn run_content_backfill_batch(
-    content_index: &Index,
-    writer: &mut Option<IndexWriter>,
-    f: &ContentFields,
-    content_backfill: &mut ContentBackfill,
-) -> Result<bool> {
-    let started = Instant::now();
-    crate::throttle::begin_cpu_window();
-    // Only when something was actually deleted. Proving "no orphans" still costs
-    // a full scan of the content namespace, and at the start of every pass it
-    // would be paid after every burst of file changes.
-    if content_backfill.cursor.is_none() && content_backfill.take_deletion_seen() {
-        close_index_writer(writer).context("close content writer before prune")?;
-        match content::prune_orphaned_content(content_index, content::ORPHAN_PRUNE_STEADY_LIMIT) {
-            Ok((0, _)) => {}
-            Ok((removed, more)) => {
-                log::info!(
-                    "content prune: dropped {removed} document(s) for deleted files{}",
-                    if more { ", more remain" } else { "" }
-                );
-                // The prune runs at a pass's start only: ask for another pass,
-                // or a large deleted tree would leave orphans until a restart.
-                if more {
-                    content_backfill.note_deletion();
-                    content_backfill.request();
-                }
-            }
-            Err(e) => log::warn!("content prune failed: {e:#}"),
-        }
+        Ok(())
     }
 
-    let cooldown = if content_backfill.bypass_cooldown {
-        Duration::ZERO
-    } else {
-        crate::settings::content_cooldown()
-    };
-    let (batch, next_cursor) = content::pending_catalog_batch_after(
-        content_backfill.cursor.take(),
-        content_backfill.batch_limit,
-        cooldown,
-    )?;
-    content_backfill.cursor = next_cursor;
-    content_backfill
-        .deferred_gauge
-        .store(batch.deferred as u64, Ordering::Relaxed);
-    content::record_skipped_candidates(&batch.non_candidates)
-        .context("record policy-skipped entries")?;
-
-    let processed = if batch.files.is_empty() {
-        None
-    } else {
-        let attempted = batch.files.len();
-        let indexed = content::index_content_limited_with_writer(
-            open_content_writer(content_index, writer)?,
-            f,
-            batch.files,
-            Some(content_backfill.batch_limit),
-        )?;
-        crate::throttle::release_idle_memory();
-        Some((attempted, indexed))
-    };
-    let work = started.elapsed();
-    // Mid-pass the writer stays open, so a batch costs its own commit and not a
-    // wait for every merge the pass has started so far; the rest before the
-    // next one follows how long this one took and how busy the machine is.
-    let pace = batch.has_more.then(|| crate::throttle::backfill_pace(work));
-    if let Some((attempted, indexed)) = processed {
-        let next = pace.map_or_else(String::new, |(load, pause)| {
-            format!(", {load:?}: next batch in {} ms", pause.as_millis())
-        });
-        log::info!(
-            "content backfill: processed {attempted} files, indexed {indexed} bodies in {} ms{next} (limit {} files / {} MiB)",
-            work.as_millis(),
-            content_backfill.batch_limit,
-            content::daemon_batch_byte_limit() / (1 << 20)
-        );
+    /// inotify queue overflowed → events were dropped. Re-walk to recover.
+    fn rescan_after_overflow(&mut self) -> Result<scan::ReconcileOutcome> {
+        log::warn!("inotify overflow — full rescan");
+        // The versions worker cannot trust what it heard either, so its pass
+        // over the catalogue starts again from the top.
+        self.history_pass_done = false;
+        self.history_cursor = None;
+        scan::reconcile_inline(
+            active_index_writer(&mut self.writer),
+            &self.f,
+            &mut self.state,
+            self.roots,
+            &mut |dir| {
+                self.watches.watch(dir);
+            },
+        )
     }
-    if let Some((_, pause)) = pace {
-        content_backfill.next_batch_at = Some(Instant::now() + pause);
-        return Ok(false);
-    }
-    close_index_writer(writer).context("close content writer")?;
-    crate::throttle::release_idle_memory();
-    if batch.deferred > 0 {
-        // Only cooldown-protected files remain: sleep until the earliest one
-        // becomes eligible (or a content search warms the backfill sooner).
-        let retry_in = batch.retry_in.unwrap_or(content_backfill.idle_delay);
-        log::info!(
-            "content backfill: {} file(s) deferred by edit cooldown; retry in ~{}s",
-            batch.deferred,
-            retry_in.as_secs()
-        );
-        content_backfill.finish_pass_deferred(retry_in);
-        return Ok(false);
-    }
-    if content_backfill.finish_pass() {
-        content_backfill.deferred_gauge.store(0, Ordering::Relaxed);
-        log::info!("content backfill: complete");
-        crate::index::mark_content_state_synced(&crate::config::content_index_dir())
-            .context("mark content index synced")?;
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-/// Merge every segment of `index` into one when enough has changed (see
-/// [`crate::index::worth_compacting`]); short of that, merge the small segments
-/// that piled up beside the largest into one. Each segment costs a cold query
-/// its own disk reads, and joining the small ones costs a fraction of a full
-/// merge.
-///
-/// The writer's merge thread does the work, at the indexer's idle priority, and
-/// publishes the result itself; nothing waits for it here, and whoever closes
-/// the writer next waits for it to end. A merge already running on one of the
-/// segments makes tantivy refuse this one, which the next finished pass asks
-/// again.
-fn compact_when_worth_it(index: &Index, writer: &mut IndexWriter, label: &str) {
-    let Ok(metas) = index.searchable_segment_metas() else {
-        return;
-    };
-    let segments: Vec<(u32, u32)> = metas
-        .iter()
-        .map(|meta| (meta.max_doc(), meta.num_deleted_docs()))
-        .collect();
-    let ids: Vec<_> = if crate::index::worth_compacting(&segments) {
-        log::info!("compacting the {label} index: {} segments", metas.len());
-        metas.iter().map(|meta| meta.id()).collect()
-    } else if metas.len() >= 3 {
-        let largest = metas
-            .iter()
-            .max_by_key(|meta| meta.max_doc())
-            .map(|meta| meta.id());
-        log::info!(
-            "joining the {} small segments of the {label} index",
-            metas.len() - 1
-        );
-        metas
-            .iter()
-            .map(|meta| meta.id())
-            .filter(|id| Some(*id) != largest)
-            .collect()
-    } else {
-        return;
-    };
-    drop(writer.merge(&ids));
 }
 
 fn active_index_writer(writer: &mut Option<IndexWriter>) -> &mut IndexWriter {
@@ -986,71 +764,43 @@ fn apply_control_command(
         // Handled in the loop, where the reconcile machinery lives; it never
         // reaches this fallback.
         WatchControlCommand::ReindexPath(_) => Ok(false),
-        WatchControlCommand::Rebuild => {
-            runtime.activity.store(ACTIVITY_INDEXING, Ordering::Relaxed);
-            log::info!("rebuild requested — clearing index and re-indexing");
-            writer
-                .delete_all_documents()
-                .context("rebuild clear index")?;
-            open_content_writer(content.index, content.writer)?
-                .delete_all_documents()
-                .context("rebuild clear content index")?;
-            active_index_writer(content.writer)
-                .commit()
-                .context("commit content index rebuild clear")?;
-            close_index_writer(content.writer)
-                .context("close content writer after rebuild clear")?;
-            state.clear();
-            content::clear_content_state().context("clear content state for rebuild")?;
-            scan::reconcile_inline(writer, f, state, roots, &mut |dir| {
-                watches.watch(dir);
-            })?;
-            // The clear above must reach disk even when the walk found nothing.
-            writer.commit().context("commit rebuild")?;
-            state.persist()?;
-            runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
-            Ok(true)
-        }
+        WatchControlCommand::Rebuild => rebuild(writer, content, f, state, roots, runtime, watches),
     }
 }
 
-/// Add a batch's paths; returns whether a queue overflow was signalled.
-fn ingest(batch: &mut WatchBatch, watcher_result: notify::Result<notify::Event>) -> bool {
-    match watcher_result {
-        Ok(event) => {
-            let rescan = event.need_rescan();
-            batch.add_origin_paths(origin_paths_for_event(event.kind, &event.paths));
-            batch.add_history(event.kind, &event.paths);
-            for p in event.paths {
-                batch.paths.insert(p);
-            }
-            rescan
-        }
-        Err(_) => false,
-    }
-}
-
-fn observe_origin_batch(origin_writer: &origin::OriginWriter, batch: &WatchBatch) {
-    if batch.origin_overflow {
-        log::debug!("origin watcher batch exceeded limit; skipping origin heuristics");
-        return;
-    }
-    for path in &batch.origin_paths {
-        origin_writer.observe_recent_path(path);
-    }
-}
-
-fn origin_paths_for_event(kind: EventKind, paths: &[PathBuf]) -> Vec<PathBuf> {
-    match kind {
-        EventKind::Create(CreateKind::Any | CreateKind::File | CreateKind::Other) => paths.to_vec(),
-        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-            paths.get(1).into_iter().cloned().collect()
-        }
-        EventKind::Modify(ModifyKind::Name(
-            RenameMode::Any | RenameMode::To | RenameMode::Other,
-        )) => paths.to_vec(),
-        _ => Vec::new(),
-    }
+/// Wipe the name index, the content index and both catalogues, re-index names
+/// from scratch and commit, even when the walk found nothing.
+fn rebuild(
+    writer: &mut IndexWriter,
+    content: ContentIndexWrite<'_>,
+    f: &Fields,
+    state: &mut State,
+    roots: &[PathBuf],
+    runtime: &WatchRuntime,
+    watches: &mut Watches,
+) -> Result<bool> {
+    runtime.activity.store(ACTIVITY_INDEXING, Ordering::Relaxed);
+    log::info!("rebuild requested — clearing index and re-indexing");
+    writer
+        .delete_all_documents()
+        .context("rebuild clear index")?;
+    open_content_writer(content.index, content.writer)?
+        .delete_all_documents()
+        .context("rebuild clear content index")?;
+    active_index_writer(content.writer)
+        .commit()
+        .context("commit content index rebuild clear")?;
+    close_index_writer(content.writer).context("close content writer after rebuild clear")?;
+    state.clear();
+    content::clear_content_state().context("clear content state for rebuild")?;
+    scan::reconcile_inline(writer, f, state, roots, &mut |dir| {
+        watches.watch(dir);
+    })?;
+    // The clear above must reach disk even when the walk found nothing.
+    writer.commit().context("commit rebuild")?;
+    state.persist()?;
+    runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
+    Ok(true)
 }
 
 /// Apply one coalesced batch. The outcome says whether the name index needs a
@@ -1109,20 +859,10 @@ fn reconcile(
                     })?;
                 outcome.absorb(subtree_outcome);
             }
-        } else if recorded.is_some() && (gone || out_of_scope) {
-            // An unplugged removable or network source keeps its catalogue;
-            // its files are reported as offline, not deleted.
-            if gone
-                && offline_sources
-                    .get_or_insert_with(crate::query::OfflineSources::default)
-                    .is_retained_offline(&path)
-            {
-                continue;
-            }
-            // A folder moved away, to the trash included, is one event naming
-            // the folder and none for what it held: its whole tree goes.
-            scan::delete_tree(writer, f, &path);
-            state.remove_tree(&path);
+        } else if recorded.is_some()
+            && (gone || out_of_scope)
+            && evict(writer, f, state, &path, gone, &mut offline_sources)
+        {
             outcome.index_changed = true;
             outcome.state_changed = true;
             outcome.deleted = true;
@@ -1131,6 +871,32 @@ fn reconcile(
         // disk going away): nothing to drop on that evidence.
     }
     Ok(outcome)
+}
+
+/// Drop a catalogued path that vanished or left the scope, with its tree.
+/// `false` when it is kept: a vanished path on an unplugged source.
+fn evict(
+    writer: &IndexWriter,
+    f: &Fields,
+    state: &mut State,
+    path: &Path,
+    gone: bool,
+    offline_sources: &mut Option<crate::query::OfflineSources>,
+) -> bool {
+    // An unplugged removable or network source keeps its catalogue;
+    // its files are reported as offline, not deleted.
+    if gone
+        && offline_sources
+            .get_or_insert_with(crate::query::OfflineSources::default)
+            .is_retained_offline(path)
+    {
+        return false;
+    }
+    // A folder moved away, to the trash included, is one event naming
+    // the folder and none for what it held: its whole tree goes.
+    scan::delete_tree(writer, f, path);
+    state.remove_tree(path);
+    true
 }
 
 /// Offer the versions worker one page of the catalogue.
@@ -1165,74 +931,4 @@ fn send_history_page(
         let _ = history.send(crate::history::HistoryEvent::Catalogued(documents));
     }
     done
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Searches typed faster than the idle delay must not keep restarting it,
-    /// or the bodies they ask for are never extracted.
-    #[test]
-    fn repeated_warm_keeps_the_deadline() {
-        let mut backfill = ContentBackfill::new(Arc::new(AtomicU64::new(0)));
-        backfill.warm();
-        let first = backfill.wait_before_batch();
-        std::thread::sleep(Duration::from_millis(20));
-        backfill.warm();
-        assert!(backfill.wait_before_batch() < first);
-    }
-
-    /// The merge is left running on the writer's merge thread; it must still
-    /// land, and an index with nothing to tidy must be left alone.
-    #[test]
-    fn compaction_merges_into_one_segment() {
-        let dir = std::env::temp_dir().join(format!("bs-compact-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        let index = crate::index::open_or_create(&dir).unwrap();
-        let f = fields(&index).unwrap();
-        let mut writer = crate::index::background_writer(&index).unwrap();
-        for n in 0..4 {
-            let path = std::path::PathBuf::from(format!("/docs/{n}.md"));
-            crate::scan::add_name_only(&writer, &f, &path, None).unwrap();
-            writer.commit().unwrap();
-        }
-        assert_eq!(index.searchable_segment_ids().unwrap().len(), 4);
-
-        compact_when_worth_it(&index, &mut writer, "test");
-        writer.wait_merging_threads().unwrap();
-        assert_eq!(index.searchable_segment_ids().unwrap().len(), 1);
-
-        let mut writer = crate::index::background_writer(&index).unwrap();
-        let before = index.searchable_segment_ids().unwrap();
-        compact_when_worth_it(&index, &mut writer, "test");
-        writer.wait_merging_threads().unwrap();
-        assert_eq!(index.searchable_segment_ids().unwrap(), before);
-
-        // Below a tenth changed, the small segments beside the largest are joined.
-        let mut writer = crate::index::background_writer(&index).unwrap();
-        for n in 4..24 {
-            let path = std::path::PathBuf::from(format!("/docs/{n}.md"));
-            crate::scan::add_name_only(&writer, &f, &path, None).unwrap();
-        }
-        writer.commit().unwrap();
-        writer.wait_merging_threads().unwrap();
-        let mut writer = crate::index::background_writer(&index).unwrap();
-        compact_when_worth_it(&index, &mut writer, "test");
-        writer.wait_merging_threads().unwrap();
-        let mut writer = crate::index::background_writer(&index).unwrap();
-        for n in 24..26 {
-            let path = std::path::PathBuf::from(format!("/docs/{n}.md"));
-            crate::scan::add_name_only(&writer, &f, &path, None).unwrap();
-            writer.commit().unwrap();
-        }
-        assert_eq!(index.searchable_segment_ids().unwrap().len(), 3);
-        compact_when_worth_it(&index, &mut writer, "test");
-        writer.wait_merging_threads().unwrap();
-        let metas = index.searchable_segment_metas().unwrap();
-        let mut sizes: Vec<u32> = metas.iter().map(|meta| meta.max_doc()).collect();
-        sizes.sort_unstable();
-        assert_eq!(sizes, vec![2, 24]);
-        std::fs::remove_dir_all(&dir).ok();
-    }
 }

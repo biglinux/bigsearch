@@ -53,10 +53,23 @@ fn write_by_replacing(path: &Path, contents: &str) {
 #[test]
 fn versions_survive_replacing_saves() {
     let home = scratch_home();
+    let Some((mut history, document)) = open_with_a_first_version(&home) else {
+        return;
+    };
+    replacing_save_keeps_the_earlier_state(&mut history, &document);
+    let renamed = rename_carries_the_history(&mut history, &home, &document);
+    state_before_a_restore_survives(&mut history, &renamed);
+    hidden_rename_and_forget(&mut history, &home, &renamed);
+    non_documents_never_kept(&mut history, &home);
+}
+
+/// Open the store in the scratch home and keep a first version of a document.
+/// `None` when this filesystem keeps no versions at all.
+fn open_with_a_first_version(home: &Path) -> Option<(History, PathBuf)> {
     // SAFETY: this test binary is its own process and sets these once, before
     // anything reads them.
     unsafe {
-        std::env::set_var("HOME", &home);
+        std::env::set_var("HOME", home);
         std::env::set_var("XDG_DATA_HOME", home.join("data"));
         std::env::set_var("XDG_CONFIG_HOME", home.join("config"));
     }
@@ -87,21 +100,24 @@ fn versions_survive_replacing_saves() {
             "this filesystem keeps no versions ({}); test declared unsupported",
             reason.as_str()
         );
-        return;
+        return None;
     }
     assert!(kept, "the first version was not kept");
+    Some((history, document))
+}
 
-    write_by_replacing(&document, "versão B");
+fn replacing_save_keeps_the_earlier_state(history: &mut History, document: &Path) {
+    write_by_replacing(document, "versão B");
     assert!(
         history
-            .save_version(&document, Reason::Saved)
+            .save_version(document, Reason::Saved)
             .expect("save the second version"),
         "the save that replaced the document did not earn a version"
     );
 
     // One, not two: the state the document is in right now is not an *earlier*
     // version of it, so it is left out of the list.
-    let versions = history.versions(&document).expect("read the versions");
+    let versions = history.versions(document).expect("read the versions");
     assert_eq!(versions.len(), 1, "{versions:?}");
     let oldest = versions.last().expect("one earlier version");
     assert_eq!(
@@ -110,7 +126,7 @@ fn versions_survive_replacing_saves() {
         "the kept version followed the document instead of preserving it"
     );
     assert_eq!(
-        std::fs::read_to_string(&document).expect("read the document"),
+        std::fs::read_to_string(document).expect("read the document"),
         "versão B"
     );
     // A version nobody can save over.
@@ -124,19 +140,21 @@ fn versions_survive_replacing_saves() {
     // Saving nothing new keeps nothing new.
     assert!(
         !history
-            .save_version(&document, Reason::Saved)
+            .save_version(document, Reason::Saved)
             .expect("no change"),
         "an unchanged document earned a second version"
     );
+}
 
+fn rename_carries_the_history(history: &mut History, home: &Path, document: &Path) -> PathBuf {
     // Renaming carries the history with it, instead of starting again.
     let renamed = home.join("Documentos/contrato assinado.odt");
-    std::fs::rename(&document, &renamed).expect("rename");
+    std::fs::rename(document, &renamed).expect("rename");
     // What the watcher does when the kernel hands it both names at once. The
     // save that follows replaces the inode, so this pair is the only thing that
     // still connects the document to its own past.
     history
-        .note_rename(&document, &renamed)
+        .note_rename(document, &renamed)
         .expect("note the rename");
     write_by_replacing(&renamed, "versão C");
     history
@@ -156,25 +174,28 @@ fn versions_survive_replacing_saves() {
         std::fs::read_to_string(&first.object).expect("read"),
         "versão A"
     );
+    renamed
+}
 
+fn state_before_a_restore_survives(history: &mut History, renamed: &Path) {
     // The state a document was in right before somebody went back to an older
     // version survives the next save, minutes later, in the same hour slot.
     // The dialog that asks promises exactly that.
-    write_by_replacing(&renamed, "versão D");
+    write_by_replacing(renamed, "versão D");
     history
-        .save_version(&renamed, Reason::Saved)
+        .save_version(renamed, Reason::Saved)
         .expect("the watcher keeps this state first");
     // The file manager asks for the same state again, right before writing an
     // older version over it. Nothing new to clone, and that row is the undo.
     history
-        .save_version(&renamed, Reason::BeforeRestore)
+        .save_version(renamed, Reason::BeforeRestore)
         .expect("keep the state before going back");
-    write_by_replacing(&renamed, "versão A");
+    write_by_replacing(renamed, "versão A");
     history
-        .save_version(&renamed, Reason::Saved)
+        .save_version(renamed, Reason::Saved)
         .expect("save after going back");
     let undo = history
-        .versions(&renamed)
+        .versions(renamed)
         .expect("versions")
         .into_iter()
         .find(|version| version.reason == Reason::BeforeRestore)
@@ -183,32 +204,37 @@ fn versions_survive_replacing_saves() {
         std::fs::read_to_string(&undo.object).expect("read"),
         "versão D"
     );
+}
 
+fn hidden_rename_and_forget(history: &mut History, home: &Path, renamed: &Path) {
     // A file manager deletes for good by renaming to a hidden name and then
     // unlinking. The history must not follow it there: filed under a name
     // nobody can type, the request to forget it would never find it, and the
     // content of a document somebody destroyed would sit here for a month.
     let on_its_way_out = home.join("Documentos/.bigfiles-delete-copy-9f2c.odt");
     history
-        .note_rename(&renamed, &on_its_way_out)
+        .note_rename(renamed, &on_its_way_out)
         .expect("note the rename");
     assert!(
-        !history.versions(&renamed).expect("versions").is_empty(),
+        !history.versions(renamed).expect("versions").is_empty(),
         "the history followed the document out of reach"
     );
 
     // And forgetting takes the objects with it, not just the rows.
     let objects: Vec<PathBuf> = history
-        .versions(&renamed)
+        .versions(renamed)
         .expect("versions")
         .into_iter()
         .map(|version| version.object)
         .collect();
-    history.forget(&renamed).expect("forget");
-    assert!(history.versions(&renamed).expect("versions").is_empty());
+    history.forget(renamed).expect("forget");
+    assert!(history.versions(renamed).expect("versions").is_empty());
     for object in objects {
         assert!(!object.exists(), "{} was left behind", object.display());
     }
+}
+
+fn non_documents_never_kept(history: &mut History, home: &Path) {
     // And what is not a document never reaches the store at all. In the same
     // test because the service resolves the home folder once per process: two
     // tests with two scratch homes would race for that one answer.

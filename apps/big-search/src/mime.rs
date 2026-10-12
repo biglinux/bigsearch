@@ -184,6 +184,11 @@ impl Database {
         if metadata.len() == 0 {
             return Some("application/x-zerosize".to_string());
         }
+        self.settle_by_content(path, candidates)
+    }
+
+    /// Choose among several name candidates by what the file's first bytes say.
+    fn settle_by_content(&self, path: &Path, candidates: &[Glob]) -> Option<String> {
         // Between equal weights, the database's own order (`max_by_key`
         // alone keeps the last).
         let heaviest = || {
@@ -377,6 +382,29 @@ mod tests {
             .as_deref(),
             Some("text/vnd.trolltech.linguist")
         );
+        // Content that confirms no candidate is what the file is.
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend([0_u8; 64]);
+        assert_eq!(
+            db.of(&write("odd.ts", &png), None).as_deref(),
+            Some("image/png")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn content_alone_types_extensionless_files() {
+        let db = database();
+        let dir = std::env::temp_dir().join(format!("lsearch-mime-bare-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let mut stream = vec![0_u8; 188 * 4];
+        stream.iter_mut().step_by(188).for_each(|byte| *byte = 0x47);
         // No extension at all: the content alone.
         assert_eq!(
             db.of(&write("clip", &stream), None).as_deref(),
@@ -391,22 +419,29 @@ mod tests {
             db.of(&write("blob", &[0, 1, 2, 3, 0xff]), None).as_deref(),
             Some("application/octet-stream")
         );
-        assert_eq!(
-            db.of(&write("empty", b""), None).as_deref(),
-            Some("application/x-zerosize")
-        );
         // QuickTime's `free` atom at byte 4 of a text is not a video.
         assert_eq!(
             db.of(&write("NOTES", b"### freedreno backend\n"), None)
                 .as_deref(),
             Some("text/plain")
         );
-        // Content that confirms no candidate is what the file is.
-        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
-        png.extend([0_u8; 64]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn directories_and_empty_files_by_inode() {
+        let db = database();
+        let dir = std::env::temp_dir().join(format!("lsearch-mime-inode-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
         assert_eq!(
-            db.of(&write("odd.ts", &png), None).as_deref(),
-            Some("image/png")
+            db.of(&write("empty", b""), None).as_deref(),
+            Some("application/x-zerosize")
         );
         assert_eq!(db.of(&dir, None).as_deref(), Some("inode/directory"));
         let dotted = dir.join("conf.d");

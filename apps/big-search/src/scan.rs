@@ -473,25 +473,7 @@ fn reconcile_roots(
         // The comparison reads the catalogue as persisted.
         state.persist()?;
         state.begin_scan()?;
-        for root in roots {
-            on_dir(root);
-            for entry in walker(root).flatten() {
-                if entry.depth() == 0 {
-                    continue;
-                }
-                let path = entry.path();
-                // Not marked seen, so a row an older version kept under a
-                // lossy key goes as Gone.
-                if path.to_str().is_none() {
-                    continue;
-                }
-                if entry.file_type().is_some_and(|t| t.is_dir()) {
-                    on_dir(path);
-                }
-                let Ok(md) = entry.metadata() else { continue };
-                state.mark_seen(path, Some(state::meta_pair(&md)))?;
-            }
-        }
+        mark_walked_entries(state, roots, on_dir)?;
         // Offline removable/network sources: keep their catalogue rather than treat
         // the unmounted tree as deleted, so their files stay findable (and, later,
         // are reported as living on that device).
@@ -502,39 +484,7 @@ fn reconcile_roots(
             let (changes, next) = state.scan_changes_after(&cursor, SCAN_PAGE)?;
             after = next;
             for change in changes {
-                match change {
-                    ScanChange::Seen {
-                        path,
-                        mtime,
-                        size,
-                        recorded,
-                    } => {
-                        if name_doc_stale(recorded, mtime) {
-                            // A new path, or one changed on another day: (re)index
-                            // its name. Otherwise only content work is scheduled.
-                            // The walk kept no metadata; only changed paths get here.
-                            let md = std::fs::symlink_metadata(&path).ok();
-                            upsert_path(writer, f, &path, md.as_ref())?;
-                            outcome.index_changed = true;
-                        }
-                        state.set(&path, mtime, size);
-                        outcome.state_changed = true;
-                        let (do_content, do_metadata) = crate::settings::policy_for(&path);
-                        if (do_content && crate::extract::is_content_path(&path))
-                            || (do_metadata && crate::meta::is_meta_candidate(&path))
-                        {
-                            outcome.content_candidates =
-                                outcome.content_candidates.saturating_add(1);
-                        }
-                    }
-                    ScanChange::Gone(path) => {
-                        delete_path(writer, f, &path);
-                        state.remove(&path);
-                        outcome.index_changed = true;
-                        outcome.state_changed = true;
-                        outcome.deleted = true;
-                    }
-                }
+                apply_scan_change(writer, f, state, change, &mut outcome)?;
                 persist_state_if_needed(state)?;
             }
         }
@@ -544,6 +494,77 @@ fn reconcile_roots(
         Ok(())
     })?;
     Ok(outcome)
+}
+
+/// Walk `roots` and mark every entry seen with its `(mtime, size)`.
+fn mark_walked_entries(
+    state: &mut State,
+    roots: &[PathBuf],
+    on_dir: &mut dyn FnMut(&Path),
+) -> Result<()> {
+    for root in roots {
+        on_dir(root);
+        for entry in walker(root).flatten() {
+            if entry.depth() == 0 {
+                continue;
+            }
+            let path = entry.path();
+            // Not marked seen, so a row an older version kept under a
+            // lossy key goes as Gone.
+            if path.to_str().is_none() {
+                continue;
+            }
+            if entry.file_type().is_some_and(|t| t.is_dir()) {
+                on_dir(path);
+            }
+            let Ok(md) = entry.metadata() else { continue };
+            state.mark_seen(path, Some(state::meta_pair(&md)))?;
+        }
+    }
+    Ok(())
+}
+
+/// Bring the name index and `state` in line with one difference the scan found.
+fn apply_scan_change(
+    writer: &IndexWriter,
+    f: &Fields,
+    state: &mut State,
+    change: ScanChange,
+    outcome: &mut ReconcileOutcome,
+) -> Result<()> {
+    match change {
+        ScanChange::Seen {
+            path,
+            mtime,
+            size,
+            recorded,
+        } => {
+            if name_doc_stale(recorded, mtime) {
+                // A new path, or one changed on another day: (re)index
+                // its name. Otherwise only content work is scheduled.
+                // The walk kept no metadata; only changed paths get here.
+                let md = std::fs::symlink_metadata(&path).ok();
+                upsert_path(writer, f, &path, md.as_ref())?;
+                outcome.index_changed = true;
+            }
+            state.set(&path, mtime, size);
+            outcome.state_changed = true;
+            let (do_content, do_metadata) = crate::settings::policy_for(&path);
+            if (do_content && crate::extract::is_content_path(&path))
+                || (do_metadata && crate::meta::is_meta_candidate(&path))
+            {
+                outcome.content_candidates = outcome.content_candidates.saturating_add(1);
+            }
+        }
+        ScanChange::Gone(path) => {
+            delete_path(writer, f, &path);
+            state.remove(&path);
+            outcome.index_changed = true;
+            outcome.state_changed = true;
+            outcome.deleted = true;
+        }
+    }
+    Ok(())
 }
 
 fn retained_offline_roots() -> Vec<PathBuf> {
@@ -567,6 +588,13 @@ mod tests {
     use super::*;
     use crate::index::{fields, open_or_create};
     use crate::test_env::{ENV_LOCK, EnvVarGuard, scratch_dir};
+
+    fn name_hits(index: &tantivy::Index, query: &str) -> usize {
+        let filter = big_indexd_client::Filter::default();
+        crate::query::search(&index.reader().unwrap(), query, &filter, 10)
+            .unwrap()
+            .len()
+    }
 
     #[test]
     fn subtree_indexes_visible_skips_hidden() {
@@ -598,57 +626,19 @@ mod tests {
         writer.commit().unwrap();
 
         assert!(dirs.iter().any(|d| d.ends_with("sub")));
-        assert_eq!(
-            crate::query::search(
-                &index.reader().unwrap(),
-                "nested",
-                &big_indexd_client::Filter::default(),
-                10
-            )
-            .unwrap()
-            .len(),
-            1
-        );
-        assert_eq!(
-            crate::query::search(
-                &index.reader().unwrap(),
-                "visible",
-                &big_indexd_client::Filter::default(),
-                10
-            )
-            .unwrap()
-            .len(),
-            1
-        );
+        assert_eq!(name_hits(&index, "nested"), 1);
+        assert_eq!(name_hits(&index, "visible"), 1);
         assert!(
             crate::query::search_content(&content_index.reader().unwrap(), "bodyonlyneedle", 10)
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            crate::query::search(
-                &index.reader().unwrap(),
-                "hidden",
-                &big_indexd_client::Filter::default(),
-                10
-            )
-            .unwrap()
-            .is_empty()
-        );
+        assert_eq!(name_hits(&index, "hidden"), 0);
 
         // delete_path drops the document.
         delete_path(&writer, &f, &tree.join("sub/nested.md"));
         writer.commit().unwrap();
-        assert!(
-            crate::query::search(
-                &index.reader().unwrap(),
-                "nested",
-                &big_indexd_client::Filter::default(),
-                10
-            )
-            .unwrap()
-            .is_empty()
-        );
+        assert_eq!(name_hits(&index, "nested"), 0);
 
         std::fs::remove_dir_all(&base).ok();
     }

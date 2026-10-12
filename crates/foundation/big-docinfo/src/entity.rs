@@ -279,7 +279,28 @@ pub fn title(text: &str, prominent: &[String]) -> Option<String> {
     // read as one. Past a decorative initial ("C") or a journal's label, name or
     // banner set larger, the next size; past anything else, smaller type is
     // section headings and authors.
-    if let Some(line) = prominent
+    if let Some(line) = prominent_title(prominent) {
+        return Some(line.to_owned());
+    }
+    let at = heading(&opening)?;
+    // A title may run over three lines: "THE URGENT NEED TO" / "IMPLEMENT
+    // PATIENT" / "BLOOD MANAGEMENT".
+    let mut title = opening[at].to_owned();
+    let mut last = at;
+    while last < at + 2
+        && let Some(next) = continuation(&opening, last)
+    {
+        title.push(' ');
+        title.push_str(next);
+        last += 1;
+    }
+    Some(title)
+}
+
+/// The first line set in large type past labels and banners, when it reads as
+/// a title.
+fn prominent_title(prominent: &[String]) -> Option<&str> {
+    prominent
         .iter()
         // a section label set as large as the title, on the same line
         .map(|line| without_article_type(line))
@@ -306,22 +327,6 @@ pub fn title(text: &str, prominent: &[String]) -> Option<String> {
                 && !is_date_line(line)
                 && !has_glued_words(line)
         })
-    {
-        return Some(line.to_owned());
-    }
-    let at = heading(&opening)?;
-    // A title may run over three lines: "THE URGENT NEED TO" / "IMPLEMENT
-    // PATIENT" / "BLOOD MANAGEMENT".
-    let mut title = opening[at].to_owned();
-    let mut last = at;
-    while last < at + 2
-        && let Some(next) = continuation(&opening, last)
-    {
-        title.push(' ');
-        title.push_str(next);
-        last += 1;
-    }
-    Some(title)
 }
 
 /// Whether line `at` carries on a sentence from the line above: "…em risco

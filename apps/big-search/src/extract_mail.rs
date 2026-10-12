@@ -96,30 +96,7 @@ fn body_text(headers: &str, body: &str, depth: usize) -> Option<String> {
         return None;
     }
     if kind.starts_with("multipart/") {
-        if depth == MAX_DEPTH {
-            return None;
-        }
-        let boundary = parameter(&content_type, "boundary")?;
-        let delimiter = format!("--{boundary}");
-        let parts: Vec<(&str, &str)> = body
-            .split(delimiter.as_str())
-            .skip(1)
-            .take_while(|part| !part.starts_with("--"))
-            .map(|part| split_message(part.strip_prefix('\n').unwrap_or(part)))
-            .collect();
-        // An alternative's plain text and its HTML say the same: keep one.
-        let plain = parts
-            .iter()
-            .find(|(h, _)| content_kind(h) == "text/plain")
-            .and_then(|(h, b)| body_text(h, b, depth + 1));
-        if kind == "multipart/alternative" {
-            return plain.or_else(|| parts.iter().find_map(|(h, b)| body_text(h, b, depth + 1)));
-        }
-        let texts: Vec<String> = parts
-            .iter()
-            .filter_map(|(h, b)| body_text(h, b, depth + 1))
-            .collect();
-        return (!texts.is_empty()).then(|| texts.join("\n\n"));
+        return multipart_text(&kind, &content_type, body, depth);
     }
     if kind != "text/plain" && kind != "text/html" {
         return None;
@@ -138,6 +115,35 @@ fn body_text(headers: &str, body: &str, depth: usize) -> Option<String> {
     } else {
         text
     })
+}
+
+/// The text of a multipart body: one part of an alternative, every readable
+/// part of any other kind.
+fn multipart_text(kind: &str, content_type: &str, body: &str, depth: usize) -> Option<String> {
+    if depth == MAX_DEPTH {
+        return None;
+    }
+    let boundary = parameter(content_type, "boundary")?;
+    let delimiter = format!("--{boundary}");
+    let parts: Vec<(&str, &str)> = body
+        .split(delimiter.as_str())
+        .skip(1)
+        .take_while(|part| !part.starts_with("--"))
+        .map(|part| split_message(part.strip_prefix('\n').unwrap_or(part)))
+        .collect();
+    // An alternative's plain text and its HTML say the same: keep one.
+    let plain = parts
+        .iter()
+        .find(|(h, _)| content_kind(h) == "text/plain")
+        .and_then(|(h, b)| body_text(h, b, depth + 1));
+    if kind == "multipart/alternative" {
+        return plain.or_else(|| parts.iter().find_map(|(h, b)| body_text(h, b, depth + 1)));
+    }
+    let texts: Vec<String> = parts
+        .iter()
+        .filter_map(|(h, b)| body_text(h, b, depth + 1))
+        .collect();
+    (!texts.is_empty()).then(|| texts.join("\n\n"))
 }
 
 fn content_kind(headers: &str) -> String {

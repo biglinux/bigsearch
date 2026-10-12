@@ -177,42 +177,51 @@ impl CjkTokenStream<'_> {
         }
         end
     }
+
+    /// Emits the next token of the space-less run whose last character is
+    /// `current` at `offset`; `false` when the run ended with nothing to emit.
+    fn advance_run(&mut self, offset: usize, current: char, emitted: bool) -> bool {
+        if self.unigram_due {
+            self.unigram_due = false;
+            self.token.text.clear();
+            self.token.text.push(current);
+            self.emit(offset, offset + current.len_utf8());
+            return true;
+        }
+        match self.char_at(self.cursor) {
+            Some(next) if is_unspaced(next) => {
+                let next_offset = self.cursor;
+                self.cursor += next.len_utf8();
+                self.run = Some((next_offset, next, true));
+                self.unigram_due = self.unigrams;
+                self.token.text.clear();
+                self.token.text.push(current);
+                self.token.text.push(next);
+                self.emit(offset, self.cursor);
+                true
+            }
+            _ => {
+                self.run = None;
+                if emitted || self.unigrams {
+                    return false;
+                }
+                self.token.text.clear();
+                self.token.text.push(current);
+                self.emit(offset, offset + current.len_utf8());
+                true
+            }
+        }
+    }
 }
 
 impl TokenStream for CjkTokenStream<'_> {
     fn advance(&mut self) -> bool {
         loop {
             if let Some((offset, current, emitted)) = self.run {
-                if self.unigram_due {
-                    self.unigram_due = false;
-                    self.token.text.clear();
-                    self.token.text.push(current);
-                    self.emit(offset, offset + current.len_utf8());
+                if self.advance_run(offset, current, emitted) {
                     return true;
                 }
-                match self.char_at(self.cursor) {
-                    Some(next) if is_unspaced(next) => {
-                        let next_offset = self.cursor;
-                        self.cursor += next.len_utf8();
-                        self.run = Some((next_offset, next, true));
-                        self.unigram_due = self.unigrams;
-                        self.token.text.clear();
-                        self.token.text.push(current);
-                        self.token.text.push(next);
-                        self.emit(offset, self.cursor);
-                        return true;
-                    }
-                    _ => {
-                        self.run = None;
-                        if emitted || self.unigrams {
-                            continue;
-                        }
-                        self.token.text.clear();
-                        self.token.text.push(current);
-                        self.emit(offset, offset + current.len_utf8());
-                        return true;
-                    }
-                }
+                continue;
             }
             let offset = self.cursor;
             let Some(&byte) = self.text.as_bytes().get(offset) else {

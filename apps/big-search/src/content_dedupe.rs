@@ -128,18 +128,7 @@ impl ContentSignatures {
             return ContentClaim::Unique;
         };
         let path_text = path.to_string_lossy().into_owned();
-        // This file stood for other text before: whatever was skipped as a copy
-        // of that text has no document now.
-        if let Some(previous) = self.claimed_by.get(&path_text).cloned()
-            && previous != identity
-        {
-            self.claimed_by.remove(&path_text);
-            if let Some(old) = self.map.physical_extents.remove(&previous) {
-                self.released
-                    .extend(old.duplicates.into_iter().map(PathBuf::from));
-            }
-            self.dirty = true;
-        }
+        self.release_previous_claim(&path_text, &identity);
         if let Some(representative) = self.map.physical_extents.get_mut(&identity) {
             if representative.path == path_text {
                 return ContentClaim::Unique;
@@ -160,6 +149,26 @@ impl ContentSignatures {
             }
             return ContentClaim::Duplicate;
         }
+        self.claim_new_identity(path_text, identity)
+    }
+
+    /// This file stood for other text before: whatever was skipped as a copy
+    /// of that text has no document now.
+    fn release_previous_claim(&mut self, path_text: &str, identity: &str) {
+        if let Some(previous) = self.claimed_by.get(path_text).cloned()
+            && previous != identity
+        {
+            self.claimed_by.remove(path_text);
+            if let Some(old) = self.map.physical_extents.remove(&previous) {
+                self.released
+                    .extend(old.duplicates.into_iter().map(PathBuf::from));
+            }
+            self.dirty = true;
+        }
+    }
+
+    /// The first file seen with `identity` becomes its representative.
+    fn claim_new_identity(&mut self, path_text: String, identity: String) -> ContentClaim {
         self.claimed_by.insert(path_text.clone(), identity.clone());
         self.map.physical_extents.insert(
             identity,
@@ -217,12 +226,19 @@ fn physical_content_identity(path: &Path, size: u64) -> Option<String> {
         ));
     }
 
+    extent_identity(&file, metadata.dev(), size)
+}
+
+/// The identity of a file's extent map, read through `FS_IOC_FIEMAP` in batches:
+/// `None` unless every extent is physical, shared and safe to compare, and the
+/// map is short enough to record.
+fn extent_identity(file: &std::fs::File, dev: u64, size: u64) -> Option<String> {
     let mut extents = Vec::new();
     let mut has_physical_extents = false;
     let mut all_extents_shared = true;
     let mut start = 0u64;
     loop {
-        let mapped_extents = fiemap(&file, start)?;
+        let mapped_extents = fiemap(file, start)?;
         if mapped_extents.is_empty() {
             break;
         }
@@ -241,7 +257,7 @@ fn physical_content_identity(path: &Path, size: u64) -> Option<String> {
             start = next_start;
             if is_last {
                 return shared_extent_identity(
-                    metadata.dev(),
+                    dev,
                     size,
                     &extents,
                     has_physical_extents,
@@ -251,7 +267,7 @@ fn physical_content_identity(path: &Path, size: u64) -> Option<String> {
         }
     }
     shared_extent_identity(
-        metadata.dev(),
+        dev,
         size,
         &extents,
         has_physical_extents,
