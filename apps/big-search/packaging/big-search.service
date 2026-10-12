@@ -6,7 +6,7 @@
 # CPUSchedulingPolicy or a low CPUWeight — searching runs like a normal program.
 [Unit]
 Description=big-search file index daemon
-Documentation=https://github.com/Lord-Deepankar/big-search
+Documentation=https://github.com/biglinux/bigsearch
 
 [Service]
 Type=simple
@@ -15,14 +15,9 @@ Restart=on-failure
 RestartSec=5
 UMask=0077
 Environment=RUST_LOG=info,tantivy=warn,symphonia_core=error,symphonia_format_isomp4=error,symphonia_bundle_mp3=error
-# Provenance: record where files came from (xattr origin URL) as they arrive.
-# BIG_SEARCH_ORIGIN_WATCH defaults to off in code, so it must be set here.
-Environment=BIG_SEARCH_ORIGIN_WATCH=1
-Environment=BIG_SEARCH_ORIGIN_XATTR=1
-Environment=BIG_SEARCH_ORIGIN_QUERY=1
-# Metadata extraction is NOT set here on purpose: config.toml owns it
-# (`metadata`, default false, per-source overridable). An Environment= line
-# would silently win over the user's config and make that setting a no-op.
+# Provenance (`[origin]`) and metadata extraction (`metadata`) are NOT set here
+# on purpose: config.toml owns them. An Environment= line would silently win
+# over the user's config and make that setting a no-op.
 # Bound total memory: soft-throttle reclaims page cache, hard cap is a safety net
 # (the extraction worker pool uses a bounded queue so anonymous RSS stays low).
 # The cpu controller is handed to the daemon, which runs in <unit>/main and puts
@@ -42,9 +37,14 @@ TasksMax=64
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-# Writable holes: the index lives under XDG_DATA_HOME, the socket under the
-# per-user runtime dir (%t). Both standard paths so the CLI client finds them too.
-ReadWritePaths=%h/.local/share %t
+# Writable holes: only the daemon's data dir (index, state, history, and
+# SQLITE_TMPDIR) and the socket dir, the standard paths the CLI finds too.
+# Anything wider lets a parser compromised by an indexed file plant units,
+# .desktop or D-Bus service files that run outside the sandbox. The `+` runs the
+# mkdir before the sandbox applies, since ReadWritePaths= needs the paths to
+# exist. A custom XDG_DATA_HOME in the service environment is not covered.
+ExecStartPre=+/usr/bin/mkdir -p -m 0700 %h/.local/share/big-search %t/biglinux
+ReadWritePaths=%h/.local/share/big-search %t/biglinux
 # Private writable /tmp: with ProtectSystem=strict + ProtectHome=read-only every
 # default temp dir is read-only, which broke SQLite temp spill files
 # (SQLITE_IOERR_GETTEMPPATH) and aborted the startup reconcile. The daemon also

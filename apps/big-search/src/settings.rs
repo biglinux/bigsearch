@@ -132,10 +132,9 @@ pub struct Sources {
 }
 
 impl Sources {
-    /// Load config (seeding a documented template on first run); fall back to the
-    /// home root — symlink-expanded when enabled — if no sources are configured.
+    /// Load config; fall back to the home root (symlink-expanded when enabled)
+    /// if no sources are configured.
     pub fn load() -> Self {
-        seed_config_template();
         let config_file = read_config();
         let default_follow = resolve_follow(&config_file.defaults);
         let raw = if config_file.sources.is_empty() {
@@ -411,15 +410,27 @@ fn read_config() -> ConfigFile {
 /// Not a second parser here: the settings window writes this file through
 /// `big_search_config`, and a service resolving the path its own way is how the
 /// two ended up disagreeing about where the file even is.
+///
+/// A malformed or unreadable file keeps the tables that still parse and turns
+/// origin and history off (`big_search_config::read_text`).
 fn read_config_uncached() -> ConfigFile {
-    let Ok(text) = std::fs::read_to_string(big_search_config::path()) else {
-        return ConfigFile::default();
-    };
-    big_search_config::parse(&text).unwrap_or_else(|error| {
-        // The only place a typo in a hand-edited file is ever mentioned.
-        log::warn!("config.toml: {error}; using defaults");
-        ConfigFile::default()
-    })
+    let path = big_search_config::path();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            // The only place a typo in a hand-edited file is ever mentioned.
+            if let Err(error) = big_search_config::parse(&text) {
+                log::warn!(
+                    "config.toml: {error}; keeping the tables that parse, origin and history off"
+                );
+            }
+            big_search_config::read_text(&text)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ConfigFile::default(),
+        Err(error) => {
+            log::warn!("{}: {error}; origin and history off", path.display());
+            big_search_config::read()
+        }
+    }
 }
 
 /// `BIG_SEARCH_FOLLOW_LINKS` env wins if set, else the config default.
@@ -514,10 +525,12 @@ fn device_uuid_label(path: &Path) -> (Option<String>, Option<String>) {
     })
 }
 
-/// Documented `config.toml` template, seeded once (never overwrites edits).
+/// Documented `config.toml` template, seeded once by the CLI; an existing file
+/// is never replaced by it.
 const CONFIG_TEMPLATE: &str = "\
 # big-search configuration. Re-read on the next reindex / daemon start.
-# big-search never overwrites this file.
+# The service never writes this file. `big-search config` and the settings
+# window change settings in place and keep your comments.
 
 [defaults]
 # Quick profiles:
@@ -575,6 +588,20 @@ symlink_policy = \"personal-local\" # personal-local | local-exact
 # path = \"/mnt/nas/photos\"
 # name = \"NAS Photos\"
 # network = true
+
+# Where files came from (download URL, the program that saved them).
+# [origin]
+# enabled = true          # remember where files came from
+# browser_history = false # also read the web browsers' download lists
+
+# Earlier versions of your documents.
+# [history]
+# enabled = true          # keep earlier versions where the disk can
+# keep_versions = 10      # most versions kept per document
+# keep_days = 30          # oldest version kept, in days
+# max_total_gib = 0       # disk the history may use. 0 = 1/20 of the disk, at most 10 GiB
+# skip_git_repositories = true # keep nothing inside a git work tree
+# respect_gitignore = true     # when not skipped, still skip what .gitignore excludes
 ";
 
 pub fn seed_config_template() {
@@ -684,24 +711,13 @@ mod tests {
 
     #[test]
     fn environment_booleans_accept_explicit_on_and_off() {
-        let previous = std::env::var_os("BIG_SEARCH_CONTENT");
-        unsafe {
-            std::env::set_var("BIG_SEARCH_CONTENT", "0");
-        }
-        assert_eq!(env_bool("BIG_SEARCH_CONTENT"), Some(false));
-        unsafe {
-            std::env::set_var("BIG_SEARCH_CONTENT", "yes");
-        }
-        assert_eq!(env_bool("BIG_SEARCH_CONTENT"), Some(true));
-        unsafe {
-            std::env::set_var("BIG_SEARCH_CONTENT", "maybe");
-        }
-        assert_eq!(env_bool("BIG_SEARCH_CONTENT"), None);
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("BIG_SEARCH_CONTENT", value),
-                None => std::env::remove_var("BIG_SEARCH_CONTENT"),
-            }
+        // A name nothing else reads, so a content test running alongside never
+        // sees extraction turned off.
+        const NAME: &str = "BIG_SEARCH_TEST_BOOL";
+        let _lock = crate::test_env::ENV_LOCK.lock().unwrap();
+        for (value, expected) in [("0", Some(false)), ("yes", Some(true)), ("maybe", None)] {
+            let _value = crate::test_env::EnvVarGuard::set(NAME, value);
+            assert_eq!(env_bool(NAME), expected, "{value}");
         }
     }
 

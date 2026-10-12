@@ -9,9 +9,13 @@ fn home() -> PathBuf {
 }
 
 /// Data directory (`$XDG_DATA_HOME/big-search`): holds the index, cache, etc.
+///
+/// An empty or relative `XDG_DATA_HOME` is ignored, as the XDG spec requires;
+/// otherwise the index would land in whatever directory the command ran from.
 pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
         .unwrap_or_else(|| home().join(".local/share"));
     base.join("big-search")
 }
@@ -128,7 +132,31 @@ pub fn runtime_subdir() -> Option<PathBuf> {
 /// all — so the service was listening where no program looks, in a directory any
 /// local account can create first. Refusing is the honest failure.
 fn runtime_dir() -> Option<PathBuf> {
+    // An empty or relative value is unset (XDG Base Directory spec), as the
+    // client reads it.
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
-        .filter(|dir| !dir.as_os_str().is_empty())
+        .filter(|dir| dir.is_absolute())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_env::{ENV_LOCK, EnvVarGuard};
+
+    #[test]
+    fn relative_data_home_is_ignored() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _home = EnvVarGuard::set("HOME", "/home/someone");
+        for value in ["", "relative/share"] {
+            let _data = EnvVarGuard::set("XDG_DATA_HOME", value);
+            assert_eq!(
+                data_dir(),
+                PathBuf::from("/home/someone/.local/share/big-search"),
+                "{value:?}"
+            );
+        }
+        let _data = EnvVarGuard::set("XDG_DATA_HOME", "/srv/data");
+        assert_eq!(data_dir(), PathBuf::from("/srv/data/big-search"));
+    }
 }

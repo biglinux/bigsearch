@@ -12,7 +12,6 @@
 >   daemon's entire write volume.
 > - **§4 decision 4 "flat atomic append-log"** — the state store is SQLite
 >   (`state.sqlite`), one row per path per namespace.
-> - **§6 socket path `lsd.sock`** — it is `$XDG_RUNTIME_DIR/biglinux/indexd.sock`.
 > - **§3.1 deferred in-RAM name table** — built and measured in 2026-08, then
 >   reverted: isolated it beat the ngram index 8x, but in the daemon it changed
 >   nothing (the engine was never the bottleneck) and cost 104 MB of RSS.
@@ -137,8 +136,7 @@ as the start of a word, anywhere; within a kind the shorter name (field norms on
 tie-break — as a stronger factor it moved 42 of 165 known-item queries, as many
 down as up). One or two letters stand for a whole name or a whole word ("go" →
 GO.pdf, then "Contrato GO.pdf", never Google.pdf); longer words use 3-grams only.
-On 165 known-item queries from a real home (`local-agent-mini/tools/
-name_known_item.py`), first-place hits went from 15-19 % to 19-25 % and every
+On 165 known-item queries from a real home, first-place hits went from 15-19 % to 19-25 % and every
 short-name file is now found (14 of 15 were not). A new name schema rebuilds only
 the name index: the content rows stay unless the content index is empty.
 
@@ -182,8 +180,7 @@ halfwidth katakana, Arabic presentation forms, compatibility ideographs and
 fullwidth Latin become what people type. It has to come before the tokenizer: a
 jamo sequence is not a Hangul syllable, so it was indexed as one long word
 instead of bigrams. Text already in NFKC, nearly all of it, is not copied. On
-the translation-catalog test (`local-agent-mini/tools/lang_eval.py`, 13
-languages) Korean NFD documents went from 0 % to 100 % found, Japanese NFD from
+a translation-catalog test in 13 languages, Korean NFD documents went from 0 % to 100 % found, Japanese NFD from
 79 % and halfwidth from 37 % to 100 %, with no other result changed.
 
 **One CJK character (2026-10).** The index holds every character of a CJK,
@@ -432,8 +429,10 @@ having no text. The wall-clock limit (3× that) only catches hangs.
 SQLite-backed persisted map `namespace,path → (mtime, size)`, stored as a
 `WITHOUT ROWID` table keyed by `(namespace, path)`. Used for incremental dedup,
 delete detection, crash reconcile on start, and separate name/content freshness
-state. Writes are batched in transactions; Tantivy's own commit is the full-text
-durability boundary.
+state. Writes are batched in transactions; SQLite runs WAL with `NORMAL` sync
+and the indexes are never fsynced. The state and both indexes are derived from
+the filesystem, so a crash costs a reconcile on the next start, and a torn
+index is recreated on open (`src/nosync_dir.rs`).
 
 
 ### 3.7 Low-memory reconciliation and backfill
@@ -465,13 +464,14 @@ several separately-stored bool fields from cloned source descriptors.
 
 ### 3.8 Query path — `query.rs` + `ipc.rs`
 
-Daemon holds a warm `IndexReader` (reloads on commit). Query protocol over a
-**Unix domain socket** in `$XDG_RUNTIME_DIR/lsd.sock`, perms `0600`:
-- request: `{mode: name|content|both, q: str, limit: u16, ext?: [str]}` (serde_json, line-framed)
-- response: ranked `[{path, score, kind, snippet?}]`
-Thin CLI client (`lsd <query>`) connects, prints. No daemon running → client can
-fall back to a one-shot in-process search (open index read-only). Interactive
-front-ends (fzf, KRunner plugin) feed off the socket later — out of scope now.
+Daemon holds a warm `IndexReader` (reloads on commit) and answers on a **Unix
+domain socket** at `$XDG_RUNTIME_DIR/biglinux/indexd.sock`, mode `0600`, same-UID
+peers only. The protocol is line-framed JSON, versioned (`"v"`), with requests
+tagged by `"cmd"` and replies by `"kind"`; other BigLinux programs speak it, so
+its one description is the `big-indexd-client` rustdoc
+(`crates/foundation/big-indexd-client`), not this file. The `big-search` CLI
+uses that client, and with no daemon running it searches the index in-process,
+read-only.
 
 ## 4. Module layout & size budget
 
@@ -491,10 +491,11 @@ front-ends (fzf, KRunner plugin) feed off the socket later — out of scope now.
 
 ## 5. Dependencies (minimal, pin + lockfile)
 
-`tantivy`, `notify`, `ignore`, `zip`, `quick-xml`, `serde`+`serde_json`,
-`anyhow`, `log`+`env_logger`, `libc` (nice/ioprio/rlimit/sockets).
-No tokio, no reqwest, no D-Bus. Each confirmed against the BigLinux crate policy
-before adding; `deny.toml` crates.io-only; committed `Cargo.lock`.
+`apps/big-search/Cargo.toml` is the list (Tantivy, `rusqlite` for the state,
+origin and history stores, `symphonia` for audio and video durations, the
+extractors' parsers). No tokio, no reqwest, no D-Bus. Each is confirmed against
+the BigLinux crate policy before adding; `deny.toml` crates.io-only; committed
+`Cargo.lock`.
 
 ## 6. Security model
 
@@ -507,11 +508,18 @@ before adding; `deny.toml` crates.io-only; committed `Cargo.lock`.
 - **Socket**: `$XDG_RUNTIME_DIR`, mode `0600`, AF_UNIX only.
 - **No secrets, no network, no logs of file contents** (paths + counts only;
   redact on error).
-- **systemd user unit hardening**: `NoNewPrivileges=yes`, `ProtectSystem=strict`,
-  `ProtectControlGroups=yes`, `RestrictAddressFamilies=AF_UNIX`,
-  `SystemCallFilter=@system-service` (deny @privileged,@mount,@reboot…),
+- **systemd user unit hardening** (`packaging/big-search.service` is the
+  reference): `ProtectSystem=strict` and `ProtectHome=read-only`, with
+  `ReadWritePaths=` limited to the data dir (`~/.local/share/big-search`) and
+  the socket dir (`%t/biglinux`), created by a pre-start step outside the
+  sandbox. A parser compromised by an indexed file must not be able to write
+  user units, `.desktop` or D-Bus service files that run outside it.
+  `ProtectControlGroups=private` (the daemon writes only its own delegated
+  subtree), `NoNewPrivileges=yes`, `RestrictAddressFamilies=AF_UNIX`,
+  `SystemCallFilter=@system-service` minus @privileged/@mount/@reboot…,
   `MemoryDenyWriteExecute=yes`, `RestrictNamespaces=yes`, `LockPersonality=yes`,
-  `ReadWritePaths=` only the index/state dir, home `ReadOnlyPaths`. `WatchdogSec`.
+  `PrivateTmp=yes`. The daemon never writes `config.toml` or the user ignore
+  file; the CLI seeds them.
 
 ## 7. Phasing (ship usable early)
 

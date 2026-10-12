@@ -44,9 +44,16 @@ capped reindex "$HOME_D" >/dev/null 2>&1 && echo "  PASS (read_text caps at 1 Mi
 echo "== 4. IPC oversized line (100 MiB, no newline) =="
 env HOME="$HOME_D" XDG_DATA_HOME="$DATA_D" XDG_CONFIG_HOME="$CFG_D" XDG_RUNTIME_DIR="$RUN_D" RUST_LOG=off "$BIN" daemon >/dev/null 2>&1 &
 DPID=$!
-for _ in $(seq 1 50); do [ -S "$RUN_D/big-search.sock" ] && break; sleep 0.1; done
+SOCK="$RUN_D/biglinux/indexd.sock"
+for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
+if ! socat -u /dev/null "UNIX-CONNECT:$SOCK" 2>/dev/null; then
+  echo "  FAIL: cannot connect to $SOCK"
+  kill "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
+  exit 1
+fi
 rss0=$(awk '/VmRSS/{print $2}' "/proc/$DPID/status")
-head -c $((100*1024*1024)) /dev/zero | tr '\0' 'x' | timeout 30 socat - "UNIX-CONNECT:$RUN_D/big-search.sock" >/dev/null 2>&1 || true
+# The daemon may close the connection before the whole line is sent.
+head -c $((100*1024*1024)) /dev/zero | tr '\0' 'x' | timeout 30 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1 || true
 sleep 1
 peak=$(awk '/VmHWM/{print $2}' "/proc/$DPID/status" 2>/dev/null || echo DEAD)
 echo "  daemon RSS before=${rss0} kB  peak(VmHWM) after 100MiB-no-newline=${peak} kB"

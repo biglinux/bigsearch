@@ -19,7 +19,7 @@ DPID=$!
 trap 'kill "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null; rm -rf "$T"' EXIT
 
 # Wait for the socket.
-for _ in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/big-search.sock" ] && break; sleep 0.1; done
+for _ in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/biglinux/indexd.sock" ] && break; sleep 0.1; done
 
 sample() { # label
   local rss nthreads fds
