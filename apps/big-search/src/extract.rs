@@ -607,10 +607,10 @@ pub fn pages_with(path: &Path, terms: &[String]) -> Vec<usize> {
         "pdf" => crate::extract_pdf::for_each_pdf_page(path, &mut |text| pages.test(text)),
         "pptx" => for_each_pptx_slide(path, &mut |text| pages.test(text)),
         "docx" | "odt" | "ods" | "odp" => {
-            let (part, break_tag): (&str, &[u8]) = if ext == "docx" {
-                ("word/document.xml", b"w:lastRenderedPageBreak")
+            let (part, break_tag): (&str, &str) = if ext == "docx" {
+                ("word/document.xml", "w:lastRenderedPageBreak")
             } else {
-                ("content.xml", b"text:soft-page-break")
+                ("content.xml", "text:soft-page-break")
             };
             // No break markers → page layout unknown (the app didn't cache it).
             // Report no page rather than guessing "page 1". PDF and PPTX page
@@ -692,7 +692,7 @@ fn for_each_pptx_slide(path: &Path, on_page: &mut dyn FnMut(&str)) {
 fn for_each_office_page(
     path: &Path,
     part: &str,
-    break_tag: &[u8],
+    break_tag: &str,
     on_page: &mut dyn FnMut(&str),
 ) -> bool {
     use quick_xml::events::Event;
@@ -765,16 +765,16 @@ pub(crate) fn zip_entry_bytes(path: &Path, name: &str) -> Option<Vec<u8>> {
 }
 
 /// True if `e` is a cached page-break marker or an explicit `w:br w:type="page"`.
-fn is_page_break(e: &quick_xml::events::BytesStart, break_tag: &[u8]) -> bool {
+fn is_page_break(e: &quick_xml::events::BytesStart, break_tag: &str) -> bool {
     let name = e.name();
     if name.as_ref() == break_tag {
         return true;
     }
-    if name.as_ref() == b"w:br" {
+    if name.as_ref() == "w:br" {
         return e
             .attributes()
             .flatten()
-            .any(|a| a.key.as_ref() == b"w:type" && a.value.as_ref() == b"page");
+            .any(|a| a.key.as_ref() == "w:type" && a.value.as_ref() == "page");
     }
     false
 }
@@ -806,7 +806,7 @@ pub fn xml_text(xml: &[u8], out: &mut String) {
 /// text deleted under change tracking and comments are not the document's text.
 pub fn xml_text_lines(xml: &[u8], out: &mut String) {
     use quick_xml::events::Event;
-    let hidden = |name: &[u8]| matches!(name, b"w:instrText" | b"w:delText" | b"office:annotation");
+    let hidden = |name: &str| matches!(name, "w:instrText" | "w:delText" | "office:annotation");
     let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut hidden_depth = 0usize;
@@ -820,15 +820,15 @@ pub fn xml_text_lines(xml: &[u8], out: &mut String) {
                 if hidden_depth > 0 => {}
             Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, out),
             Ok(Event::End(e)) => match e.name().as_ref() {
-                b"w:p" | b"text:p" | b"text:h" | b"a:p" => out.push('\n'),
-                b"w:tc" | b"table:table-cell" => out.push('\t'),
+                "w:p" | "text:p" | "text:h" | "a:p" => out.push('\n'),
+                "w:tc" | "table:table-cell" => out.push('\t'),
                 _ => {}
             },
             Ok(Event::Empty(e)) => match e.name().as_ref() {
-                b"w:br" | b"w:cr" | b"text:line-break" => out.push('\n'),
-                b"w:tab" | b"text:tab" => out.push('\t'),
-                b"text:s" => out.push(' '),
-                b"w:p" | b"text:p" | b"text:h" => out.push('\n'),
+                "w:br" | "w:cr" | "text:line-break" => out.push('\n'),
+                "w:tab" | "text:tab" => out.push('\t'),
+                "text:s" => out.push(' '),
+                "w:p" | "text:p" | "text:h" => out.push('\n'),
                 _ => {}
             },
             Ok(Event::Eof) | Err(_) => break,
@@ -841,22 +841,18 @@ pub fn xml_text_lines(xml: &[u8], out: &mut String) {
 /// The text of a text event or an entity reference, appended as written.
 ///
 /// quick-xml reports `&amp;` and `&#243;` as events of their own, between the
-/// text around them. Bytes that are not valid UTF-8 are read lossily rather
-/// than dropped: an office part is UTF-8 by specification, so this only
-/// happens to a damaged file, and a damaged file should still give up whatever
-/// text it has.
+/// text around them. The reader stops at bytes that are not valid UTF-8; an
+/// office part is UTF-8 by specification, so only a damaged file loses the text
+/// after the damage.
 fn push_xml_text(event: &quick_xml::events::Event<'_>, out: &mut String) {
     use quick_xml::events::Event;
     match event {
-        Event::Text(t) => match t.decode() {
-            Ok(text) => out.push_str(&text),
-            Err(_) => out.push_str(&String::from_utf8_lossy(t)),
-        },
+        Event::Text(t) => out.push_str(t),
         Event::GeneralRef(r) => {
             if let Ok(Some(c)) = r.resolve_char_ref() {
                 out.push(c);
-            } else if let Ok(name) = r.decode() {
-                out.push_str(match name.as_ref() {
+            } else {
+                out.push_str(match &**r {
                     "amp" => "&",
                     "lt" => "<",
                     "gt" => ">",

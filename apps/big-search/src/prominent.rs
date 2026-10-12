@@ -103,25 +103,22 @@ fn ranked(lines: Vec<(String, f32)>, join: bool) -> Vec<String> {
         .collect()
 }
 
-fn attr(e: &BytesStart<'_>, name: &[u8]) -> Option<String> {
+fn attr(e: &BytesStart<'_>, name: &str) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.as_ref() == name)
-        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+        .map(|a| a.value.into_owned())
 }
 
 /// Text of a text event or an entity reference, decoded.
 fn push_event_text(event: &Event<'_>, out: &mut String) {
     match event {
-        Event::Text(t) => match t.decode() {
-            Ok(text) => out.push_str(&text),
-            Err(_) => out.push_str(&String::from_utf8_lossy(t)),
-        },
+        Event::Text(t) => out.push_str(t),
         Event::GeneralRef(r) => {
             if let Ok(Some(c)) = r.resolve_char_ref() {
                 out.push(c);
-            } else if let Ok(name) = r.decode() {
-                out.push_str(match name.as_ref() {
+            } else {
+                out.push_str(match &**r {
                     "amp" => "&",
                     "lt" => "<",
                     "gt" => ">",
@@ -166,28 +163,23 @@ fn pdf_lines(xhtml: &[u8]) -> Vec<(String, f32)> {
     loop {
         let event = reader.read_event_into(&mut buf);
         match &event {
-            Ok(Event::Start(e)) if e.name().as_ref() == b"line" => {
-                let coord = |n: &[u8]| attr(e, n).and_then(|v| v.parse::<f32>().ok());
-                line = match (
-                    coord(b"xMin"),
-                    coord(b"yMin"),
-                    coord(b"xMax"),
-                    coord(b"yMax"),
-                ) {
+            Ok(Event::Start(e)) if e.name().as_ref() == "line" => {
+                let coord = |n: &str| attr(e, n).and_then(|v| v.parse::<f32>().ok());
+                line = match (coord("xMin"), coord("yMin"), coord("xMax"), coord("yMax")) {
                     (Some(x0), Some(y0), Some(x1), Some(y1)) => Some((y1 - y0, x1 - x0)),
                     _ => None,
                 };
                 text.clear();
             }
-            Ok(Event::Start(e)) if e.name().as_ref() == b"word" => in_word = true,
-            Ok(Event::End(e)) if e.name().as_ref() == b"word" => {
+            Ok(Event::Start(e)) if e.name().as_ref() == "word" => in_word = true,
+            Ok(Event::End(e)) if e.name().as_ref() == "word" => {
                 in_word = false;
                 text.push(' ');
             }
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) if in_word => {
                 push_event_text(ev, &mut text);
             }
-            Ok(Event::End(e)) if e.name().as_ref() == b"line" => {
+            Ok(Event::End(e)) if e.name().as_ref() == "line" => {
                 if let Some((height, width)) = line.take()
                     && height <= width
                 {
@@ -256,20 +248,20 @@ fn read_odf_styles(xml: &[u8], styles: &mut Styles) {
         let event = reader.read_event_into(&mut buf);
         match &event {
             Ok(Event::Start(e) | Event::Empty(e)) => match e.name().as_ref() {
-                b"style:style" => {
-                    if let Some(name) = attr(e, b"style:name") {
+                "style:style" => {
+                    if let Some(name) = attr(e, "style:name") {
                         styles
                             .by_name
-                            .insert(name.clone(), (attr(e, b"style:parent-style-name"), None));
+                            .insert(name.clone(), (attr(e, "style:parent-style-name"), None));
                         current = matches!(event, Ok(Event::Start(_))).then_some(name);
                     }
                 }
-                b"style:default-style" => {
+                "style:default-style" => {
                     in_default = matches!(event, Ok(Event::Start(_)))
-                        && attr(e, b"style:family").as_deref() == Some("paragraph");
+                        && attr(e, "style:family").as_deref() == Some("paragraph");
                 }
-                b"style:text-properties" => {
-                    if let Some(size) = attr(e, b"fo:font-size") {
+                "style:text-properties" => {
+                    if let Some(size) = attr(e, "fo:font-size") {
                         if in_default {
                             styles.default = odf_size(&size, 12.0);
                         } else if let Some(entry) =
@@ -282,8 +274,8 @@ fn read_odf_styles(xml: &[u8], styles: &mut Styles) {
                 _ => {}
             },
             Ok(Event::End(e)) => match e.name().as_ref() {
-                b"style:style" => current = None,
-                b"style:default-style" => in_default = false,
+                "style:style" => current = None,
+                "style:default-style" => in_default = false,
                 _ => {}
             },
             Ok(Event::Eof) | Err(_) => break,
@@ -318,20 +310,20 @@ fn odf_opening_paragraphs(content: &[u8], styles: &Styles) -> Vec<(String, f32)>
     loop {
         let event = reader.read_event_into(&mut buf);
         match &event {
-            Ok(Event::Start(e)) if e.name().as_ref() == b"office:annotation" => hidden += 1,
-            Ok(Event::End(e)) if e.name().as_ref() == b"office:annotation" => {
+            Ok(Event::Start(e)) if e.name().as_ref() == "office:annotation" => hidden += 1,
+            Ok(Event::End(e)) if e.name().as_ref() == "office:annotation" => {
                 hidden = hidden.saturating_sub(1);
             }
             _ if hidden > 0 => {}
-            Ok(Event::Start(e)) if matches!(e.name().as_ref(), b"text:p" | b"text:h") => {
-                let size = styles.size(attr(e, b"text:style-name").as_deref(), 12.0);
+            Ok(Event::Start(e)) if matches!(e.name().as_ref(), "text:p" | "text:h") => {
+                let size = styles.size(attr(e, "text:style-name").as_deref(), 12.0);
                 paragraph = Some((String::new(), size, 0.0));
                 spans.clear();
             }
-            Ok(Event::Start(e)) if e.name().as_ref() == b"text:span" => {
+            Ok(Event::Start(e)) if e.name().as_ref() == "text:span" => {
                 spans.push(odf_span_size(e, styles, &spans, paragraph.as_ref()));
             }
-            Ok(Event::End(e)) if e.name().as_ref() == b"text:span" => {
+            Ok(Event::End(e)) if e.name().as_ref() == "text:span" => {
                 spans.pop();
             }
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) => {
@@ -340,16 +332,13 @@ fn odf_opening_paragraphs(content: &[u8], styles: &Styles) -> Vec<(String, f32)>
                 }
             }
             Ok(Event::Empty(e))
-                if matches!(
-                    e.name().as_ref(),
-                    b"text:s" | b"text:tab" | b"text:line-break"
-                ) =>
+                if matches!(e.name().as_ref(), "text:s" | "text:tab" | "text:line-break") =>
             {
                 if let Some((text, _, _)) = paragraph.as_mut() {
                     text.push(' ');
                 }
             }
-            Ok(Event::End(e)) if matches!(e.name().as_ref(), b"text:p" | b"text:h") => {
+            Ok(Event::End(e)) if matches!(e.name().as_ref(), "text:p" | "text:h") => {
                 if let Some((text, _, largest)) = paragraph.take()
                     && keep_opening(&mut lines, text, largest)
                 {
@@ -372,7 +361,7 @@ fn odf_span_size(
     paragraph: Option<&(String, f32, f32)>,
 ) -> f32 {
     let outer = spans.last().copied().or(paragraph.map(|p| p.1));
-    attr(e, b"text:style-name")
+    attr(e, "text:style-name")
         .and_then(|n| styles.by_name.get(&n).and_then(|s| s.1.clone()))
         .and_then(|v| odf_size(&v, outer.unwrap_or(12.0)))
         .or(outer)
@@ -394,22 +383,22 @@ fn read_docx_styles(xml: &[u8]) -> (DocxStyles, f32) {
         let event = reader.read_event_into(&mut buf);
         match &event {
             Ok(Event::Start(e) | Event::Empty(e)) => match e.name().as_ref() {
-                b"w:style" => {
-                    current = attr(e, b"w:styleId");
+                "w:style" => {
+                    current = attr(e, "w:styleId");
                     if let Some(id) = &current {
                         styles.insert(id.clone(), (None, None));
                     }
                 }
-                b"w:rPrDefault" => in_defaults = true,
-                b"w:basedOn" => {
-                    if let (Some(id), Some(base)) = (&current, attr(e, b"w:val"))
+                "w:rPrDefault" => in_defaults = true,
+                "w:basedOn" => {
+                    if let (Some(id), Some(base)) = (&current, attr(e, "w:val"))
                         && let Some(style) = styles.get_mut(id)
                     {
                         style.0 = Some(base);
                     }
                 }
-                b"w:sz" => {
-                    let size = attr(e, b"w:val").and_then(|v| v.parse::<f32>().ok());
+                "w:sz" => {
+                    let size = attr(e, "w:val").and_then(|v| v.parse::<f32>().ok());
                     if in_defaults {
                         default = size.unwrap_or(default);
                     } else if let Some(style) = current.as_ref().and_then(|id| styles.get_mut(id)) {
@@ -419,8 +408,8 @@ fn read_docx_styles(xml: &[u8]) -> (DocxStyles, f32) {
                 _ => {}
             },
             Ok(Event::End(e)) => match e.name().as_ref() {
-                b"w:style" => current = None,
-                b"w:rPrDefault" => in_defaults = false,
+                "w:style" => current = None,
+                "w:rPrDefault" => in_defaults = false,
                 _ => {}
             },
             Ok(Event::Eof) | Err(_) => break,
@@ -470,39 +459,37 @@ fn docx_opening_paragraphs(xml: &[u8], styles: &DocxStyles, default: f32) -> Vec
     loop {
         let event = reader.read_event_into(&mut buf);
         match &event {
-            Ok(Event::Start(e)) if e.name().as_ref() == b"w:p" => {
+            Ok(Event::Start(e)) if e.name().as_ref() == "w:p" => {
                 paragraph = Some((String::new(), None, 0.0));
             }
-            Ok(Event::Start(e)) if e.name().as_ref() == b"w:pPr" => in_ppr = true,
-            Ok(Event::End(e)) if e.name().as_ref() == b"w:pPr" => in_ppr = false,
-            Ok(Event::Start(e) | Event::Empty(e)) if e.name().as_ref() == b"w:pStyle" => {
+            Ok(Event::Start(e)) if e.name().as_ref() == "w:pPr" => in_ppr = true,
+            Ok(Event::End(e)) if e.name().as_ref() == "w:pPr" => in_ppr = false,
+            Ok(Event::Start(e) | Event::Empty(e)) if e.name().as_ref() == "w:pStyle" => {
                 if let Some((_, style, _)) = paragraph.as_mut() {
-                    *style = docx_style_size(styles, attr(e, b"w:val").as_deref());
+                    *style = docx_style_size(styles, attr(e, "w:val").as_deref());
                 }
             }
-            Ok(Event::Start(e)) if e.name().as_ref() == b"w:r" => run = None,
+            Ok(Event::Start(e)) if e.name().as_ref() == "w:r" => run = None,
             // The paragraph mark's own size (inside w:pPr) is not its text's.
-            Ok(Event::Start(e) | Event::Empty(e))
-                if !in_ppr && e.name().as_ref() == b"w:rStyle" =>
-            {
-                run = run.or(docx_style_size(styles, attr(e, b"w:val").as_deref()));
+            Ok(Event::Start(e) | Event::Empty(e)) if !in_ppr && e.name().as_ref() == "w:rStyle" => {
+                run = run.or(docx_style_size(styles, attr(e, "w:val").as_deref()));
             }
-            Ok(Event::Start(e) | Event::Empty(e)) if !in_ppr && e.name().as_ref() == b"w:sz" => {
-                run = attr(e, b"w:val").and_then(|v| v.parse().ok()).or(run);
+            Ok(Event::Start(e) | Event::Empty(e)) if !in_ppr && e.name().as_ref() == "w:sz" => {
+                run = attr(e, "w:val").and_then(|v| v.parse().ok()).or(run);
             }
-            Ok(Event::Start(e)) if e.name().as_ref() == b"w:t" => in_text = true,
-            Ok(Event::End(e)) if e.name().as_ref() == b"w:t" => in_text = false,
+            Ok(Event::Start(e)) if e.name().as_ref() == "w:t" => in_text = true,
+            Ok(Event::End(e)) if e.name().as_ref() == "w:t" => in_text = false,
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) if in_text => {
                 if let Some((text, style, largest)) = paragraph.as_mut() {
                     push_sized_text(ev, text, largest, run.or(*style).unwrap_or(default));
                 }
             }
-            Ok(Event::Empty(e)) if matches!(e.name().as_ref(), b"w:tab" | b"w:br" | b"w:cr") => {
+            Ok(Event::Empty(e)) if matches!(e.name().as_ref(), "w:tab" | "w:br" | "w:cr") => {
                 if let Some((text, _, _)) = paragraph.as_mut() {
                     text.push(' ');
                 }
             }
-            Ok(Event::End(e)) if e.name().as_ref() == b"w:p" => {
+            Ok(Event::End(e)) if e.name().as_ref() == "w:p" => {
                 if let Some((text, _, largest)) = paragraph.take()
                     && keep_opening(&mut lines, text, largest / 2.0)
                 {
@@ -536,26 +523,26 @@ fn pptx_title(path: &Path) -> Option<String> {
             Ok(Event::Start(e)) => {
                 depth += 1;
                 match e.name().as_ref() {
-                    b"p:sp" => {
+                    "p:sp" => {
                         shape_start = Some(depth);
                         is_title = false;
                         text.clear();
                     }
-                    b"a:t" => in_text = true,
+                    "a:t" => in_text = true,
                     _ => {}
                 }
             }
-            Ok(Event::Empty(e)) if e.name().as_ref() == b"p:ph" => {
-                is_title |= matches!(attr(e, b"type").as_deref(), Some("title" | "ctrTitle"));
+            Ok(Event::Empty(e)) if e.name().as_ref() == "p:ph" => {
+                is_title |= matches!(attr(e, "type").as_deref(), Some("title" | "ctrTitle"));
             }
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) if in_text => {
                 push_event_text(ev, &mut text)
             }
             Ok(Event::End(e)) => {
                 match e.name().as_ref() {
-                    b"a:t" => in_text = false,
-                    b"a:p" => text.push(' '),
-                    b"p:sp" if shape_start == Some(depth) => {
+                    "a:t" => in_text = false,
+                    "a:p" => text.push(' '),
+                    "p:sp" if shape_start == Some(depth) => {
                         if is_title && !text.trim().is_empty() {
                             return Some(text.split_whitespace().collect::<Vec<_>>().join(" "));
                         }
@@ -582,20 +569,20 @@ fn odp_title(path: &Path) -> Option<String> {
     loop {
         let event = reader.read_event_into(&mut buf);
         match &event {
-            Ok(Event::Start(e)) if e.name().as_ref() == b"draw:page" => {
+            Ok(Event::Start(e)) if e.name().as_ref() == "draw:page" => {
                 pages += 1;
                 if pages > 1 {
                     return None;
                 }
             }
-            Ok(Event::Start(e)) if e.name().as_ref() == b"draw:frame" => {
-                in_title = attr(e, b"presentation:class").as_deref() == Some("title");
+            Ok(Event::Start(e)) if e.name().as_ref() == "draw:frame" => {
+                in_title = attr(e, "presentation:class").as_deref() == Some("title");
             }
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) if in_title => {
                 push_event_text(ev, &mut text)
             }
-            Ok(Event::End(e)) if in_title && e.name().as_ref() == b"text:p" => text.push(' '),
-            Ok(Event::End(e)) if e.name().as_ref() == b"draw:frame" && in_title => {
+            Ok(Event::End(e)) if in_title && e.name().as_ref() == "text:p" => text.push(' '),
+            Ok(Event::End(e)) if e.name().as_ref() == "draw:frame" && in_title => {
                 let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 return (!title.is_empty()).then_some(title);
             }
