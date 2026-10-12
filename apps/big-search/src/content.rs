@@ -363,19 +363,30 @@ pub fn index_content_limited_with_writer(
                     continue;
                 }
                 let (do_content, do_metadata) = crate::settings::policy_for(&path);
-                // The extracted text is the accumulator, never a part to be
-                // joined: joining copies the whole body a second time, and a
-                // body here can be tens of megabytes.
-                let mut body = do_content.then(|| extract::content(&path)).flatten();
-                if do_metadata && let Some(meta) = crate::meta::metadata_text(&path) {
-                    match &mut body {
-                        Some(text) => {
-                            text.push('\n');
-                            text.push_str(&meta);
+                // The parsers read untrusted bytes. A panic in one costs this
+                // file its body, not the worker and the rest of its queue; the
+                // state row is still written, so the file waits until it changes.
+                let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // The extracted text is the accumulator, never a part to be
+                    // joined: joining copies the whole body a second time, and a
+                    // body here can be tens of megabytes.
+                    let mut body = do_content.then(|| extract::content(&path)).flatten();
+                    if do_metadata && let Some(meta) = crate::meta::metadata_text(&path, do_content)
+                    {
+                        match &mut body {
+                            Some(text) => {
+                                text.push('\n');
+                                text.push_str(&meta);
+                            }
+                            None => body = Some(meta),
                         }
-                        None => body = Some(meta),
                     }
-                }
+                    body
+                }))
+                .unwrap_or_else(|_| {
+                    log::warn!("content extraction panicked on {}", path.display());
+                    None
+                });
                 let _ = tx.send(ContentResult {
                     path,
                     mtime,
@@ -387,36 +398,44 @@ pub fn index_content_limited_with_writer(
     }
     drop(tx); // close channel once all workers finish
 
+    // State is persisted only after the commit that holds its documents: a row
+    // persisted first would mark a file done that a crash leaves unindexed.
     let mut indexed = 0u64;
-    let mut since_commit = 0u64;
-    let mut since_state_persist = 0u64;
+    let mut uncommitted = false;
+    let mut since_checkpoint = 0u64;
     for result in rx {
         if let Some(body) = result.body {
             upsert_with_body(writer, f, &result.path, &body)?;
             indexed += 1;
-            since_commit += 1;
+            uncommitted = true;
         }
         content_state.set(&result.path, result.mtime, result.size);
-        since_state_persist += 1;
-        if since_commit >= 2000 {
-            writer.commit().context("commit content batch")?;
-            since_commit = 0;
-        }
-        if since_state_persist >= 2000 {
+        since_checkpoint += 1;
+        if since_checkpoint >= 2000 {
+            if uncommitted {
+                writer.commit().context("commit content batch")?;
+                uncommitted = false;
+            }
             content_state.persist()?;
-            since_state_persist = 0;
+            since_checkpoint = 0;
         }
     }
-    if since_commit > 0 {
+    if uncommitted {
         writer.commit().context("commit content")?;
     }
-    content_state.persist()?;
     for w in workers {
         let _ = w.join();
     }
     if let Some(signatures) = signatures {
-        signatures.lock().expect("signature lock").persist()?;
+        let mut signatures = signatures.lock().expect("signature lock");
+        // Copies of text their representative no longer holds: forgotten, so
+        // the next pass reads them.
+        for path in signatures.take_released() {
+            content_state.remove(&path);
+        }
+        signatures.persist()?;
     }
+    content_state.persist()?;
     Ok(indexed)
 }
 

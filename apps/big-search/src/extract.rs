@@ -197,33 +197,41 @@ fn read_epub(path: &Path) -> Option<(String, Option<String>)> {
         return None;
     }
     let cap = max_extract_bytes();
-    let mut part = |name: &str| -> Option<String> {
+    let mut part = |name: &str, limit: usize| -> Option<String> {
         let mut entry = zip.by_name(name).ok()?;
         let mut bytes = Vec::new();
         entry
             .by_ref()
-            .take(cap as u64)
+            .take(limit as u64)
             .read_to_end(&mut bytes)
             .ok()?;
         Some(String::from_utf8_lossy(&bytes).into_owned())
     };
-    let container = part("META-INF/container.xml")?;
+    let container = part("META-INF/container.xml", cap)?;
     let opf_path = epub_package(container.as_bytes())?;
-    let opf = part(&opf_path)?;
+    let opf = part(&opf_path, cap)?;
     let base = opf_path.rsplit_once('/').map_or("", |(dir, _)| dir);
     let (title, spine) = epub_spine(opf.as_bytes());
     let mut text = String::new();
+    // Chapters of markup alone yield no text, so the output cap never stops a
+    // spine of them; this bounds what the whole book may inflate.
+    let mut inflate_budget = cap.saturating_mul(2);
+    let mut seen = std::collections::HashSet::new();
     for href in spine.iter().take(MAX_EPUB_PARTS) {
+        if !seen.insert(href.as_str()) {
+            continue;
+        }
         let name = if base.is_empty() {
             percent_decoded(href)
         } else {
             format!("{base}/{}", percent_decoded(href))
         };
-        if let Some(chapter) = part(&name) {
+        if let Some(chapter) = part(&name, cap.min(inflate_budget)) {
+            inflate_budget -= chapter.len().min(inflate_budget);
             text.push_str(&html_text(&chapter));
             text.push('\n');
         }
-        if text.len() >= cap {
+        if text.len() >= cap || inflate_budget == 0 {
             truncate_to_char_boundary(&mut text, cap);
             break;
         }
@@ -267,6 +275,7 @@ fn epub_spine(opf: &[u8]) -> (Option<String>, Vec<String>) {
     let mut buf = Vec::new();
     let (mut hrefs, mut order) = (std::collections::HashMap::new(), Vec::new());
     let (mut title, mut in_title) = (None::<String>, false);
+    let mut title_text = String::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e) | Event::Empty(e)) => match local_name(&e).as_slice() {
@@ -281,13 +290,16 @@ fn epub_spine(opf: &[u8]) -> (Option<String>, Vec<String>) {
                 b"title" if title.is_none() => in_title = true,
                 _ => {}
             },
-            Ok(Event::Text(t)) if in_title => {
-                let text = t.decode().map(|s| s.trim().to_owned()).unwrap_or_default();
+            Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) if in_title => {
+                push_xml_text(&e, &mut title_text);
+            }
+            Ok(Event::End(e)) if in_title && e.local_name().as_ref() == b"title" => {
+                in_title = false;
+                let text = title_text.trim();
                 if !text.is_empty() {
-                    title = Some(text);
+                    title = Some(text.to_owned());
                 }
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"title" => in_title = false,
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -366,7 +378,7 @@ fn html_element(html: &str, tag: &str) -> Option<String> {
 /// The readable text of HTML: scripts and styles dropped, block elements as
 /// line breaks, the common entities decoded. Enough to read a saved page's
 /// title and dates, not a renderer.
-pub(crate) fn html_text(html: &str) -> String {
+pub fn html_text(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len() / 2);
     let mut at = 0;
@@ -374,14 +386,14 @@ pub(crate) fn html_text(html: &str) -> String {
         out.push_str(&html[at..open]);
         let tag_end = lower[open..].find('>').map_or(html.len(), |i| open + i + 1);
         let tag = &lower[open..tag_end];
+        // An unclosed script or style runs to the end, as in a browser; searching
+        // again from every later opener would make the scan quadratic.
         let skip_to = ["script", "style"].iter().find_map(|name| {
-            tag.starts_with(&format!("<{name}"))
-                .then(|| {
-                    lower[tag_end..]
-                        .find(&format!("</{name}"))
-                        .map(|i| tag_end + i)
-                })
-                .flatten()
+            tag.starts_with(&format!("<{name}")).then(|| {
+                lower[tag_end..]
+                    .find(&format!("</{name}"))
+                    .map_or(html.len(), |i| tag_end + i)
+            })
         });
         let block = [
             "<p", "</p", "<br", "<div", "</div", "<h", "</h", "<li", "<tr", "<title", "</title",
@@ -404,9 +416,12 @@ fn decode_entities(s: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        let entity = rest[1..]
-            .find(';')
-            .filter(|&end| end <= 10)
+        // Only the next 11 bytes: a search to the end for every `&` is quadratic.
+        // `;` is ASCII, so its index is a char boundary.
+        let entity = rest.as_bytes()[1..]
+            .iter()
+            .take(11)
+            .position(|&b| b == b';')
             .map(|end| &rest[1..=end]);
         let decoded = entity.and_then(|e| match e {
             "amp" => Some('&'),
@@ -658,13 +673,23 @@ pub fn fold_lower_into(s: &str, out: &mut String) {
 /// compatibility ideographs, fullwidth Latin and ligatures ("ﬁ") become the
 /// characters people type. Text already in that form, nearly all of it, is not
 /// copied.
+///
+/// A copy stops at [`max_extract_bytes`]: one character can expand eighteenfold
+/// ("ﷺ"), and the extraction cap counts bytes before normalisation.
 pub(crate) fn compose(text: &str) -> std::borrow::Cow<'_, str> {
     use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfkc_quick};
     if text.is_ascii() || is_nfkc_quick(text.chars()) == IsNormalized::Yes {
-        std::borrow::Cow::Borrowed(text)
-    } else {
-        std::borrow::Cow::Owned(text.nfkc().collect())
+        return std::borrow::Cow::Borrowed(text);
     }
+    let cap = max_extract_bytes();
+    let mut out = String::with_capacity(text.len().min(cap));
+    for c in text.nfkc() {
+        if out.len() + c.len_utf8() > cap {
+            break;
+        }
+        out.push(c);
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// The folding of lowercase text that `AsciiFoldingFilter` leaves to others:
@@ -823,33 +848,33 @@ fn for_each_office_page(
     break_tag: &[u8],
     on_page: &mut dyn FnMut(&str),
 ) -> bool {
+    use quick_xml::events::Event;
     let Some(xml) = zip_entry_bytes(path, part) else {
         return false;
     };
     let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
     let mut buf = Vec::new();
     let mut page = String::new();
+    let mut run = String::new();
     let mut breaks = 0usize;
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Empty(e)) | Ok(quick_xml::events::Event::Start(e))
-                if is_page_break(&e, break_tag) =>
-            {
+            Ok(Event::Empty(e) | Event::Start(e)) if is_page_break(&e, break_tag) => {
                 breaks += 1;
+                end_run(&mut run, &mut page);
                 on_page(&page);
                 page.clear();
             }
-            Ok(quick_xml::events::Event::Text(t)) => {
-                append_decoded(&t, &mut page, false);
-            }
-            Ok(quick_xml::events::Event::Eof) | Err(_) => break,
-            _ => {}
+            Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, &mut run),
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => end_run(&mut run, &mut page),
         }
         buf.clear();
     }
     if breaks == 0 {
         return false;
     }
+    end_run(&mut run, &mut page);
     on_page(&page);
     true
 }
@@ -907,28 +932,26 @@ fn is_page_break(e: &quick_xml::events::BytesStart, break_tag: &[u8]) -> bool {
     false
 }
 
-/// Append all XML character data from `xml` to `out`, space-separated.
+/// Append all XML character data from `xml` to `out`, a space between elements.
 ///
 /// Bytes, not text: every caller has an office part it just read, and turning
 /// that into a `String` first is a copy of the whole part for nothing.
 pub fn xml_text(xml: &[u8], out: &mut String) {
+    use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
+    let mut run = String::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Text(e)) => append_decoded(&e, out, true),
-            Ok(quick_xml::events::Event::Eof) | Err(_) => break,
-            _ => {}
+            Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, &mut run),
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => end_run(&mut run, out),
         }
         buf.clear();
     }
+    end_run(&mut run, out);
 }
 
-/// Append one text event, trimmed and followed by a space.
-///
-/// Bytes that are not valid UTF-8 are read lossily rather than dropped: an
-/// office part is UTF-8 by specification, so this only happens to a damaged
-/// file, and a damaged file should still give up whatever text it has.
 /// Text of an OOXML/ODF part as the document lays it out: a line per paragraph or
 /// heading, line breaks and tabs kept, and the runs of a paragraph joined as
 /// written — Word splits words across runs, so a space between runs would break
@@ -948,24 +971,7 @@ pub fn xml_text_lines(xml: &[u8], out: &mut String) {
             }
             Ok(Event::Text(_) | Event::GeneralRef(_) | Event::End(_) | Event::Empty(_))
                 if hidden_depth > 0 => {}
-            Ok(Event::Text(e)) => match e.decode() {
-                Ok(text) => out.push_str(&text),
-                Err(_) => out.push_str(&String::from_utf8_lossy(&e)),
-            },
-            Ok(Event::GeneralRef(r)) => {
-                if let Ok(Some(c)) = r.resolve_char_ref() {
-                    out.push(c);
-                } else if let Ok(name) = r.decode() {
-                    out.push_str(match name.as_ref() {
-                        "amp" => "&",
-                        "lt" => "<",
-                        "gt" => ">",
-                        "quot" => "\"",
-                        "apos" => "'",
-                        _ => "",
-                    });
-                }
-            }
+            Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, out),
             Ok(Event::End(e)) => match e.name().as_ref() {
                 b"w:p" | b"text:p" | b"text:h" | b"a:p" => out.push('\n'),
                 b"w:tc" | b"table:table-cell" => out.push('\t'),
@@ -985,17 +991,47 @@ pub fn xml_text_lines(xml: &[u8], out: &mut String) {
     }
 }
 
-fn append_decoded(event: &quick_xml::events::BytesText<'_>, out: &mut String, skip_empty: bool) {
-    let decoded = event.decode().map_or_else(
-        |_| String::from_utf8_lossy(event).into_owned(),
-        |t| t.into_owned(),
-    );
-    let text = decoded.trim();
-    if skip_empty && text.is_empty() {
-        return;
+/// The text of a text event or an entity reference, appended as written.
+///
+/// quick-xml reports `&amp;` and `&#243;` as events of their own, between the
+/// text around them. Bytes that are not valid UTF-8 are read lossily rather
+/// than dropped: an office part is UTF-8 by specification, so this only
+/// happens to a damaged file, and a damaged file should still give up whatever
+/// text it has.
+fn push_xml_text(event: &quick_xml::events::Event<'_>, out: &mut String) {
+    use quick_xml::events::Event;
+    match event {
+        Event::Text(t) => match t.decode() {
+            Ok(text) => out.push_str(&text),
+            Err(_) => out.push_str(&String::from_utf8_lossy(t)),
+        },
+        Event::GeneralRef(r) => {
+            if let Ok(Some(c)) = r.resolve_char_ref() {
+                out.push(c);
+            } else if let Ok(name) = r.decode() {
+                out.push_str(match name.as_ref() {
+                    "amp" => "&",
+                    "lt" => "<",
+                    "gt" => ">",
+                    "quot" => "\"",
+                    "apos" => "'",
+                    _ => "",
+                });
+            }
+        }
+        _ => {}
     }
-    out.push_str(text);
-    out.push(' ');
+}
+
+/// Move the text gathered inside one element to `out`, trimmed and followed by
+/// a space.
+fn end_run(run: &mut String, out: &mut String) {
+    let text = run.trim();
+    if !text.is_empty() {
+        out.push_str(text);
+        out.push(' ');
+    }
+    run.clear();
 }
 
 #[cfg(test)]
@@ -1024,6 +1060,33 @@ mod tests {
             markdown_headings("intro\n## Usage\n# Getting started #\n#hashtag\n# Second"),
             ["Getting started", "Second", "Usage"]
         );
+    }
+
+    #[test]
+    fn unclosed_script_hides_the_rest() {
+        assert_eq!(html_text("<p>kept<script>a<script>b<style>c"), "\nkept");
+    }
+
+    /// References are part of the word around them; elements separate words.
+    #[test]
+    fn office_text_keeps_references_in_words() {
+        let docx = br#"<w:p><w:r><w:t>relat&#243;rio</w:t></w:r></w:p><w:p><w:r><w:t>Lopes &amp; Filhos</w:t></w:r></w:p>"#;
+        let mut out = String::new();
+        xml_text(docx, &mut out);
+        assert_eq!(out, "relatório Lopes & Filhos ");
+    }
+
+    #[test]
+    fn composed_text_stops_at_extraction_cap() {
+        let _lock = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _cap = crate::test_env::EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
+        let cap = max_extract_bytes();
+        // U+FDFA is 3 bytes and 33 under NFKC.
+        let text = "\u{FDFA}".repeat(cap / 3);
+        let composed = compose(&text);
+        assert!(composed.len() <= cap && composed.len() > cap - 33);
     }
 
     /// Paragraphs become lines, a word Word split across runs stays whole, and
@@ -1098,44 +1161,32 @@ mod tests {
 
     #[test]
     fn office_extractors_skip_files_above_input_cap() {
+        let _lock = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temporary_extract_dir("cap");
         let path = dir.join("huge.docx");
-        let previous = std::env::var_os("BIG_SEARCH_CONTENT_MAX_MB");
-        unsafe {
-            std::env::set_var("BIG_SEARCH_CONTENT_MAX_MB", "1");
-        }
+        let _cap = crate::test_env::EnvVarGuard::set("BIG_SEARCH_CONTENT_MAX_MB", "1");
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(2 * 1024 * 1024).unwrap();
         drop(file);
         assert!(exceeds_input_cap(&path));
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("BIG_SEARCH_CONTENT_MAX_MB", value),
-                None => std::env::remove_var("BIG_SEARCH_CONTENT_MAX_MB"),
-            }
-        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn text_extraction_skips_files_above_text_input_cap() {
+        let _lock = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temporary_extract_dir("textcap");
         let path = dir.join("huge.txt");
-        let previous = std::env::var_os("BIG_SEARCH_TEXT_MAX_MB");
-        unsafe {
-            std::env::set_var("BIG_SEARCH_TEXT_MAX_MB", "1");
-        }
+        let _cap = crate::test_env::EnvVarGuard::set("BIG_SEARCH_TEXT_MAX_MB", "1");
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(2 * 1024 * 1024).unwrap();
         drop(file);
         assert!(text_input_size(&path).is_none());
         assert!(content(&path).is_none());
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("BIG_SEARCH_TEXT_MAX_MB", value),
-                None => std::env::remove_var("BIG_SEARCH_TEXT_MAX_MB"),
-            }
-        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1182,9 +1233,9 @@ mod tests {
             );
             add(
                 "OEBPS/content.opf",
-                r#"<package><metadata><dc:title>Dom Casmurro</dc:title></metadata>
+                r#"<package><metadata><dc:title>Dom Casmurro &amp; Cia</dc:title></metadata>
                 <manifest><opf:item id="c2" href="cap%202.xhtml"/><item id="c1" href="cap1.xhtml"/></manifest>
-                <spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#,
+                <spine><itemref idref="c1"/><itemref idref="c2"/><itemref idref="c1"/></spine></package>"#,
             );
             add(
                 "OEBPS/cap1.xhtml",
@@ -1198,7 +1249,9 @@ mod tests {
         }
         assert!(is_content_path(&path));
         let (text, title) = read_epub(&path).unwrap();
-        assert_eq!(title.as_deref(), Some("Dom Casmurro"));
+        assert_eq!(title.as_deref(), Some("Dom Casmurro & Cia"));
+        // A chapter the spine lists twice is read once.
+        assert_eq!(text.matches("Do título").count(), 1, "{text:?}");
         let (first, second) = (
             text.find("Do título").unwrap(),
             text.find("Do livro").unwrap(),
@@ -1223,7 +1276,7 @@ mod tests {
                 br#"<w:document><w:body>
                     <w:p><w:r><w:t>alphaword first</w:t></w:r></w:p>
                     <w:r><w:lastRenderedPageBreak/></w:r>
-                    <w:p><w:r><w:t>betaword second</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>betaword relat&#243;rio</w:t></w:r></w:p>
                 </w:body></w:document>"#,
             )
             .unwrap();
@@ -1231,6 +1284,7 @@ mod tests {
         }
         assert_eq!(pages_with(&path, &["alphaword".to_string()]), vec![1]);
         assert_eq!(pages_with(&path, &["betaword".to_string()]), vec![2]);
+        assert_eq!(pages_with(&path, &["relatorio".to_string()]), vec![2]);
         assert!(pages_with(&path, &["missing".to_string()]).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }

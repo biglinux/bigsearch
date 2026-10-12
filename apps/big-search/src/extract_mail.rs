@@ -177,6 +177,12 @@ fn decode_charset(bytes: &[u8], charset: Option<&str>) -> String {
     }
 }
 
+/// Longest encoded word read. RFC 2047 allows 75 characters, but some mailers
+/// write a whole subject as one word; RFC 5322 still ends a line at 998. The
+/// limit keeps each search for "?=" local, so a header of unterminated "=?"
+/// costs linear time.
+const MAX_ENCODED_WORD: usize = 998;
+
 /// RFC 2047 encoded words in a header: "=?UTF-8?B?w4l…?=", "=?iso-8859-1?Q?Ol=E1?=".
 fn decode_words(value: &str) -> String {
     let mut out = String::new();
@@ -184,7 +190,11 @@ fn decode_words(value: &str) -> String {
     let mut after_word = false;
     while let Some(start) = rest.find("=?") {
         let decoded = (|| {
-            let inner = &rest[start + 2..];
+            let mut end = (start + MAX_ENCODED_WORD).min(rest.len());
+            while !rest.is_char_boundary(end) {
+                end -= 1;
+            }
+            let inner = &rest[start + 2..end];
             let (charset, inner) = inner.split_once('?')?;
             let (encoding, inner) = inner.split_once('?')?;
             let (text, _) = inner.split_once("?=")?;
@@ -302,5 +312,12 @@ Content-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n--b1--\r\n";
         assert!(text.contains("Reunião"), "{text}");
         let latin = b"Subject: Ola\nContent-Type: text/plain; charset=ISO-8859-1\n\nRelat\xf3rio\n";
         assert!(read_eml(latin).expect("text").0.contains("Relatório"));
+    }
+
+    #[test]
+    fn overlong_encoded_word_stays_verbatim() {
+        let word = format!("=?utf-8?q?{}?=", "a".repeat(MAX_ENCODED_WORD));
+        assert_eq!(decode_words(&word), word);
+        assert_eq!(decode_words("=?utf-8?q?Ol=C3=A1?="), "Olá");
     }
 }

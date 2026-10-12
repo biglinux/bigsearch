@@ -64,3 +64,10 @@ path = "fuzz_targets/rtf_bytes.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "html_text"
+path = "fuzz_targets/html_text.rs"
+test = false
+doc = false
+bench = false

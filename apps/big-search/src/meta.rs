@@ -1,10 +1,12 @@
 //! Optional metadata enrichment: content-based file **kind** plus media/image
 //! metadata, indexed as searchable `body` text (no schema change, no new wire
-//! fields). Every parser is pure safe Rust — `symphonia` is `#![forbid(unsafe)]`,
-//! `file-format`/`imagesize` are pure Rust — so a malicious file cannot trigger
-//! the C memory-corruption class that forces other indexers to sandbox poppler/
-//! gstreamer. Work is still bounded (max file size) and runs only in the
-//! throttled background pass. Each feature is individually switchable by env so
+//! fields). Every metadata parser is pure safe Rust (`symphonia` is
+//! `#![forbid(unsafe)]`, `file-format`/`imagesize` are pure Rust), so a malicious
+//! media file cannot trigger the C memory-corruption class that forces other
+//! indexers to sandbox gstreamer. The one exception is an extension-less document
+//! found by sniffing: when its source indexes content, its text comes from
+//! [`crate::extract`], which runs `pdftotext` for a PDF. Work is still bounded
+//! (max file size) and runs only in the throttled background pass. Each feature is individually switchable by env so
 //! the daemon can be tuned (and a parser disabled instantly if a CVE lands).
 //!
 //! Env (all default on; `0`/`false`/`no`/`off` disables):
@@ -228,7 +230,10 @@ pub fn normalize_tag(tag: &str) -> String {
 /// Searchable metadata text for `path` (kind keyword + media/image facts), or
 /// `None` when nothing applies. Indexed into `body`, so `big-search content
 /// <artist|1920x1080|video|…>` finds it.
-pub fn metadata_text(path: &Path) -> Option<String> {
+///
+/// `with_content` is the source's content policy: an extension-less document
+/// found by sniffing has its text read only when that policy is on.
+pub fn metadata_text(path: &Path, with_content: bool) -> Option<String> {
     let metadata_config = config();
     if !metadata_config.any {
         return None;
@@ -266,7 +271,7 @@ pub fn metadata_text(path: &Path) -> Option<String> {
         Kind::Image if metadata_config.image => parts.extend(image_text(path)),
         // Extension-less document found by sniffing → extract its text so it is
         // searchable like a normally-suffixed file would be.
-        Kind::Document => {
+        Kind::Document if with_content => {
             if let Some(mime) = sniffed_mime.as_deref()
                 && let Some(text) = crate::extract::content_for_mime(path, mime)
             {
@@ -468,5 +473,18 @@ mod tests {
         std::fs::write(&path, minimal_png(320, 240)).unwrap();
         assert_eq!(image_text(&path), vec!["320x240".to_string()]);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sniffed_document_text_follows_content_policy() {
+        let dir = std::env::temp_dir().join(format!("bsmeta-policy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes");
+        std::fs::write(&path, "#!/bin/sh\necho segredo\n").unwrap();
+        let with = metadata_text(&path, true).unwrap_or_default();
+        let without = metadata_text(&path, false).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(with.contains("segredo"), "{with:?}");
+        assert_eq!(without, "document");
     }
 }

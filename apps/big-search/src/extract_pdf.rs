@@ -458,13 +458,10 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    /// Tests below mutate process-wide globals (PATH, timeout env). `cargo
-    /// test` runs tests as threads of one process (unlike nextest's
-    /// process-per-test), so they must be serialized or they poison each other.
-    static SUBPROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// Tests below change PATH and timeout variables, which every test in the
+    /// crate shares: they hold the crate-wide lock.
     fn subprocess_env_guard() -> std::sync::MutexGuard<'static, ()> {
-        SUBPROCESS_ENV_LOCK
+        crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -515,30 +512,17 @@ mod tests {
         std::fs::write(&path, b"%PDF fake").unwrap();
 
         let previous_path = std::env::var_os("PATH");
-        let previous_extract_cap = std::env::var_os("BIG_SEARCH_EXTRACT_MAX_MB");
         let test_path = previous_path
             .as_ref()
             .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
             .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        unsafe {
-            std::env::set_var("PATH", test_path);
-            std::env::set_var("BIG_SEARCH_EXTRACT_MAX_MB", "1");
-        }
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _limit = crate::test_env::EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
 
         let text = read_pdf(&path).unwrap();
         assert_eq!(text.len(), crate::extract::max_extract_bytes());
         assert!(text.bytes().all(|byte| byte == b'a'));
 
-        unsafe {
-            match previous_path {
-                Some(value) => std::env::set_var("PATH", value),
-                None => std::env::remove_var("PATH"),
-            }
-            match previous_extract_cap {
-                Some(value) => std::env::set_var("BIG_SEARCH_EXTRACT_MAX_MB", value),
-                None => std::env::remove_var("BIG_SEARCH_EXTRACT_MAX_MB"),
-            }
-        }
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&bin).ok();
     }
@@ -575,19 +559,11 @@ mod tests {
             .as_ref()
             .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
             .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        unsafe {
-            std::env::set_var("PATH", test_path);
-        }
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
         let word_text = crate::extract::content(&word);
         let rtf_described = crate::extract::described(&rtf);
         let other_text = crate::extract::content(&other);
         let plain_text = crate::extract::content(&text);
-        unsafe {
-            match previous_path {
-                Some(value) => std::env::set_var("PATH", value),
-                None => std::env::remove_var("PATH"),
-            }
-        }
 
         assert_eq!(
             word_text.as_deref().map(str::trim_end),
@@ -623,30 +599,16 @@ mod tests {
         std::fs::write(&path, b"%PDF fake").unwrap();
 
         let previous_path = std::env::var_os("PATH");
-        let previous_timeout = std::env::var_os("BIG_SEARCH_PDF_TIMEOUT_SECS");
         let test_path = previous_path
             .as_ref()
             .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
             .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        unsafe {
-            std::env::set_var("PATH", test_path);
-            std::env::set_var("BIG_SEARCH_PDF_TIMEOUT_SECS", "1");
-        }
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _limit = crate::test_env::EnvVarGuard::set("BIG_SEARCH_PDF_TIMEOUT_SECS", "1");
 
         let started = std::time::Instant::now();
         let text = read_pdf(&path);
         let elapsed = started.elapsed();
-
-        unsafe {
-            match previous_path {
-                Some(value) => std::env::set_var("PATH", value),
-                None => std::env::remove_var("PATH"),
-            }
-            match previous_timeout {
-                Some(value) => std::env::set_var("BIG_SEARCH_PDF_TIMEOUT_SECS", value),
-                None => std::env::remove_var("BIG_SEARCH_PDF_TIMEOUT_SECS"),
-            }
-        }
 
         assert_eq!(text.as_deref(), Some("first page\n"));
         assert!(
@@ -671,30 +633,16 @@ mod tests {
         std::fs::write(&path, b"%PDF fake").unwrap();
 
         let previous_path = std::env::var_os("PATH");
-        let previous_timeout = std::env::var_os("BIG_SEARCH_PDF_TIMEOUT_SECS");
         let test_path = previous_path
             .as_ref()
             .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
             .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        unsafe {
-            std::env::set_var("PATH", test_path);
-            std::env::set_var("BIG_SEARCH_PDF_TIMEOUT_SECS", "1");
-        }
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _limit = crate::test_env::EnvVarGuard::set("BIG_SEARCH_PDF_TIMEOUT_SECS", "1");
 
         let started = std::time::Instant::now();
         let text = read_pdf(&path);
         let elapsed = started.elapsed();
-
-        unsafe {
-            match previous_path {
-                Some(value) => std::env::set_var("PATH", value),
-                None => std::env::remove_var("PATH"),
-            }
-            match previous_timeout {
-                Some(value) => std::env::set_var("BIG_SEARCH_PDF_TIMEOUT_SECS", value),
-                None => std::env::remove_var("BIG_SEARCH_PDF_TIMEOUT_SECS"),
-            }
-        }
 
         assert!(text.is_none(), "hung extractor must yield no text");
         assert!(
