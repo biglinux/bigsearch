@@ -407,6 +407,8 @@ fn pidfd_supported() -> bool {
 
 fn kill_child_tree(child: &mut Child) {
     #[cfg(unix)]
+    // SAFETY: kill(2) takes plain integers; the child was spawned with
+    // `process_group(0)`, so its pid is its own group and nothing else's.
     unsafe {
         let child_signal_group = child.id() as libc::pid_t;
         let _ = libc::kill(-child_signal_group, libc::SIGKILL);

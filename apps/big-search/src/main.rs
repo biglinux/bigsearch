@@ -96,6 +96,8 @@ fn env_var_nonzero(name: &str) -> bool {
 }
 
 fn stdout_is_tty() -> bool {
+    // SAFETY: isatty(3) only inspects a descriptor number; an invalid one
+    // returns 0.
     unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
 }
 

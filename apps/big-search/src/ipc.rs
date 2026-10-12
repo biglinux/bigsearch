@@ -241,6 +241,7 @@ fn peer_is_self(stream: &UnixStream) -> bool {
             &mut len,
         )
     };
+    // SAFETY: getuid(2) has no arguments and cannot fail.
     rc == 0 && cred.uid == unsafe { libc::getuid() }
 }
 
