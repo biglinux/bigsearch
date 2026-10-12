@@ -79,7 +79,7 @@ check() {
 
 package_big-search() {
     pkgdesc="Lean unprivileged filename + content search daemon for the Linux desktop"
-    depends=('glibc' 'libgcc' 'sqlite' 'poppler' 'antiword')
+    depends=('glibc' 'libgcc' 'sqlite' 'poppler' 'antiword' 'shared-mime-info')
 
     cd "${srcdir}/${pkgbase}" || return
     install -Dm755 "${srcdir}/target/release/big-search" "${pkgdir}/usr/bin/big-search"

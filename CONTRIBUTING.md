@@ -13,8 +13,8 @@ file names and contents you would not want public.
 
 ## Building and testing
 
-You need Rust 1.98.1 (rustup picks it up from `rust-toolchain.toml`), SQLite 3
-and poppler. The settings page also needs GTK 4.22 and libadwaita 1.9.
+You need Rust 1.98.1 (rustup picks it up from `rust-toolchain.toml`), SQLite 3,
+poppler and shared-mime-info. The settings page also needs GTK 4.22 and libadwaita 1.9.
 
 ```sh
 cargo fmt --all -- --check

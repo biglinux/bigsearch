@@ -42,6 +42,7 @@ SQLite.
 - Rust 1.98.1; com rustup, o `rust-toolchain.toml` o seleciona.
 - SQLite 3; poppler (`pdftotext`) para conteúdo de PDF e `antiword` para
   documentos do Word 97-2003.
+- shared-mime-info, que dá o tipo de um arquivo pelo nome.
 - Só para a página de configurações: GTK 4.22 e libadwaita 1.9.
 
 ## Compilar e instalar
