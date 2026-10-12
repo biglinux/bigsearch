@@ -15,7 +15,7 @@ workspace = "../../../.."
 [dependencies]
 adw = { version = "0.9", features = ["v1_9"], package = "libadwaita" }
 gtk = { version = "0.11", features = ["v4_22"], package = "gtk4" }
-gettext-rs = { version = "0.7", features = ["gettext-system"] }
+gettext-rs = { version = "0.8", features = ["gettext-system"] }
 big-indexd-client = { path = "../../../foundation/big-indexd-client", version = "0.1.0" }
 big-search-config = { path = "../../../foundation/big-search-config", version = "0.1.0" }
 log = { version = "0.4", features = ["std"] }
