@@ -25,6 +25,8 @@ pub struct Control {
     /// Files whose content extraction is deferred by the edit cooldown; exposed
     /// on query/status replies so UIs can show a "content still indexing" hint.
     pub pending_content: Arc<AtomicU64>,
+    /// Folders the watcher could not watch.
+    pub unwatched_dirs: Arc<AtomicU64>,
 }
 
 /// Upper bound on a single request line. A query is a few bytes; this only refuses a
@@ -74,11 +76,10 @@ pub fn serve(
 ) -> Result<()> {
     if let Some(dir) = sock.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-        // Must be ours, a real directory, and private. Without XDG_RUNTIME_DIR
-        // this falls back to a predictable path under /tmp, where the sticky bit
-        // lets another local account create it first; binding our socket inside
-        // it would let them replace the socket, and clients do not authenticate
-        // the server.
+        // Must be ours, a real directory, and private: clients do not
+        // authenticate the server, so whoever owns the directory could replace
+        // the socket. The runtime directory comes from the environment, which
+        // the daemon does not control.
         //
         // Checked before the chmod, and with `symlink_metadata`: the other order
         // followed a planted symlink and changed the mode of someone else's
@@ -123,6 +124,15 @@ pub fn serve(
             Ok(s) => s,
             Err(e) => {
                 log::warn!("accept error: {e}");
+                // Out of descriptors or memory: the pending connection stays
+                // queued and accept fails again at once, so wait for a
+                // connection thread to finish instead of spinning.
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+                ) {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
                 continue;
             }
         };
@@ -154,6 +164,7 @@ pub fn serve(
             paused: control.paused.clone(),
             activity: control.activity.clone(),
             pending_content: control.pending_content.clone(),
+            unwatched_dirs: control.unwatched_dirs.clone(),
         };
         // One reader per connection: it holds a `RefCell<Connection>`, so it is
         // not shareable, and it opens nothing until first use.
@@ -376,6 +387,7 @@ fn dispatch(
                 content_docs: index::document_count(content_index).unwrap_or(0),
                 name_index_bytes: flat_directory_file_bytes(&config::index_dir()),
                 content_index_bytes: flat_directory_file_bytes(&config::content_index_dir()),
+                unwatched_dirs: control.unwatched_dirs.load(Ordering::Relaxed),
             }
         }
         // Hand the command to the watcher thread over the shared channel; it applies
@@ -383,16 +395,32 @@ fn dispatch(
         RequestBody::Pause => send_control_command(control, WatchControlCommand::Pause),
         RequestBody::Resume => send_control_command(control, WatchControlCommand::Resume),
         RequestBody::Rebuild => send_control_command(control, WatchControlCommand::Rebuild),
-        RequestBody::Reindex(request) => send_control_command(
-            control,
-            WatchControlCommand::ReindexPath(std::path::PathBuf::from(request.path)),
-        ),
-        RequestBody::ClearOrigin => send_control_command(control, WatchControlCommand::ClearOrigin),
+        RequestBody::Reindex(request) => {
+            let path = std::path::PathBuf::from(request.path);
+            if control.paused.load(Ordering::Relaxed) {
+                return err("indexing is paused".to_string());
+            }
+            // A forced read walks and watches the path: never one the person
+            // did not ask to have searched, nor one relative to the daemon.
+            if !path.is_absolute() || settings::sources().owner(&path).is_none() {
+                return err(format!("{} is not in a searched folder", path.display()));
+            }
+            send_control_command(control, WatchControlCommand::ReindexPath(path))
+        }
+        // Done here so the reply says whether the rows are gone.
+        RequestBody::ClearOrigin => match origin::forget_all(&config::origin_db_path()) {
+            Ok(()) => Reply::Ok {
+                v: PROTOCOL_VERSION,
+            },
+            Err(e) => err(format!("origins could not be forgotten: {e:#}")),
+        },
         RequestBody::Versions(request) => {
             let store = history.lock().expect("versions store lock");
-            let versions = store
-                .versions(std::path::Path::new(&request.path))
-                .unwrap_or_default()
+            let versions = match store.versions(std::path::Path::new(&request.path)) {
+                Ok(versions) => versions,
+                Err(e) => return err(format!("versions: {e:#}")),
+            };
+            let versions = versions
                 .into_iter()
                 .map(|version| big_indexd_client::FileVersion {
                     id: version.id,

@@ -166,23 +166,6 @@ impl OriginWriter {
         Self { conn: None }
     }
 
-    /// Forget every origin ever recorded.
-    ///
-    /// `VACUUM` afterwards because forgetting has to mean the rows are gone from
-    /// the file, not merely unreferenced inside it: somebody who asks the
-    /// desktop to forget where their files came from is asking for the record to
-    /// stop existing, and a page still holding the old text would make that a
-    /// half-truth.
-    pub fn forget_all(&self) -> Result<()> {
-        let Some(conn) = &self.conn else {
-            return Ok(());
-        };
-        conn.execute("DELETE FROM file_origin", [])?;
-        conn.execute_batch("VACUUM")?;
-        log::info!("every recorded file origin was forgotten");
-        Ok(())
-    }
-
     pub fn register_created(&self, path: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
@@ -393,6 +376,7 @@ impl OriginWriter {
             if self
                 .register_web_download_at(path, domain, *downloaded_at)
                 .is_ok()
+                && conn.changes() > 0
             {
                 recorded += 1;
             }
@@ -478,6 +462,24 @@ impl OriginReader {
         let conn = self.conn.borrow();
         Some(f(conn.as_ref()?))
     }
+}
+
+/// Forget every origin ever recorded in the database at `path`, also when
+/// recording is turned off: what was recorded before is still on disk.
+///
+/// Rows are deleted rather than the file: the watcher may hold its own
+/// connection and would keep writing into an unlinked inode. `VACUUM`
+/// afterwards because forgetting has to mean the rows are gone from the file,
+/// not merely unreferenced inside it.
+pub fn forget_all(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let conn = open_writer(path).with_context(|| format!("open origin db {}", path.display()))?;
+    conn.execute("DELETE FROM file_origin", [])?;
+    conn.execute_batch("VACUUM")?;
+    log::info!("every recorded file origin was forgotten");
+    Ok(())
 }
 
 fn open_writer(path: &Path) -> Result<Connection> {
@@ -568,6 +570,11 @@ fn configure_reader_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Insert or replace the record for `record.path`.
+///
+/// A web download never replaces a record of another kind: the browser's list
+/// and the xattr only name a path, and a file that took a deleted download's
+/// name keeps the origin it was given when it arrived.
 fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
     conn.execute(
         "
@@ -589,6 +596,7 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
             source_domain = excluded.source_domain,
             first_seen_at = excluded.first_seen_at,
             updated_at = excluded.updated_at
+        WHERE excluded.kind <> 'web_download' OR file_origin.kind = 'web_download'
         ",
         params![
             record.path,
@@ -908,19 +916,33 @@ fn read_xdg_origin_domain(path: &Path) -> Option<String> {
     domain_from_url(url)
 }
 
-fn domain_from_url(url: &str) -> Option<String> {
+/// The host an address names, and nothing else from it.
+///
+/// The path and the query never reach the store: most recorded download
+/// addresses carry a signed token, and a database of file origins must not
+/// double as a database of credentials. The address comes from a browser's
+/// list or a file's xattr, so anything but a plain host name or IP literal is
+/// refused rather than stored and later printed.
+pub(crate) fn domain_from_url(url: &str) -> Option<String> {
+    let url = url.strip_prefix("blob:").unwrap_or(url);
     let after_scheme = url.split_once("://")?.1;
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .rsplit('@')
-        .next()
-        .unwrap_or_default();
+    let authority = after_scheme.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next()?;
     let host = if let Some(rest) = authority.strip_prefix('[') {
-        rest.split(']').next().unwrap_or_default()
+        let literal = rest.split(']').next()?;
+        let valid = literal.len() <= 45
+            && literal
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b':' || byte == b'.');
+        valid.then_some(literal)?
     } else {
-        authority.split(':').next().unwrap_or_default()
+        let name = authority.split(':').next()?;
+        let name = name.strip_prefix("www.").unwrap_or(name);
+        let valid = name.len() <= 253
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-._".contains(&byte));
+        valid.then_some(name)?
     };
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
@@ -946,6 +968,7 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::{ENV_LOCK, EnvVarGuard};
 
     fn temporary_origin_path(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -979,6 +1002,24 @@ mod tests {
     }
 
     #[test]
+    fn forget_all_empties_the_database() {
+        let db = temporary_origin_path("forget");
+        let conn = open_writer(&db).unwrap();
+        conn.execute(
+            "INSERT INTO file_origin(path, kind, confidence, label, first_seen_at, updated_at)
+             VALUES ('/a', 'downloaded', 1, 'x', 0, 0)",
+            [],
+        )
+        .unwrap();
+        forget_all(&db).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM file_origin", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+        std::fs::remove_dir_all(db.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn creates_schema_and_returns_none_for_unknown_path() {
         let db = temporary_origin_path("schema");
         let writer = OriginWriter::open(db.clone()).unwrap();
@@ -987,47 +1028,81 @@ mod tests {
         std::fs::remove_dir_all(db.parent().unwrap()).ok();
     }
 
+    /// Only the site survives: no credential, path or query, and nothing that
+    /// is not a host name or IP literal.
     #[test]
-    fn extracts_domain_from_origin_url() {
-        assert_eq!(
-            domain_from_url("https://Example.com/files/a.pdf").as_deref(),
-            Some("example.com")
-        );
-        assert_eq!(
-            domain_from_url("https://user@[2001:db8::1]/a").as_deref(),
-            Some("2001:db8::1")
-        );
-        assert!(domain_from_url("not a url").is_none());
+    fn only_the_site_is_kept_from_an_address() {
+        let cases = [
+            ("https://Example.com/files/a.pdf", Some("example.com")),
+            ("https://user@[2001:db8::1]/a", Some("2001:db8::1")),
+            (
+                "https://chatgpt.com/backend-api/estuary/content?id=file_00&sig=4c69600f",
+                Some("chatgpt.com"),
+            ),
+            (
+                "blob:https://web.whatsapp.com/a9c27299",
+                Some("web.whatsapp.com"),
+            ),
+            (
+                "https://user:secret@www.example.org:8443/x.zip",
+                Some("example.org"),
+            ),
+            ("https://\x1b]0;evil\x07/", None),
+            ("https://a b.example/", None),
+            ("https://[::1\x1b]/", None),
+            ("about:blank", None),
+            ("not a url", None),
+        ];
+        for (url, host) in cases {
+            assert_eq!(domain_from_url(url).as_deref(), host, "{url:?}");
+        }
+        let long = format!("https://{}.example/", "a".repeat(250));
+        assert_eq!(domain_from_url(&long), None);
+    }
+
+    /// The browser's list names a path, not a file: it must not overwrite what
+    /// is known about a file that took a deleted download's name.
+    #[test]
+    fn a_download_never_replaces_another_origin() {
+        let db = temporary_origin_path("kinds");
+        let conn = open_writer(&db).unwrap();
+        let record = |kind, domain: Option<&str>| OriginRecord {
+            path: "/d/report.pdf".to_string(),
+            dev: None,
+            ino: None,
+            kind,
+            confidence: OriginConfidence::High,
+            label: String::new(),
+            source_app: None,
+            source_path: None,
+            source_device_id: None,
+            source_device_label: None,
+            source_domain: domain.map(str::to_string),
+            first_seen_at: 1,
+            updated_at: 1,
+        };
+        let stored = || select_record(&conn, "/d/report.pdf").unwrap().unwrap();
+
+        upsert_record(&conn, &record(OriginKind::WebDownload, Some("a.example"))).unwrap();
+        upsert_record(&conn, &record(OriginKind::WebDownload, Some("b.example"))).unwrap();
+        assert_eq!(stored().source_domain.as_deref(), Some("b.example"));
+        upsert_record(&conn, &record(OriginKind::AppCreated, None)).unwrap();
+        upsert_record(&conn, &record(OriginKind::WebDownload, Some("c.example"))).unwrap();
+        assert_eq!(stored().kind, OriginKind::AppCreated);
+        assert_eq!(stored().source_domain, None);
+        std::fs::remove_dir_all(db.parent().unwrap()).ok();
     }
 
     #[test]
     fn download_dir_falls_back_to_home_downloads() {
-        let previous_home = std::env::var_os("HOME");
-        let previous_config = std::env::var_os("XDG_CONFIG_HOME");
-        let previous_download = std::env::var_os("XDG_DOWNLOAD_DIR");
-        unsafe {
-            std::env::set_var("HOME", "/tmp/bs-origin-home");
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::remove_var("XDG_DOWNLOAD_DIR");
-        }
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _home = EnvVarGuard::set("HOME", "/tmp/bs-origin-home");
+        let _config = EnvVarGuard::unset("XDG_CONFIG_HOME");
+        let _download = EnvVarGuard::unset("XDG_DOWNLOAD_DIR");
         assert_eq!(
             downloads_dir(),
             PathBuf::from("/tmp/bs-origin-home/Downloads")
         );
-        unsafe {
-            match previous_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match previous_config {
-                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-            match previous_download {
-                Some(value) => std::env::set_var("XDG_DOWNLOAD_DIR", value),
-                None => std::env::remove_var("XDG_DOWNLOAD_DIR"),
-            }
-        }
     }
 
     #[test]

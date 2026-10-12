@@ -46,14 +46,27 @@ use rusqlite::{Connection, OptionalExtension, params};
 /// ten versions of it are ten times the disk.
 const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
 
-/// Stop keeping versions below this much free disk, and start giving space back.
-const LOW_DISK_PERCENT: u64 = 10;
-/// …or below this many bytes, whichever comes first. Both, because a tenth of a
-/// 2 TB disk is 200 GB and a tenth of a 32 GB one is 3 GB.
+/// Free disk below which versions stop and space is given back, whatever the
+/// store costs: the machine must stay usable.
 const LOW_DISK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-/// Free space the eviction climbs back to, so the thermostat does not sit on its
-/// own threshold switching on and off.
-const RECOVERED_DISK_PERCENT: u64 = 12;
+/// Free disk must also be this many times what the versions cost. A share of
+/// the disk would stop a 2 TB disk with 200 GB free for a store of a few
+/// megabytes; what matters is whether the versions are a real part of what is
+/// left.
+const FREE_TO_STORE_RATIO: u64 = 10;
+
+/// Free space under which versions stop, for a store whose superseded
+/// versions cost `store_bytes`.
+fn low_disk_threshold(store_bytes: u64) -> u64 {
+    LOW_DISK_BYTES.max(store_bytes.saturating_mul(FREE_TO_STORE_RATIO))
+}
+
+/// Free space the eviction climbs back to, a quarter above the threshold, so
+/// the thermostat does not sit on its own threshold switching on and off.
+fn recovered_disk_target(store_bytes: u64) -> u64 {
+    let threshold = low_disk_threshold(store_bytes);
+    threshold.saturating_add(threshold / 4)
+}
 
 /// Most of the budget one document may hold.
 ///
@@ -153,6 +166,20 @@ const NOT_THE_NEWEST: &str = "v.id <> (SELECT id FROM versions
                                         WHERE file_id = v.file_id
                                         ORDER BY saved_at DESC, id DESC LIMIT 1)";
 
+/// A version [`History::prepare_version`] decided to keep, before its copy.
+struct VersionToCopy {
+    path: PathBuf,
+    object: PathBuf,
+    name: String,
+    file_id: i64,
+    metadata: std::fs::Metadata,
+    reason: Reason,
+}
+
+fn not_kept_error(why: &str) -> anyhow::Error {
+    anyhow::anyhow!("the current state was not kept: {why}")
+}
+
 /// The versions store.
 pub struct History {
     conn: Option<Connection>,
@@ -245,28 +272,56 @@ impl History {
     /// this is running because the disk is full, the objects are what frees it.
     /// A crash in between leaves rows without objects, which the orphan sweep
     /// removes on the next start.
+    ///
+    /// A store turned off still holds what it kept before, so it is erased from
+    /// disk: the database files and the whole objects directory.
     pub fn forget_everything(&mut self) -> Result<()> {
-        if self.conn.is_none() {
+        let Some(conn) = &self.conn else {
+            match std::fs::remove_dir_all(&self.objects) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(error)
+                        .with_context(|| format!("remove {}", self.objects.display()));
+                }
+                _ => {}
+            }
+            let db = crate::config::history_db_path();
+            for suffix in ["", "-wal", "-shm"] {
+                let mut file = db.clone().into_os_string();
+                file.push(suffix);
+                match std::fs::remove_file(&file) {
+                    Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                        return Err(error).with_context(|| format!("remove {}", db.display()));
+                    }
+                    _ => {}
+                }
+            }
+            log::info!("every kept version was forgotten");
             return Ok(());
-        }
-        let objects: Vec<String> = self.all_object_names()?;
-        for name in &objects {
+        };
+        for name in &self.all_object_names()? {
             let _ = std::fs::remove_file(self.objects.join(name));
         }
-        if let Some(conn) = &self.conn {
-            conn.execute("DELETE FROM versions", [])?;
-            conn.execute("DELETE FROM files", [])?;
-            conn.execute_batch("VACUUM")?;
-        }
+        conn.execute("DELETE FROM versions", [])?;
+        conn.execute("DELETE FROM files", [])?;
+        conn.execute_batch("VACUUM")?;
         self.paused_for_space = false;
         log::info!("every kept version was forgotten");
         Ok(())
     }
 
-    /// Forget the versions of one document.
+    /// Forget the versions of one document, also from a store turned off.
     pub fn forget(&mut self, path: &Path) -> Result<()> {
-        let Some(conn) = &self.conn else {
-            return Ok(());
+        let opened;
+        let conn = match &self.conn {
+            Some(conn) => conn,
+            None => {
+                let db = crate::config::history_db_path();
+                if !db.exists() {
+                    return Ok(());
+                }
+                opened = open_store(&db)?;
+                &opened
+            }
         };
         let Some(file_id) = file_id_for_path(conn, path)? else {
             return Ok(());
@@ -303,11 +358,7 @@ impl History {
         if eligible_name(to).is_none() {
             return Ok(());
         }
-        conn.execute(
-            "UPDATE files SET current_path = ?2, missing_since = NULL WHERE current_path = ?1",
-            params![from.to_string_lossy(), to.to_string_lossy()],
-        )?;
-        Ok(())
+        follow_rename(conn, from, to)
     }
 
     /// The **earlier** versions of one document, newest first.
@@ -361,27 +412,51 @@ impl History {
     ///
     /// `Ok(false)` is the ordinary answer for a file that is not a document, has
     /// not changed, or lives on a disk that cannot share blocks.
+    ///
+    /// Before a restore, a state that exists but could not be kept is an error:
+    /// the caller is about to overwrite it, and `Ok` would let it.
     pub fn save_version(&mut self, path: &Path, reason: Reason) -> Result<bool> {
-        if self.conn.is_none() {
-            return Ok(false);
-        }
-        let Some(metadata) = eligible_metadata(path) else {
+        let Some(version) = self.prepare_version(path, reason)? else {
             return Ok(false);
         };
+        let copied = clone_file(path, &version.object);
+        self.finish_version(version, copied)
+    }
+
+    /// Everything before the copy: whether `path` earns a version now, and the
+    /// object it will be copied to. `None` when there is nothing to copy.
+    ///
+    /// Split from the copy so the idle-priority worker can copy without
+    /// holding the store's lock, which a file manager's request may be
+    /// waiting on.
+    fn prepare_version(&mut self, path: &Path, reason: Reason) -> Result<Option<VersionToCopy>> {
+        let not_kept = |why: &str| {
+            if reason == Reason::BeforeRestore {
+                Err(not_kept_error(why))
+            } else {
+                Ok(None)
+            }
+        };
+        let Some(metadata) = eligible_metadata(path) else {
+            return Ok(None);
+        };
+        if self.conn.is_none() {
+            return not_kept("versions are turned off");
+        }
         // A restore still keeps its undo: the person is putting back a version
         // this store already holds, whatever the setting says now.
         if reason != Reason::BeforeRestore && self.left_to_git(path) {
-            return Ok(false);
+            return Ok(None);
         }
         if self.hopeless_devices.contains(&metadata.dev()) {
-            return Ok(false);
+            return not_kept("this disk cannot share blocks");
         }
         // The baseline is allowed even when space is short: it shares the live
         // file's blocks and costs no data, and it is what leaves somebody with
         // at least one version on a disk that was already full when they
         // started.
         if reason != Reason::Baseline && self.paused_for_space {
-            return Ok(false);
+            return not_kept("the disk is short of space");
         }
         let file_id = self.upsert_file(path, &metadata)?;
         if self.matches_newest_version(file_id, &metadata)? {
@@ -393,23 +468,44 @@ impl History {
             if reason == Reason::BeforeRestore {
                 self.mark_newest_as_the_undo(file_id)?;
             }
-            return Ok(false);
+            return Ok(None);
         }
-
         let name = object_name();
-        let object = self.objects.join(&name);
-        match clone_file(path, &object) {
-            Ok(()) => {}
-            Err(refusal) => {
-                self.note_refusal(&metadata, refusal);
-                return Ok(false);
-            }
+        Ok(Some(VersionToCopy {
+            object: self.objects.join(&name),
+            name,
+            path: path.to_path_buf(),
+            file_id,
+            metadata,
+            reason,
+        }))
+    }
+
+    /// Record a version once its copy was attempted.
+    fn finish_version(
+        &mut self,
+        version: VersionToCopy,
+        copied: std::result::Result<(), Refusal>,
+    ) -> Result<bool> {
+        if let Err(refusal) = copied {
+            self.note_refusal(&version.metadata, refusal);
+            return if version.reason == Reason::BeforeRestore {
+                Err(not_kept_error("the copy was refused"))
+            } else {
+                Ok(false)
+            };
         }
         if self.support == Support::Untested {
             self.support = Support::Ready;
         }
-        self.record_version(file_id, path, &metadata, &name, reason)?;
-        self.prune_file(file_id)?;
+        self.record_version(
+            version.file_id,
+            &version.path,
+            &version.metadata,
+            &version.name,
+            version.reason,
+        )?;
+        self.prune_file(version.file_id)?;
         self.budget_unchecked = true;
         Ok(true)
     }
@@ -500,25 +596,37 @@ impl History {
     /// Two rules, in order. The path comes first because that is what an atomic
     /// save looks like: same name, brand-new inode. Identity comes second, and
     /// only when the old name is gone — otherwise two hard links to one inode
-    /// would take turns renaming each other's history.
+    /// would take turns renaming each other's history. Identity includes the
+    /// birth time where the filesystem records one: XFS hands a deleted
+    /// document's inode number to the next new file, which must not inherit
+    /// that document's versions. A row without one (written before it was
+    /// recorded, or on a filesystem without it) matches on `(dev, ino)` alone.
     fn upsert_file(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<i64> {
         let conn = self.conn.as_ref().expect("checked by the caller");
         let key = path.to_string_lossy().into_owned();
+        let born = metadata
+            .created()
+            .ok()
+            .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
+            .and_then(|since| i64::try_from(since.as_nanos()).ok());
+        let (dev, ino) = (metadata.dev() as i64, metadata.ino() as i64);
         if let Some(id) = file_id_for_path(conn, path)? {
             // Only on a change: an UPDATE that rewrites the same values still
             // writes the page to the WAL, and every save passes through here.
             conn.execute(
-                "UPDATE files SET dev = ?2, ino = ?3, missing_since = NULL
-                  WHERE id = ?1 AND (dev IS NOT ?2 OR ino IS NOT ?3 OR missing_since IS NOT NULL)",
-                params![id, metadata.dev() as i64, metadata.ino() as i64],
+                "UPDATE files SET dev = ?2, ino = ?3, born = ?4, missing_since = NULL
+                  WHERE id = ?1 AND (dev IS NOT ?2 OR ino IS NOT ?3 OR born IS NOT ?4
+                                     OR missing_since IS NOT NULL)",
+                params![id, dev, ino, born],
             )?;
             return Ok(id);
         }
         let renamed: Option<(i64, String)> = conn
             .query_row(
-                "SELECT id, current_path FROM files WHERE dev = ?1 AND ino = ?2
+                "SELECT id, current_path FROM files
+                  WHERE dev = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)
                   ORDER BY created_at DESC LIMIT 1",
-                params![metadata.dev() as i64, metadata.ino() as i64],
+                params![dev, ino, born],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -526,19 +634,15 @@ impl History {
             && !Path::new(&previous).exists()
         {
             conn.execute(
-                "UPDATE files SET current_path = ?2, missing_since = NULL WHERE id = ?1",
-                params![id, key],
+                "UPDATE files SET current_path = ?2, born = ?3, missing_since = NULL WHERE id = ?1",
+                params![id, key, born],
             )?;
             return Ok(id);
         }
         conn.execute(
-            "INSERT INTO files(current_path, dev, ino, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                key,
-                metadata.dev() as i64,
-                metadata.ino() as i64,
-                now_secs()
-            ],
+            "INSERT INTO files(current_path, dev, ino, born, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![key, dev, ino, born, now_secs()],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -658,16 +762,15 @@ impl History {
         self.drop_versions(&dropped)
     }
 
-    /// Keep the whole store inside its budget.
-    ///
-    /// Two passes, because size and age answer different questions: first no
-    /// document may hold more than a tenth of the budget, then the oldest go.
-    fn enforce_budget(&mut self) -> Result<()> {
+    /// Versions to drop because one document holds more than its share of the
+    /// budget: all but its three newest. The first pass of keeping the store
+    /// inside its budget; [`Self::over_budget`] is the second.
+    fn budget_hogs(&self) -> Result<Vec<(i64, String)>> {
         let Some(conn) = &self.conn else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         if self.budget_bytes == 0 {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let share = self.budget_bytes / 100 * MAX_BUDGET_SHARE_PERCENT;
         // Same accounting as `total_bytes`: what a document costs is what it
@@ -681,112 +784,30 @@ impl History {
             .query_map(params![share as i64], |row| row.get::<_, i64>(0))?
             .flatten()
             .collect();
+        let mut dropped = Vec::new();
         for file_id in hogs {
-            let dropped: Vec<(i64, String)> = conn
-                .prepare(
+            dropped.extend(
+                conn.prepare(
                     "SELECT id, object FROM versions WHERE file_id = ?1
                       ORDER BY saved_at DESC, id DESC LIMIT -1 OFFSET 3",
                 )?
                 .query_map(params![file_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .flatten()
-                .collect();
-            self.drop_versions(&dropped)?;
+                .flatten(),
+            );
         }
+        Ok(dropped)
+    }
 
+    /// The oldest versions to drop so the store fits its budget again.
+    fn over_budget(&self) -> Result<Vec<(i64, String)>> {
+        if self.conn.is_none() || self.budget_bytes == 0 {
+            return Ok(Vec::new());
+        }
         let total = self.total_bytes()?;
-        if total > self.budget_bytes {
-            let dropped = self.oldest_versions_totalling(total - self.budget_bytes)?;
-            self.drop_versions(&dropped)?;
+        if total <= self.budget_bytes {
+            return Ok(Vec::new());
         }
-        Ok(())
-    }
-
-    /// Stop when the disk is nearly full, and give space back until it is not.
-    ///
-    /// Stopping alone would not be enough. When the disk fills for some other
-    /// reason, the person deletes files and the space does not come back,
-    /// because these versions are still holding the old blocks — and they have
-    /// no idea this store exists.
-    pub fn watch_free_space(&mut self) -> Result<()> {
-        if self.conn.is_none() {
-            return Ok(());
-        }
-        let Ok(capacity) = disk_capacity(&crate::config::data_dir()) else {
-            return Ok(());
-        };
-        let low = capacity.available_bytes < LOW_DISK_BYTES
-            || capacity.available_bytes * 100 < capacity.total_bytes * LOW_DISK_PERCENT;
-        if !low {
-            self.paused_for_space = false;
-            return Ok(());
-        }
-        self.paused_for_space = true;
-        let target = capacity.total_bytes / 100 * RECOVERED_DISK_PERCENT;
-        log::info!("little disk space left: giving kept versions back");
-        let mut available = capacity.available_bytes;
-        while available < target {
-            // Asked for the shortfall, not for one version: but the disk is
-            // measured again after each batch, because a version only frees the
-            // blocks it does *not* share with the live file — its size is a
-            // ceiling on what comes back, never the amount.
-            let dropped = self.oldest_versions_totalling(target - available)?;
-            if dropped.is_empty() {
-                break;
-            }
-            self.drop_versions(&dropped)?;
-            let Ok(now) = disk_capacity(&crate::config::data_dir()) else {
-                break;
-            };
-            if now.available_bytes <= available {
-                break; // nothing came back; stop rather than spin
-            }
-            available = now.available_bytes;
-        }
-        if available >= target {
-            self.paused_for_space = false;
-        }
-        Ok(())
-    }
-
-    /// Forget documents whose file has been gone long enough.
-    pub fn expire_missing(&mut self) -> Result<()> {
-        let Some(conn) = &self.conn else {
-            return Ok(());
-        };
-        let now = now_secs();
-        let paths: Vec<(i64, String, Option<i64>)> = conn
-            .prepare("SELECT id, current_path, missing_since FROM files")?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .flatten()
-            .collect();
-        // What to forget is collected first: forgetting borrows the store
-        // again, and the walk above is still holding it.
-        let mut expired: Vec<String> = Vec::new();
-        for (id, path, missing_since) in paths {
-            let exists = Path::new(&path).exists();
-            match (exists, missing_since) {
-                (true, Some(_)) => {
-                    conn.execute(
-                        "UPDATE files SET missing_since = NULL WHERE id = ?1",
-                        params![id],
-                    )?;
-                }
-                (false, None) => {
-                    conn.execute(
-                        "UPDATE files SET missing_since = ?2 WHERE id = ?1",
-                        params![id, now],
-                    )?;
-                }
-                (false, Some(since)) if now - since > MISSING_GRACE_SECONDS => {
-                    expired.push(path);
-                }
-                _ => {}
-            }
-        }
-        for path in expired {
-            self.forget(Path::new(&path))?;
-        }
-        Ok(())
+        self.oldest_versions_totalling(total - self.budget_bytes)
     }
 
     /// Throw away objects nobody claims and rows whose object is gone.
@@ -1075,6 +1096,9 @@ fn eligible_name(path: &Path) -> Option<()> {
     if !may_be_a_document(path) {
         return None;
     }
+    // Rows are keyed by UTF-8 text: a lossy key for a path in a non-UTF-8
+    // folder never exists on disk, so its versions would expire under it.
+    path.to_str()?;
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
     if NEVER_KEPT.iter().any(|marker| name.contains(marker)) {
         return None;
@@ -1186,7 +1210,8 @@ fn open_store(path: &Path) -> Result<Connection> {
             dev INTEGER,
             ino INTEGER,
             created_at INTEGER NOT NULL,
-            missing_since INTEGER
+            missing_since INTEGER,
+            born INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_files_dev_ino ON files(dev, ino);
         CREATE TABLE IF NOT EXISTS versions (
@@ -1204,14 +1229,124 @@ fn open_store(path: &Path) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_versions_age ON versions(saved_at);
         ",
     )?;
+    // Stores created before the birth time was recorded.
+    let has_born: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name = 'born')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_born {
+        conn.execute_batch("ALTER TABLE files ADD COLUMN born INTEGER")?;
+    }
     Ok(conn)
 }
 
+/// Forget documents whose file has been gone long enough.
+///
+/// The store is locked to read the catalogue and to write the outcome, not
+/// while the filesystem is asked about every document: the worker runs at idle
+/// priority, and a file manager's request for a version waits on the same lock.
+/// A row renamed or saved in between no longer matches what was checked and is
+/// left for the next sweep.
+fn expire_missing(history: &SharedHistory) -> Result<()> {
+    let files: Vec<(i64, String, Option<i64>)> = {
+        let store = history.lock().expect("versions store lock");
+        let Some(conn) = &store.conn else {
+            return Ok(());
+        };
+        conn.prepare("SELECT id, current_path, missing_since FROM files")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let checked: Vec<_> = files
+        .into_iter()
+        .map(|(id, path, missing_since)| {
+            let exists = Path::new(&path).exists();
+            (id, path, missing_since, exists)
+        })
+        .collect();
+
+    let now = now_secs();
+    let mut store = history.lock().expect("versions store lock");
+    let Some(conn) = &store.conn else {
+        return Ok(());
+    };
+    let mut expired: Vec<String> = Vec::new();
+    for (id, path, missing_since, exists) in checked {
+        match (exists, missing_since) {
+            (true, Some(_)) => {
+                conn.execute(
+                    "UPDATE files SET missing_since = NULL WHERE id = ?1 AND current_path = ?2",
+                    params![id, path],
+                )?;
+            }
+            (false, None) => {
+                conn.execute(
+                    "UPDATE files SET missing_since = ?3
+                      WHERE id = ?1 AND current_path = ?2 AND missing_since IS NULL",
+                    params![id, path, now],
+                )?;
+            }
+            (false, Some(since)) if now - since > MISSING_GRACE_SECONDS => {
+                let unchanged: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM files
+                          WHERE id = ?1 AND current_path = ?2 AND missing_since = ?3",
+                        params![id, path, since],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if unchanged.is_some() {
+                    expired.push(path);
+                }
+            }
+            _ => {}
+        }
+    }
+    for path in expired {
+        store.forget(Path::new(&path))?;
+    }
+    Ok(())
+}
+
+/// Move `from`'s catalogue row to `to`, in one transaction.
+///
+/// When `to` has a row of its own (`mv a.md b.md` over a document with
+/// history), its versions join `from`'s: they hold what the rename overwrote.
+/// Left alone, the unique path would refuse the move, and `from`'s row would
+/// expire with every version in it.
+fn follow_rename(conn: &Connection, from: &Path, to: &Path) -> Result<()> {
+    let Some(from_id) = file_id_for_path(conn, from)? else {
+        return Ok(());
+    };
+    let transaction = conn.unchecked_transaction()?;
+    if let Some(to_id) = file_id_for_path(conn, to)?
+        && to_id != from_id
+    {
+        conn.execute(
+            "UPDATE versions SET file_id = ?1 WHERE file_id = ?2",
+            params![from_id, to_id],
+        )?;
+        conn.execute("DELETE FROM files WHERE id = ?1", params![to_id])?;
+    }
+    conn.execute(
+        "UPDATE files SET current_path = ?2, missing_since = NULL WHERE id = ?1",
+        params![from_id, to.to_string_lossy()],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// The row for `path`. Rows are keyed by UTF-8 text, so a path that is not
+/// UTF-8 has none: a lossy key would name a different file.
 fn file_id_for_path(conn: &Connection, path: &Path) -> Result<Option<i64>> {
+    let Some(key) = path.to_str() else {
+        return Ok(None);
+    };
     Ok(conn
         .query_row(
             "SELECT id FROM files WHERE current_path = ?1",
-            params![path.to_string_lossy()],
+            params![key],
             |row| row.get(0),
         )
         .optional()?)
@@ -1352,6 +1487,102 @@ const WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
 ///
 /// Its own thread on purpose: the search must never wait for a version, and a
 /// failure here must never be able to stop the watcher.
+/// Versions dropped per hold of the store's lock during housekeeping. The
+/// worker runs at idle priority and a file manager's request may be waiting on
+/// the lock, so it waits for one batch at most.
+const DROP_BATCH: usize = 16;
+
+/// Drop `versions`, objects first, a batch per hold of the lock.
+fn drop_in_batches(history: &SharedHistory, versions: &[(i64, String)]) -> Result<()> {
+    for batch in versions.chunks(DROP_BATCH) {
+        history
+            .lock()
+            .expect("versions store lock")
+            .drop_versions(batch)?;
+    }
+    Ok(())
+}
+
+/// Keep the whole store inside its budget.
+///
+/// Two passes, because size and age answer different questions: first no
+/// document may hold more than a tenth of the budget, then the oldest go.
+fn enforce_budget(history: &SharedHistory) -> Result<()> {
+    let hogs = history.lock().expect("versions store lock").budget_hogs()?;
+    drop_in_batches(history, &hogs)?;
+    let oldest = history.lock().expect("versions store lock").over_budget()?;
+    drop_in_batches(history, &oldest)
+}
+
+/// Stop when the disk is nearly full, and give space back until it is not.
+///
+/// Stopping alone would not be enough. When the disk fills for some other
+/// reason, the person deletes files and the space does not come back,
+/// because these versions are still holding the old blocks, and they have
+/// no idea this store exists.
+fn watch_free_space(history: &SharedHistory) -> Result<()> {
+    if history.lock().expect("versions store lock").conn.is_none() {
+        return Ok(());
+    }
+    let Ok(capacity) = disk_capacity(&crate::config::data_dir()) else {
+        return Ok(());
+    };
+    let (paused, cost) = {
+        let store = history.lock().expect("versions store lock");
+        (store.paused_for_space, store.total_bytes()?)
+    };
+    // Once paused, the store waits for the recovered target, not the threshold.
+    let resume_at = if paused {
+        recovered_disk_target(cost)
+    } else {
+        low_disk_threshold(cost)
+    };
+    if capacity.available_bytes >= resume_at {
+        history
+            .lock()
+            .expect("versions store lock")
+            .paused_for_space = false;
+        return Ok(());
+    }
+    history
+        .lock()
+        .expect("versions store lock")
+        .paused_for_space = true;
+    log::info!("little disk space left: giving kept versions back");
+    let mut available = capacity.available_bytes;
+    let mut target = recovered_disk_target(cost);
+    while available < target {
+        // Asked for the shortfall, not for one version: but the disk is
+        // measured again after each batch, because a version only frees the
+        // blocks it does *not* share with the live file. Its size is a
+        // ceiling on what comes back, never the amount.
+        let dropped = history
+            .lock()
+            .expect("versions store lock")
+            .oldest_versions_totalling(target - available)?;
+        if dropped.is_empty() {
+            break;
+        }
+        drop_in_batches(history, &dropped)?;
+        let Ok(now) = disk_capacity(&crate::config::data_dir()) else {
+            break;
+        };
+        if now.available_bytes <= available {
+            break; // nothing came back; stop rather than spin
+        }
+        available = now.available_bytes;
+        // Fewer versions lower what they need left free.
+        target = recovered_disk_target(history.lock().expect("versions store lock").total_bytes()?);
+    }
+    if available >= target {
+        history
+            .lock()
+            .expect("versions store lock")
+            .paused_for_space = false;
+    }
+    Ok(())
+}
+
 pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<HistoryEvent>) {
     crate::throttle::lower_priority();
     {
@@ -1423,10 +1654,24 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
             let Some(path) = due.next() else { break };
             // Check the deadline before consuming the next path. Unvisited
             // entries remain queued even when this batch runs out of time.
-            let kept = history
+            // The copy runs without the lock: at idle priority it can wait a
+            // long time for the disk, and the file manager's request before a
+            // restore must not wait with it.
+            let prepared = history
                 .lock()
                 .expect("versions store lock")
-                .save_version(&path, Reason::Saved);
+                .prepare_version(&path, Reason::Saved);
+            let kept = match prepared {
+                Ok(Some(version)) => {
+                    let copied = clone_file(&path, &version.object);
+                    history
+                        .lock()
+                        .expect("versions store lock")
+                        .finish_version(version, copied)
+                }
+                Ok(None) => Ok(false),
+                Err(error) => Err(error),
+            };
             match kept {
                 Ok(true) => {
                     log::debug!("kept a version of {}", path.display());
@@ -1440,21 +1685,27 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
         if housekeeping_owed && std::time::Instant::now() >= next_housekeeping {
             housekeeping_owed = false;
             next_housekeeping = std::time::Instant::now() + HOUSEKEEPING;
-            let mut store = history.lock().expect("versions store lock");
-            if let Err(error) = store.watch_free_space() {
+            // The lock is taken per small batch, so a request from the file
+            // manager never waits for a whole step.
+            if let Err(error) = watch_free_space(history) {
                 log::warn!("could not check the free space: {error:#}");
             }
-            if store.budget_unchecked {
-                match store.enforce_budget() {
-                    Ok(()) => store.budget_unchecked = false,
-                    Err(error) => {
-                        log::warn!("could not keep versions inside the budget: {error:#}")
-                    }
-                }
+            let unchecked = std::mem::take(
+                &mut history
+                    .lock()
+                    .expect("versions store lock")
+                    .budget_unchecked,
+            );
+            if unchecked && let Err(error) = enforce_budget(history) {
+                history
+                    .lock()
+                    .expect("versions store lock")
+                    .budget_unchecked = true;
+                log::warn!("could not keep versions inside the budget: {error:#}");
             }
             if std::time::Instant::now() >= next_missing_sweep {
                 next_missing_sweep = std::time::Instant::now() + MISSING_SWEEP;
-                if let Err(error) = store.expire_missing() {
+                if let Err(error) = expire_missing(history) {
                     log::warn!("could not retire missing documents: {error:#}");
                 }
             }
@@ -1465,6 +1716,158 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn store_with(conn: Connection, dir: &Path) -> History {
+        History {
+            conn: Some(conn),
+            objects: dir.join("objects"),
+            support: Support::Ready,
+            hopeless_devices: Vec::new(),
+            budget_bytes: 0,
+            keep_versions: 1,
+            keep_days: 1,
+            paused_for_space: false,
+            budget_unchecked: false,
+            skip_git_repositories: false,
+            respect_gitignore: false,
+        }
+    }
+
+    fn version_owners(conn: &Connection) -> Vec<(String, String)> {
+        conn.prepare(
+            "SELECT f.current_path, v.object FROM versions v JOIN files f ON f.id = v.file_id
+              ORDER BY v.object",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    /// `mv a.md b.md` over a document with its own history keeps every version
+    /// of both under the new name.
+    #[test]
+    fn rename_over_a_kept_document() {
+        let dir = crate::test_env::scratch_dir("bs-history-rename");
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        for (id, path) in [(1, "/d/a.md"), (2, "/d/b.md")] {
+            conn.execute(
+                "INSERT INTO files(id, current_path, created_at) VALUES (?1, ?2, 0)",
+                params![id, path],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO versions(file_id, saved_at, mtime_s, mtime_ns, size, object, reason)
+                 VALUES (?1, 0, 0, 0, 1, ?2, 'saved')",
+                params![id, format!("object-{id}")],
+            )
+            .unwrap();
+        }
+        follow_rename(&conn, Path::new("/d/a.md"), Path::new("/d/b.md")).unwrap();
+        assert_eq!(
+            version_owners(&conn),
+            [
+                ("/d/b.md".to_string(), "object-1".to_string()),
+                ("/d/b.md".to_string(), "object-2".to_string()),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A new file given a deleted document's inode number starts its own
+    /// history; a renamed document keeps its own.
+    #[test]
+    fn reused_inode_starts_a_new_history() {
+        let dir = crate::test_env::scratch_dir("bs-history-inode");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store_with(open_store(&dir.join("history.sqlite")).unwrap(), &dir);
+        let conn = store.conn.as_ref().unwrap();
+        let notes = dir.join("notes.odt");
+        std::fs::write(&notes, b"new").unwrap();
+        let metadata = std::fs::metadata(&notes).unwrap();
+        let born = metadata
+            .created()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        let deleted = |born: i64| {
+            conn.execute("DELETE FROM files", []).unwrap();
+            conn.execute(
+                "INSERT INTO files(id, current_path, dev, ino, born, created_at)
+                 VALUES (7, '/gone/report.odt', ?1, ?2, ?3, 0)",
+                params![metadata.dev() as i64, metadata.ino() as i64, born],
+            )
+            .unwrap();
+        };
+
+        deleted(born - 1);
+        assert_ne!(store.upsert_file(&notes, &metadata).unwrap(), 7);
+        deleted(born);
+        assert_eq!(store.upsert_file(&notes, &metadata).unwrap(), 7);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A document gone past the grace period is forgotten; one that came back
+    /// is no longer counted missing; one just gone starts its grace period.
+    #[test]
+    fn missing_documents_expire_after_the_grace() {
+        let dir = crate::test_env::scratch_dir("bs-history-missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("present.md");
+        std::fs::write(&present, b"x").unwrap();
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        let long_ago = now_secs() - MISSING_GRACE_SECONDS - 1;
+        for (id, path, missing_since) in [
+            (1, present.to_string_lossy().into_owned(), Some(long_ago)),
+            (2, "/gone/old.md".to_string(), Some(long_ago)),
+            (3, "/gone/new.md".to_string(), None),
+        ] {
+            conn.execute(
+                "INSERT INTO files(id, current_path, created_at, missing_since)
+                 VALUES (?1, ?2, 0, ?3)",
+                params![id, path, missing_since],
+            )
+            .unwrap();
+        }
+        let history: SharedHistory =
+            std::sync::Arc::new(std::sync::Mutex::new(store_with(conn, &dir)));
+        expire_missing(&history).unwrap();
+
+        let store = history.lock().unwrap();
+        let rows: Vec<(i64, Option<i64>)> = store
+            .conn
+            .as_ref()
+            .unwrap()
+            .prepare("SELECT id, missing_since FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0], (1, None));
+        assert!(rows[1].0 == 3 && rows[1].1.is_some(), "{rows:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A path that is not UTF-8 never finds the row of the file whose name its
+    /// lossy form spells.
+    #[test]
+    fn non_utf8_path_has_no_row() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = crate::test_env::scratch_dir("bs-history-utf8");
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        conn.execute(
+            "INSERT INTO files(id, current_path, created_at) VALUES (1, '/d/Relat\u{FFFD}rios/a.md', 0)",
+            [],
+        )
+        .unwrap();
+        let latin1 = Path::new(std::ffi::OsStr::from_bytes(b"/d/Relat\xf3rios/a.md"));
+        assert_eq!(file_id_for_path(&conn, latin1).unwrap(), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn git_work_trees_and_their_ignore_rules_are_found() {
@@ -1652,19 +2055,7 @@ mod tests {
             )
             .unwrap();
         }
-        let store = History {
-            conn: Some(conn),
-            objects: dir.join("objects"),
-            support: Support::Ready,
-            hopeless_devices: Vec::new(),
-            budget_bytes: 0,
-            keep_versions: 1,
-            keep_days: 1,
-            paused_for_space: false,
-            budget_unchecked: false,
-            skip_git_repositories: false,
-            respect_gitignore: false,
-        };
+        let store = store_with(conn, &dir);
 
         let unkept = store.unkept(vec![
             (PathBuf::from("/d/kept.md"), 10, 5),
@@ -1709,6 +2100,38 @@ mod tests {
         assert!(!of("id_rsa.pem"));
         // Source code is out of this first version on purpose.
         assert!(!of("main.rs"));
+    }
+
+    #[test]
+    fn disabled_store_erases_its_files() {
+        let _env = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let data = crate::test_env::scratch_dir("bs-history-erase");
+        let _data_home = crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", data.to_str().unwrap());
+        let objects = crate::config::history_dir().join("objects/ab");
+        std::fs::create_dir_all(&objects).unwrap();
+        std::fs::write(objects.join("cdef"), "kept").unwrap();
+        drop(open_store(&crate::config::history_db_path()).unwrap());
+
+        let mut store = History::open(&big_search_config::FileHistory {
+            enabled: false,
+            ..Default::default()
+        });
+        store.forget_everything().unwrap();
+        assert!(!crate::config::history_dir().join("objects").exists());
+        assert!(!crate::config::history_db_path().exists());
+        std::fs::remove_dir_all(&data).ok();
+    }
+
+    #[test]
+    fn free_space_follows_the_store() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // A small store only needs the floor, however big the disk.
+        assert_eq!(low_disk_threshold(800 * 1024 * 1024), 8000 * 1024 * 1024);
+        assert_eq!(low_disk_threshold(0), 2 * GIB);
+        assert_eq!(low_disk_threshold(10 * GIB), 100 * GIB);
+        assert_eq!(recovered_disk_target(0), 2 * GIB + GIB / 2);
     }
 
     /// Two objects never collide, and each lands in a shard.

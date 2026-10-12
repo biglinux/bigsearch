@@ -175,25 +175,31 @@ fn main() -> Result<()> {
         libc::mallopt(libc::M_ARENA_MAX, 1);
     }
 
+    // Our own logs at info; mute the noisy tantivy mmap/reader debug+info.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,tantivy=warn"),
+    )
+    .init();
+
+    // Every command may write the data dir (reindex, the CLI's own index
+    // reads), and the shell's umask would leave it readable by other accounts.
+    // The daemon refuses to start on this error; elsewhere a warning is enough.
+    if let Err(error) = config::ensure_private_data_dir() {
+        log::warn!("data directory {}: {error}", config::data_dir().display());
+    }
+
     // SQLite temp files (large-scan spill B-trees, statement journals) must land
     // somewhere writable. Under the hardened systemd unit (`ProtectSystem=strict`
     // + `ProtectHome=read-only`) every default candidate — /tmp, /var/tmp, cwd —
     // is read-only and SQLite fails with SQLITE_IOERR_GETTEMPPATH, aborting the
     // reconcile scan. Point it at our own (always writable) data dir.
     if std::env::var_os("SQLITE_TMPDIR").is_none() {
-        let data_dir = config::data_dir();
-        let _ = std::fs::create_dir_all(&data_dir);
-        // SAFETY: set_var before any threads are spawned (top of main).
+        // SAFETY: set_var before any threads are spawned (top of main; the
+        // logger starts none).
         unsafe {
-            std::env::set_var("SQLITE_TMPDIR", &data_dir);
+            std::env::set_var("SQLITE_TMPDIR", config::data_dir());
         }
     }
-
-    // Our own logs at info; mute the noisy tantivy mmap/reader debug+info.
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info,tantivy=warn"),
-    )
-    .init();
 
     let args = split_global_flags(std::env::args().skip(1).collect())?;
     match args.first().map(String::as_str) {
@@ -284,7 +290,20 @@ fn parse_query(tokens: &[String]) -> Search {
 }
 
 fn cmd_reindex(roots: &[String]) -> Result<()> {
+    // The daemon's lock: a running daemon holds the index writers and the state
+    // database, and the recovery below deletes index files from under them.
+    // Without a runtime directory no daemon can run, so there is nothing to
+    // exclude.
+    let _daemon_lock = match config::lock_path() {
+        Some(path) => Some(acquire_daemon_lock(&path)?.context(
+            "the big-search service is running; use `big-search rebuild` instead, \
+             or stop the service first",
+        )?),
+        None => None,
+    };
     throttle::lower_priority();
+    settings::seed_config_template();
+    scan::seed_user_ignore();
     let mut index = index::open_or_create(&config::index_dir())?;
     let mut content_index = index::open_content_or_create(&config::content_index_dir())?;
     scan::write_effective_ignore()?;
@@ -486,7 +505,12 @@ fn cmd_list(tokens: &[String]) -> Result<()> {
 /// another daemon already holds it, `Err` only on an actual I/O failure.
 fn acquire_daemon_lock(path: &Path) -> Result<Option<std::fs::File>> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("create {}", dir.display()))?;
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -538,6 +562,7 @@ fn cmd_daemon() -> Result<()> {
     let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let activity = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(watch::ACTIVITY_INDEXING));
     let pending_content = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let unwatched_dirs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (commands, rx) = std::sync::mpsc::channel::<watch::WatchMessage>();
     // One versions store for the whole daemon: the thread that writes versions
     // and the connections that answer questions about them are looking at the
@@ -550,6 +575,7 @@ fn cmd_daemon() -> Result<()> {
     let watch_paused = paused.clone();
     let watch_activity = activity.clone();
     let watch_pending_content = pending_content.clone();
+    let watch_unwatched_dirs = unwatched_dirs.clone();
 
     // All indexing runs in the watcher thread at background priority; the main
     // thread stays at normal priority so queries are never slowed.
@@ -598,6 +624,7 @@ fn cmd_daemon() -> Result<()> {
                 }
                 state::State::load(&crate::config::state_db_path(), crate::state::NAME_NAMESPACE)
             };
+            let walk_started = std::time::SystemTime::now();
             let initial_watch_dirs = match sync_with_retry(&watch_index, &roots, &mut state) {
                 Ok(sync_outcome) => {
                     log::debug!(
@@ -689,9 +716,14 @@ fn cmd_daemon() -> Result<()> {
             if let Err(e) = watch::run(
                 watch_index,
                 watch_content_index,
-                watch::WatchScope::new(&roots, initial_watch_dirs),
+                watch::WatchScope::new(&roots, initial_watch_dirs, Some(walk_started)),
                 state,
-                watch::WatchRuntime::new(watch_paused, watch_activity, watch_pending_content),
+                watch::WatchRuntime::new(
+                    watch_paused,
+                    watch_activity,
+                    watch_pending_content,
+                    watch_unwatched_dirs,
+                ),
                 watch_commands,
                 rx,
                 watch_history,
@@ -720,6 +752,7 @@ fn cmd_daemon() -> Result<()> {
             paused,
             activity,
             pending_content,
+            unwatched_dirs,
         },
         config::origin_db_path(),
         history,
@@ -825,6 +858,15 @@ fn cmd_status() -> Result<()> {
                     yellow(&format!(
                         "conteúdo pendente: {} arquivo(s) editados recentemente",
                         s.pending_content
+                    ))
+                );
+            }
+            if s.unwatched_dirs > 0 {
+                println!(
+                    "{}",
+                    yellow(&format!(
+                        "{} pasta(s) sem acompanhamento de mudanças (provavelmente o limite fs.inotify.max_user_watches)",
+                        s.unwatched_dirs
                     ))
                 );
             }
@@ -1033,29 +1075,39 @@ fn two_paths_and_optional_app<'a>(
 }
 
 fn print_origin(path: &str, origin: Option<&big_indexd_client::OriginProvenance>) {
+    // Every field but the numbers comes from file names, extended attributes or
+    // other programs' databases: control characters would reach the terminal
+    // as escape sequences.
+    let shown = |text: &str| -> String {
+        text.chars()
+            .flat_map(|c| {
+                if c.is_control() {
+                    c.escape_default().collect::<Vec<_>>()
+                } else {
+                    vec![c]
+                }
+            })
+            .collect()
+    };
     let Some(origin) = origin else {
-        println!("{path}: no origin");
+        println!("{}: no origin", shown(path));
         return;
     };
-    println!("{path}");
-    println!("kind: {}", origin.kind);
+    println!("{}", shown(path));
+    println!("kind: {}", shown(&origin.kind));
     println!("confidence: {}", origin.confidence);
-    println!("label: {}", origin.label);
+    println!("label: {}", shown(&origin.label));
     println!("first_seen_at: {}", origin.first_seen_at);
-    if let Some(source_app) = &origin.source_app {
-        println!("source_app: {source_app}");
-    }
-    if let Some(source_path) = &origin.source_path {
-        println!("source_path: {source_path}");
-    }
-    if let Some(source_device_id) = &origin.source_device_id {
-        println!("source_device_id: {source_device_id}");
-    }
-    if let Some(source_device_label) = &origin.source_device_label {
-        println!("source_device_label: {source_device_label}");
-    }
-    if let Some(source_domain) = &origin.source_domain {
-        println!("source_domain: {source_domain}");
+    for (field, value) in [
+        ("source_app", &origin.source_app),
+        ("source_path", &origin.source_path),
+        ("source_device_id", &origin.source_device_id),
+        ("source_device_label", &origin.source_device_label),
+        ("source_domain", &origin.source_domain),
+    ] {
+        if let Some(value) = value {
+            println!("{field}: {}", shown(value));
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 //! Lifecycle commands over the v2 protocol: pause flips the reported state, resume
-//! clears it, rebuild is accepted and leaves the index populated.
+//! clears it, rebuild walks the disk again.
 #![cfg(not(miri))]
 #![allow(
     clippy::disallowed_methods,
@@ -133,30 +133,43 @@ fn pause_resume_rebuild_cycle() {
         send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"status\"}").contains("\"paused\":false")
     );
 
+    let indexed = |reply: &str| -> Option<u64> {
+        let rest = &reply[reply.find("\"indexed\":")? + "\"indexed\":".len()..];
+        rest[..rest.find(|c: char| !c.is_ascii_digit())?]
+            .parse()
+            .ok()
+    };
+    let before = indexed(&send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"status\"}"))
+        .expect("status reports indexed");
+
     // Pause → status reports paused.
     assert!(send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"pause\"}").contains("\"kind\":\"ok\""));
     assert!(await_paused(&sock, true), "daemon did not report paused");
 
-    // Resume → status reports running again.
-    assert!(send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"resume\"}").contains("\"kind\":\"ok\""));
-    assert!(await_paused(&sock, false), "daemon did not report resumed");
-
-    // Rebuild is accepted; the index stays populated afterwards.
+    // A file written while paused produces no indexing; only the rebuild's
+    // walk can catalogue it.
+    std::fs::write(home.join("docs/added.txt"), "beta").unwrap();
     assert!(
         send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"rebuild\"}").contains("\"kind\":\"ok\"")
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(45);
     let mut rebuilt = false;
     while Instant::now() < deadline {
         let status_reply = send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"status\"}");
-        // conf.txt + docs/ dir → at least one indexed entry once rebuild commits.
-        if status_reply.contains("\"indexed\":") && !status_reply.contains("\"indexed\":0") {
+        if indexed(&status_reply) == Some(before + 1) {
             rebuilt = true;
             break;
         }
         sleep(Duration::from_millis(50));
     }
-    assert!(rebuilt, "index empty after rebuild");
+    assert!(
+        rebuilt,
+        "rebuild did not catalogue the file written while paused"
+    );
+
+    // Resume → status reports running again.
+    assert!(send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"resume\"}").contains("\"kind\":\"ok\""));
+    assert!(await_paused(&sock, false), "daemon did not report resumed");
 
     std::fs::remove_dir_all(&base).ok();
 }
@@ -205,6 +218,54 @@ fn daemon_content_backfill_continues_after_first_limited_batch() {
         ),
         "second content file was not indexed by an idle follow-up batch"
     );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn moved_folder_leaves_the_index() {
+    let base = scratch::scratch_dir("bs-moved-tree");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    std::fs::create_dir_all(home.join("docs/projeto/sub")).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(home.join("docs/projeto/sub/relatorio.md"), "x").unwrap();
+
+    let sock = run.join("biglinux/indexd.sock");
+    let _d = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+    // `total` counts index postings before any file is stat'ed, so a document
+    // left behind for a file that no longer exists still counts.
+    let total = || {
+        let reply = send_daemon_request(
+            &sock,
+            r#"{"v":2,"cmd":"query","q":"relatorio","mode":"name","page":{"limit":5}}"#,
+        );
+        let rest = &reply[reply.find("\"total\":").expect("query reply has a total") + 8..];
+        rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap()]
+            .parse::<u64>()
+            .unwrap()
+    };
+    // The watcher indexes only on CPU time nobody else wants: on a busy machine
+    // a batch can wait long, as the content backfill does above.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while total() == 0 && Instant::now() < deadline {
+        sleep(Duration::from_millis(50));
+    }
+    assert_eq!(total(), 1, "the file was never indexed");
+
+    // One event names the folder; none name what it held.
+    std::fs::rename(home.join("docs/projeto"), base.join("projeto")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while total() != 0 && Instant::now() < deadline {
+        sleep(Duration::from_millis(50));
+    }
+    assert_eq!(total(), 0, "the moved folder's file is still indexed");
 
     std::fs::remove_dir_all(&base).ok();
 }

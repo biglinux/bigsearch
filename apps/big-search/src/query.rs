@@ -23,6 +23,10 @@ pub use big_indexd_client::{Filter, Hit, MatchKind, Page, QueryOutcome};
 /// in two files is a fact that can drift.
 use big_indexd_client::CANDIDATE_CEILING;
 
+/// Longest query read, in characters; the rest is ignored. The query comes
+/// from any same-user client, and every word becomes terms to look up.
+const MAX_QUERY_CHARS: usize = 256;
+
 pub struct QueryIndexes<'a> {
     pub name: &'a IndexReader,
     pub content: Option<&'a IndexReader>,
@@ -40,16 +44,24 @@ pub fn run_query(
     include_origin: bool,
     origin_reader: Option<&crate::origin::OriginReader>,
 ) -> Result<QueryOutcome> {
+    let q = match q.char_indices().nth(MAX_QUERY_CHARS) {
+        Some((end, _)) => &q[..end],
+        None => q,
+    };
     // Only what the page needs is read when the index can answer every filter
     // itself: the date and size filters need a `stat` of each candidate, and the
     // content index knows no folder, extension or type. Otherwise every
     // candidate up to the ceiling is read, as before. Reading 5 000 stored
     // documents for a page of 50 was most of a query's cost, and on a cold
     // disk thousands of scattered reads.
+    //
+    // "both" always reads to the ceiling: a file is ranked first when it
+    // matches by name and by content, and a page that reads fewer candidates
+    // may see only one of the two, so its order would change with the offset.
     let stat_filters = filter.mtime.is_some() || filter.size.is_some();
     let path_filters = filter.under.is_some() || !filter.ext.is_empty() || !filter.mime.is_empty();
-    let reads_content = matches!(mode, "content" | "both");
-    let paged = mode != "list" && !stat_filters && !(reads_content && path_filters);
+    let paged =
+        !matches!(mode, "list" | "both") && !stat_filters && !(mode == "content" && path_filters);
     let fetch = if paged {
         // Room for names the post-filter turns away and files gone since.
         page.offset
@@ -74,15 +86,13 @@ pub fn run_query(
         _ => search(indexes.name, q, filter, fetch)?,
     };
     // The count of a paged query comes from the postings, up to the ceiling,
-    // without reading documents; "both" adds the two counts, so a file that
-    // matches by name and by content counts twice and the total can run
-    // over, never under, what paging will reach.
-    let counted = if paged {
+    // without reading documents. Names are counted before the exact-match
+    // post-filter, so it can run over what paging reaches. A search that
+    // returned fewer candidates than it asked for has read every match, and
+    // its own count is exact.
+    let counted = if paged && base.len() >= fetch {
         Some(match mode {
             "content" => count_content(content_reader()?, q, CANDIDATE_CEILING)?,
-            "both" => (count_names(indexes.name, q, &Filter::default(), CANDIDATE_CEILING)?
-                + count_content(content_reader()?, q, CANDIDATE_CEILING)?)
-            .min(CANDIDATE_CEILING),
             _ => count_names(indexes.name, q, filter, CANDIDATE_CEILING)?,
         })
     } else {
@@ -140,7 +150,8 @@ pub fn run_query(
     }
 
     let total = counted.map_or(kept.len(), |counted| counted.max(kept.len()));
-    let next_offset = (page.offset + page.limit < total).then_some(page.offset + page.limit);
+    let end = page.offset.saturating_add(page.limit);
+    let next_offset = (end < total).then_some(end);
 
     // Page, then enrich only the visible window with metadata.
     let mut hits: Vec<Hit> = kept
@@ -187,13 +198,13 @@ pub fn run_query(
 /// [`settings::is_available`] reads the source directory, so asking per result
 /// would mean a `read_dir` for every missing file in a page.
 #[derive(Default)]
-struct OfflineSources {
+pub(crate) struct OfflineSources {
     /// Source id → whether it is retained *and* currently unreachable.
     answered: std::collections::HashMap<String, bool>,
 }
 
 impl OfflineSources {
-    fn is_retained_offline(&mut self, path: &Path) -> bool {
+    pub(crate) fn is_retained_offline(&mut self, path: &Path) -> bool {
         let Some(source) = crate::settings::sources().owner(path) else {
             return false; // no configured owner → nothing claims it
         };
@@ -2208,6 +2219,45 @@ mod tests {
         assert_eq!(outcome.hits.len(), 5);
         assert_eq!(outcome.total, 30);
         assert_eq!(outcome.next_offset, Some(5));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file found by name and by content is one hit and counts once.
+    #[test]
+    fn both_mode_counts_each_file_once() {
+        let dir = std::env::temp_dir().join(format!("lsearch-both-total-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let owned: Vec<String> = (0..3)
+            .map(|i| {
+                let path = dir.join(format!("recibo {i}.txt"));
+                std::fs::write(&path, b"x").unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let names = index_with("both-total", &refs);
+        let entries: Vec<(&str, &str)> = refs.iter().map(|p| (*p, "recibo pago")).collect();
+        let content = content_index_with("both-total", &entries);
+        let outcome = run_query(
+            QueryIndexes {
+                name: &names,
+                content: Some(&content),
+            },
+            "recibo",
+            "both",
+            &Filter::default(),
+            &Page {
+                offset: 0,
+                limit: 2,
+            },
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(outcome.hits.len(), 2);
+        assert_eq!(outcome.total, 3);
+        assert_eq!(outcome.next_offset, Some(2));
         std::fs::remove_dir_all(&dir).ok();
     }
 

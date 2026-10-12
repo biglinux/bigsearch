@@ -44,9 +44,10 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// Part of the wire contract rather than an implementation detail of the daemon,
 /// because [`QueryOutcome::total`] is **capped at it** — so a caller cannot tell
 /// an exact count from a floor without knowing this number. A total below it is
-/// how many matched; a total equal to it means "this many, and possibly far
-/// more", and a surface that prints it as an exact figure is stating something
-/// nobody established.
+/// how many matched, within what [`QueryOutcome::total`] says about paged
+/// counts; a total equal to it means "this many, and possibly far more", and a
+/// surface that prints it as an exact figure is stating something nobody
+/// established.
 pub const CANDIDATE_CEILING: usize = 5_000;
 
 /// Short origin/provenance summary attached to visible hits only when requested.
@@ -193,6 +194,12 @@ pub struct QueryOutcome {
     pub hits: Vec<Hit>,
     /// Matches after filtering, capped at [`CANDIDATE_CEILING`]. Equal to that
     /// ceiling means the real number is unknown and at least this large.
+    ///
+    /// In the `name` and `content` modes without date or size filters the
+    /// daemon reads only the candidates a page needs and counts the rest from
+    /// the index, so a total can run over what paging reaches: the last
+    /// `next_offset` may return fewer hits than asked for, or none. Files
+    /// deleted since they were indexed have the same effect in every mode.
     pub total: usize,
     /// Offset to request next, or `None` at the end.
     pub next_offset: Option<usize>,
@@ -356,6 +363,8 @@ pub enum Reply {
         name_index_bytes: u64,
         #[serde(default)]
         content_index_bytes: u64,
+        #[serde(default)]
+        unwatched_dirs: u64,
     },
     Origin {
         v: u32,
@@ -491,6 +500,10 @@ pub struct Status {
     pub name_index_bytes: u64,
     /// On-disk size of the content index directory, in bytes.
     pub content_index_bytes: u64,
+    /// Folders the daemon could not watch, usually for the inotify watch
+    /// limit: changes in them are seen only by the next full reconcile. Zero
+    /// from a daemon that does not report it.
+    pub unwatched_dirs: u64,
 }
 
 /// Errors talking to the daemon.
@@ -502,7 +515,8 @@ pub enum ClientError {
     Decode(serde_json::Error),
     /// The daemon returned an error reply.
     Daemon(String),
-    /// The daemon answered with an unexpected reply kind, or a version mismatch.
+    /// The daemon answered with an unexpected reply kind. A daemon that refuses
+    /// the request's protocol version answers with [`ClientError::Daemon`].
     Protocol(String),
 }
 
@@ -586,8 +600,11 @@ fn apply_deadlines(stream: &UnixStream) -> Result<(), ClientError> {
 /// refuse it *for*.
 #[must_use]
 pub fn default_socket() -> Option<PathBuf> {
+    // An empty or relative value is unset (XDG Base Directory spec), as the
+    // daemon reads it; joining it would name a socket under the current folder.
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
+        .filter(|runtime| runtime.is_absolute())
         .map(|runtime| runtime.join("biglinux").join("indexd.sock"))
 }
 
@@ -775,6 +792,7 @@ impl Client {
                 content_docs,
                 name_index_bytes,
                 content_index_bytes,
+                unwatched_dirs,
                 ..
             } => Ok(Status {
                 indexed,
@@ -789,6 +807,7 @@ impl Client {
                 content_docs,
                 name_index_bytes,
                 content_index_bytes,
+                unwatched_dirs,
             }),
             other => Err(ClientError::Protocol(format!(
                 "expected status reply, got {other:?}"
@@ -847,11 +866,14 @@ impl Client {
         }
     }
 
-    /// Keep the state a document is in right now.
+    /// Keep the state a document is in right now, before a version is restored
+    /// over it.
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError`] when the daemon is absent or refuses.
+    /// Returns [`ClientError`] when the daemon is absent or refuses, including
+    /// when the document exists but its current state could not be kept. Do not
+    /// restore over the document after an error.
     pub fn save_version(&self, path: &str) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::SaveVersion(PathRequest {
             path: path.to_string(),
@@ -869,7 +891,7 @@ impl Client {
         }))
     }
 
-    /// Forget every version of everything.
+    /// Forget every version of everything, also when versions are turned off.
     ///
     /// # Errors
     ///
@@ -888,7 +910,6 @@ impl Client {
         self.expect_ok(RequestBody::Resume)
     }
 
-    /// Request a full rebuild of the index from source files.
     /// Ask the daemon to read `path` again.
     ///
     /// # Errors
@@ -900,6 +921,11 @@ impl Client {
         }))
     }
 
+    /// Request a full rebuild of the index from source files.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn rebuild(&self) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::Rebuild)
     }
@@ -1061,6 +1087,7 @@ impl PersistentClient {
                 content_docs,
                 name_index_bytes,
                 content_index_bytes,
+                unwatched_dirs,
                 ..
             } => Ok(Status {
                 indexed,
@@ -1075,6 +1102,7 @@ impl PersistentClient {
                 content_docs,
                 name_index_bytes,
                 content_index_bytes,
+                unwatched_dirs,
             }),
             other => Err(ClientError::Protocol(format!(
                 "expected status reply, got {other:?}"

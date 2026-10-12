@@ -18,6 +18,9 @@ pub struct State {
     namespace: String,
     conn: Connection,
     pending: HashMap<String, PendingChange>,
+    /// Folders removed with everything under them since the last persist. Their
+    /// rows are dropped as one key range when it runs, never read into memory.
+    removed_trees: Vec<String>,
     clear_before_persist: bool,
     dirty: bool,
 }
@@ -53,10 +56,17 @@ impl State {
                 namespace: namespace.to_owned(),
                 conn,
                 pending: HashMap::new(),
+                removed_trees: Vec::new(),
                 clear_before_persist: false,
                 dirty: false,
             },
-            Err(_) => State::in_memory(db_path.to_path_buf(), namespace),
+            Err(error) => {
+                log::warn!(
+                    "state database {} unavailable, nothing will be saved: {error:#}",
+                    db_path.display()
+                );
+                State::in_memory(db_path.to_path_buf(), namespace)
+            }
         }
     }
 
@@ -74,6 +84,7 @@ impl State {
             namespace: namespace.to_owned(),
             conn,
             pending: HashMap::new(),
+            removed_trees: Vec::new(),
             clear_before_persist: true,
             dirty: true,
         }
@@ -93,7 +104,7 @@ impl State {
         match self.pending.get(&path_key).copied() {
             Some(PendingChange::Set(mtime, size)) => Some((mtime, size)),
             Some(PendingChange::Remove) => None,
-            None if self.clear_before_persist => None,
+            None if self.clear_before_persist || self.in_removed_tree(&path_key) => None,
             None => self
                 .conn
                 .prepare_cached(
@@ -116,7 +127,7 @@ impl State {
         match self.pending.get(&path_key) {
             Some(PendingChange::Set(_, _)) => true,
             Some(PendingChange::Remove) => false,
-            None if self.clear_before_persist => false,
+            None if self.clear_before_persist || self.in_removed_tree(&path_key) => false,
             None => self.contains_persisted_key(&path_key),
         }
     }
@@ -132,10 +143,39 @@ impl State {
         self.dirty = true;
     }
 
+    /// The persisted paths directly inside `dir`.
+    pub fn children(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+        let (low, high) = subtree_range(&key(dir));
+        // substr() and length() both count characters, so they agree with
+        // each other whatever the path holds.
+        let mut statement = self.conn.prepare_cached(
+            "SELECT path FROM file_state
+              WHERE namespace = ?1 AND path >= ?2 AND path < ?3
+                AND instr(substr(path, length(?2) + 1), '/') = 0",
+        )?;
+        let rows = statement.query_map(params![self.namespace, low, high], |row| {
+            row.get::<_, String>(0)
+        })?;
+        Ok(rows.flatten().map(PathBuf::from).collect())
+    }
+
+    /// Forget `path` and every path under it. A folder moved away, to the trash
+    /// included, is one event naming the folder and none for what it held.
+    pub fn remove_tree(&mut self, path: &Path) {
+        let path_key = key(path);
+        let (low, high) = subtree_range(&path_key);
+        self.pending
+            .retain(|key, _| !(key.as_str() >= low.as_str() && key.as_str() < high.as_str()));
+        self.pending.insert(path_key.clone(), PendingChange::Remove);
+        self.removed_trees.push(path_key);
+        self.dirty = true;
+    }
+
     /// Forget every entry (a `Rebuild` clears the index, so the cache must agree —
     /// otherwise unchanged-checks would skip re-indexing the wiped documents).
     pub fn clear(&mut self) {
         self.pending.clear();
+        self.removed_trees.clear();
         self.clear_before_persist = true;
         self.dirty = true;
     }
@@ -149,13 +189,19 @@ impl State {
     /// Run a reconciliation pass in one transaction. Each lookup and seen-mark
     /// would otherwise take and release the database's locks on its own: two
     /// `fcntl` and an `fstat` apiece, 324 000 system calls for a walk over
-    /// 109 000 paths. Batches persisted meanwhile commit with the pass, failed
-    /// or not, as each committed on its own before.
+    /// 109 000 paths. Batches persisted meanwhile commit with the pass, and a
+    /// failed pass rolls all of them back.
     pub fn scan_pass<T>(&mut self, pass: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.conn
             .execute_batch("BEGIN")
             .context("begin scan transaction")?;
         let result = pass(self);
+        if result.is_err() {
+            // The caller has not committed the index either: keeping the
+            // catalogue's half would record work the index never got.
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return result;
+        }
         if let Err(error) = self.conn.execute_batch("COMMIT") {
             // Never leave it open: every later flush would nest in it unseen.
             let _ = self.conn.execute_batch("ROLLBACK");
@@ -301,20 +347,18 @@ impl State {
     pub fn mark_seen_prefixes(&mut self, prefixes: &[PathBuf]) -> Result<()> {
         for prefix in prefixes {
             let prefix_text = key(prefix);
-            let prefix_len = i64::try_from(prefix_text.len()).unwrap_or(i64::MAX);
-            let child_sep_pos = prefix_len.saturating_add(1);
+            let (low, high) = subtree_range(&prefix_text);
+            // A key range: length() and substr() count characters and would
+            // miss the descendants of a non-ASCII prefix.
             self.conn
                 .execute(
                     "
                     INSERT OR IGNORE INTO temp.current_scan_seen(path, mtime, size)
                     SELECT path, mtime, size FROM file_state
                     WHERE namespace = ?1
-                      AND (path = ?2
-                           OR (length(path) > ?3
-                               AND substr(path, 1, ?3) = ?2
-                               AND substr(path, ?4, 1) = '/'))
+                      AND (path = ?2 OR (path >= ?3 AND path < ?4))
                     ",
-                    params![self.namespace, prefix_text, prefix_len, child_sep_pos],
+                    params![self.namespace, prefix_text, low, high],
                 )
                 .with_context(|| format!("mark retained prefix {}", prefix.display()))?;
         }
@@ -571,6 +615,15 @@ impl State {
             )
             .context("clear state table")?;
         }
+        // Ranges first: a path set again after its folder left must survive.
+        for dir in &self.removed_trees {
+            let (low, high) = subtree_range(dir);
+            tx.execute(
+                "DELETE FROM file_state WHERE namespace = ?1 AND path >= ?2 AND path < ?3",
+                params![self.namespace, low, high],
+            )
+            .with_context(|| format!("delete state tree {dir}"))?;
+        }
         {
             let mut upsert = tx
                 .prepare_cached(
@@ -600,6 +653,7 @@ impl State {
         }
         tx.commit().context("commit state transaction")?;
         self.pending.clear();
+        self.removed_trees.clear();
         self.clear_before_persist = false;
         self.dirty = false;
         Ok(())
@@ -621,9 +675,20 @@ impl State {
             namespace: namespace.to_owned(),
             conn,
             pending: HashMap::new(),
+            removed_trees: Vec::new(),
             clear_before_persist: false,
             dirty: false,
         }
+    }
+
+    /// Whether `path_key` lies under a folder removed since the last persist,
+    /// so its persisted row no longer counts.
+    fn in_removed_tree(&self, path_key: &str) -> bool {
+        self.removed_trees.iter().any(|dir| {
+            path_key
+                .strip_prefix(dir.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
     }
 }
 
@@ -631,11 +696,20 @@ fn key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// The keys strictly under `dir`: text compares bytewise and '0' is the byte
+/// after '/'.
+fn subtree_range(dir: &str) -> (String, String) {
+    (format!("{dir}/"), format!("{dir}0"))
+}
+
 fn open_state_db(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(db_path).with_context(|| format!("open {}", db_path.display()))?;
+    // The daemon's scan pass holds the write lock for its whole walk; a CLI
+    // command opening the same database waits for it rather than failing.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     tune_connection_for_low_memory(&conn);
     init_schema(&conn)?;
     Ok(conn)
@@ -815,6 +889,87 @@ mod tests {
             }
             assert_eq!(changes, expected, "page size {limit}");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn children_are_one_level_deep() {
+        let dir = std::env::temp_dir().join(format!("bs-state-children-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
+        for path in ["/p/ção", "/p/ção/a", "/p/ção/s", "/p/ção/s/b", "/p/ção-2/c"] {
+            state.set(Path::new(path), 1, 1);
+        }
+        state.persist().unwrap();
+        let mut children = state.children(Path::new("/p/ção")).unwrap();
+        children.sort();
+        assert_eq!(
+            children,
+            [PathBuf::from("/p/ção/a"), PathBuf::from("/p/ção/s")]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn removed_tree_spares_its_siblings() {
+        let dir = std::env::temp_dir().join(format!("bs-state-tree-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
+        for path in ["/p/t", "/p/t/a", "/p/t/s/b", "/p/t-2", "/p/t0"] {
+            state.set(Path::new(path), 1, 1);
+        }
+        state.persist().unwrap();
+        state.set(Path::new("/p/t/pending"), 1, 1);
+
+        state.remove_tree(Path::new("/p/t"));
+        // Recreated before the persist: the new row must survive the range.
+        state.set(Path::new("/p/t/a"), 2, 2);
+        assert_eq!(state.recorded(Path::new("/p/t/s/b")), None);
+        assert_eq!(state.recorded(Path::new("/p/t/a")), Some((2, 2)));
+        state.persist().unwrap();
+
+        let state = State::load(&dir.join("state.sqlite"), NAME_NAMESPACE);
+        let kept: Vec<_> = [
+            "/p/t",
+            "/p/t/a",
+            "/p/t/s/b",
+            "/p/t/pending",
+            "/p/t-2",
+            "/p/t0",
+        ]
+        .into_iter()
+        .filter(|path| state.contains(Path::new(path)))
+        .collect();
+        assert_eq!(kept, ["/p/t/a", "/p/t-2", "/p/t0"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retained_prefix_keeps_accented_paths() {
+        let dir = std::env::temp_dir().join(format!("bs-state-retain-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
+        for path in [
+            "/run/media/joão/USB",
+            "/run/media/joão/USB/a.txt",
+            "/run/media/joão/USB-2/b",
+        ] {
+            state.set(Path::new(path), 1, 1);
+        }
+        state.persist().unwrap();
+        state.begin_scan().unwrap();
+        state
+            .mark_seen_prefixes(&[PathBuf::from("/run/media/joão/USB")])
+            .unwrap();
+
+        let (changes, _) = state.scan_changes_after("", 10).unwrap();
+        assert_eq!(
+            changes,
+            vec![ScanChange::Gone(PathBuf::from("/run/media/joão/USB-2/b"))]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

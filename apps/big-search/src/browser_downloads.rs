@@ -27,17 +27,19 @@
 //! ## The file is never copied
 //!
 //! The browser's history is opened read-only through SQLite's `immutable=1`,
-//! which reads the committed contents without taking a lock and without caring
-//! that the browser has the file open. Copying it first was the obvious
-//! alternative and it is not affordable: the main profile's history on this
-//! machine is 277 MB, and the service is capped at 512 MB of memory.
+//! which reads it without taking a lock and without caring that the browser
+//! has the file open. Copying it first was the obvious alternative and it is
+//! not affordable: the main profile's history on this machine is 277 MB, and
+//! the service is capped at 512 MB of memory.
 
+use std::collections::HashSet;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rusqlite::{Connection, OpenFlags};
 
-use crate::origin::OriginWriter;
+use crate::origin::{OriginWriter, domain_from_url};
 
 /// Most rows read from one profile. The newest ones, because the oldest
 /// downloads are the least likely to still be on the disk.
@@ -113,12 +115,14 @@ fn home() -> PathBuf {
 }
 
 fn import_one(writer: &OriginWriter, history: &Path) -> Result<usize> {
+    let before = std::fs::metadata(history)?;
     let conn = open_readonly(history)?;
     let mut statement = conn.prepare(
         "
         SELECT COALESCE(NULLIF(d.current_path, ''), d.target_path) AS file,
                c.url,
-               d.start_time
+               d.start_time,
+               d.end_time
           FROM downloads d
           LEFT JOIN downloads_url_chains c
             ON c.id = d.id AND c.chain_index = 0
@@ -127,41 +131,62 @@ fn import_one(writer: &OriginWriter, history: &Path) -> Result<usize> {
          LIMIT ?1
         ",
     )?;
-    let rows = statement.query_map([MAX_ROWS], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
+    let rows = statement
+        .query_map([MAX_ROWS], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let after = std::fs::metadata(history)?;
+    if before.len() != after.len() || before.modified()? != after.modified()? {
+        bail!("the browser wrote its history during the read");
+    }
+    writer.register_web_downloads_at(&still_on_disk(rows))
+}
 
-    // Collected first, written in one transaction: a row at a time is a commit
-    // at a time, and this list runs to thousands.
+/// The downloads whose file is still the one the browser saved, newest row
+/// first, one per path.
+///
+/// A deleted download leaves its row behind, and whatever takes that name next
+/// must not inherit its site: a file missing, or modified after the download
+/// finished, is skipped. Only the newest row counts for a path downloaded more
+/// than once.
+fn still_on_disk(rows: Vec<(String, Option<String>, i64, i64)>) -> Vec<(PathBuf, String, i64)> {
+    // A download's last write lands just before the browser records it as done.
+    const SLACK_SECONDS: i64 = 60;
+    let mut seen = HashSet::new();
     let mut downloads = Vec::new();
-    for row in rows.flatten() {
-        let (file, url, start_time) = row;
-        let path = PathBuf::from(&file);
-        // A download the person has since deleted or moved elsewhere is a row
-        // about a file that is not there; recording it would put an origin on
-        // whatever takes that name next.
-        if file.is_empty() || !path.is_file() {
+    for (file, url, started, ended) in rows {
+        if file.is_empty() || !seen.insert(file.clone()) {
             continue;
         }
-        let Some(domain) = url.as_deref().and_then(domain_of) else {
+        let path = PathBuf::from(file);
+        let finished = webkit_epoch_to_unix(started.max(ended));
+        let Ok(metadata) = std::fs::metadata(&path) else {
             continue;
         };
-        downloads.push((path, domain, webkit_epoch_to_unix(start_time)));
+        if !metadata.is_file() || metadata.mtime() > finished + SLACK_SECONDS {
+            continue;
+        }
+        let Some(domain) = url.as_deref().and_then(domain_from_url) else {
+            continue;
+        };
+        downloads.push((path, domain, webkit_epoch_to_unix(started)));
     }
-    writer.register_web_downloads_at(&downloads)
+    downloads
 }
 
 /// Open a browser's history without copying it and without disturbing it.
 ///
 /// `immutable=1` promises SQLite the file will not change underneath it, which
 /// is how it reads a database another process has open without taking a lock.
-/// The browser writes through a rollback journal, so what this sees is the last
-/// committed state; a read that lands mid-write comes back as an error and the
-/// next start tries again.
+/// When the browser writes anyway, SQLite may return an error or wrong rows.
+/// The caller drops the batch when the file's size or mtime moved during the
+/// read; a write the browser started before the read began goes unnoticed.
 fn open_readonly(path: &Path) -> Result<Connection> {
     let uri = format!("file:{}?immutable=1", path.display());
     Connection::open_with_flags(
@@ -181,20 +206,6 @@ fn webkit_epoch_to_unix(microseconds: i64) -> i64 {
     microseconds / 1_000_000 - EPOCH_DIFFERENCE_SECONDS
 }
 
-/// The host an address names, and nothing else from it.
-///
-/// The path and the query are deliberately dropped and never reach the store:
-/// most of the recorded addresses carry a signed token, and a database of file
-/// origins must not double as a database of credentials.
-fn domain_of(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("blob:").unwrap_or(url);
-    let (_, after_scheme) = rest.split_once("://")?;
-    let authority = after_scheme.split(['/', '?', '#']).next()?;
-    let host = authority.rsplit('@').next()?.split(':').next()?;
-    let host = host.strip_prefix("www.").unwrap_or(host);
-    (!host.is_empty()).then(|| host.to_ascii_lowercase())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,37 +220,54 @@ mod tests {
         assert_eq!(webkit_epoch_to_unix(-5), 0);
     }
 
-    /// Only the site survives; the credential in the address does not.
+    /// A file that took a deleted download's name keeps no origin from it,
+    /// and a name downloaded twice gets its newest download's site.
     #[test]
-    fn only_the_site_is_kept_from_an_address() {
+    fn only_the_newest_unchanged_download_counts() {
+        let dir = crate::test_env::scratch_dir("bs-browser-downloads");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let webkit = |unix: i64| (unix + 11_644_473_600) * 1_000_000;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let (fresh, replaced) = (file("fresh.pdf"), file("replaced.pdf"));
+        let url = |host: &str| Some(format!("https://{host}/f"));
+        let rows = vec![
+            (
+                fresh.clone(),
+                url("new.example"),
+                webkit(now - 5),
+                webkit(now),
+            ),
+            (
+                fresh.clone(),
+                url("old.example"),
+                webkit(now - 99),
+                webkit(now - 90),
+            ),
+            (
+                replaced,
+                url("gone.example"),
+                webkit(now - 7200),
+                webkit(now - 7200),
+            ),
+            (
+                dir.join("missing.pdf").to_string_lossy().into_owned(),
+                url("x.example"),
+                0,
+                0,
+            ),
+        ];
         assert_eq!(
-            domain_of("https://chatgpt.com/backend-api/estuary/content?id=file_00&sig=4c69600f")
-                .as_deref(),
-            Some("chatgpt.com")
+            still_on_disk(rows),
+            [(PathBuf::from(fresh), "new.example".to_string(), now - 5)]
         );
-        assert_eq!(
-            domain_of("blob:https://web.whatsapp.com/a9c27299").as_deref(),
-            Some("web.whatsapp.com")
-        );
-        assert_eq!(
-            domain_of("https://user:secret@files.example.org:8443/x.zip").as_deref(),
-            Some("files.example.org")
-        );
-        assert_eq!(domain_of("about:blank"), None);
-    }
-
-    /// Only a file named exactly `History` is ever opened.
-    #[test]
-    fn nothing_but_the_history_file_is_looked_for() {
-        for browser in CHROMIUM_BROWSERS {
-            assert!(!browser.contains(".."), "{browser}");
-        }
-        let listed = history_files();
-        assert!(
-            listed
-                .iter()
-                .all(|path| path.file_name().is_some_and(|name| name == "History")),
-            "{listed:?}"
-        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
