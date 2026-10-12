@@ -154,6 +154,11 @@ static SIGNATURE_LINE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// A place of at most 41 characters, a comma, and nothing else before the date.
 fn signature_line(before: &str) -> bool {
+    // Even indented by a layout extractor, such a line is far shorter; the
+    // bound keeps a long line from being matched once per date on it.
+    if before.len() > 512 {
+        return false;
+    }
     let place = before.trim_start();
     SIGNATURE_LINE.is_match(before)
         && place
@@ -259,7 +264,8 @@ fn leading_year(rest: &str) -> Option<(u32, usize)> {
         if words.is_empty() && word.len() == 4 && word.bytes().all(|b| b.is_ascii_digit()) {
             return word.parse().ok().map(|y| (y, at + token.trim_end().len()));
         }
-        if number(&[word]).is_none() && !matches!(word, "e" | "y") {
+        // "mil novecentos e noventa e nove" is the longest year in words.
+        if words.len() == 8 || (number(&[word]).is_none() && !matches!(word, "e" | "y")) {
             break;
         }
         words.push(word);
@@ -300,8 +306,7 @@ fn candidates(text: &str) -> Vec<Found> {
     let mut out = Vec::new();
     let mut push = |year: &str, month: u32, day: &str, (at, len): (usize, usize)| {
         if let (Ok(y), Ok(d)) = (year.parse::<u32>(), day.parse::<u32>())
-            && (1..=12).contains(&month)
-            && (1..=31).contains(&d)
+            && is_calendar_date(y, month, d)
         {
             out.push(Found {
                 iso: format!("{y:04}-{month:02}-{d:02}"),
@@ -361,7 +366,7 @@ fn candidates(text: &str) -> Vec<Found> {
             (day_words.len() <= 5).then(|| number(&day_words)).flatten(),
             month(&c[2]),
             leading_year(&text[whole.end..]),
-        ) && (1..=31).contains(&day)
+        ) && is_calendar_date(year, m, day)
         {
             out.push(Found {
                 iso: format!("{year:04}-{m:02}-{day:02}"),
@@ -372,6 +377,20 @@ fn candidates(text: &str) -> Vec<Found> {
         }
     }
     out
+}
+
+/// A day that exists, in the years a document can carry: "31 de abril" is a
+/// typo or a misread, and a wrong date is worse than none.
+fn is_calendar_date(year: u32, month: u32, day: u32) -> bool {
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1000..=2999).contains(&year) && (1..=days).contains(&day)
 }
 
 /// Whether `line` is little more than a date: "17 de setembro de 2026",
@@ -445,19 +464,66 @@ fn is_english(text: &str) -> bool {
 /// date (a signature line, "emitido em", a dateline). A signature stamp, the
 /// fallback, scores 0.
 pub fn scored_date(text: &str) -> Option<(String, i32)> {
+    // A document's own date heads it or closes it; past this many candidates
+    // only the first and last halves are scored, which bounds the work on a
+    // text that is nothing but dates.
+    const SCORED: usize = 1000;
+    let mut found_all = candidates(text);
+    found_all.sort_by_key(|found| found.at);
+    if found_all.len() > SCORED {
+        found_all.drain(SCORED / 2..found_all.len() - SCORED / 2);
+    }
+    // Where the third non-empty line starts: a cited act opening a line up to
+    // there is the document's own title.
+    let mut title_end = usize::MAX;
+    let mut offset = 0;
+    let mut filled = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim().is_empty() {
+            filled += 1;
+            if filled == 3 {
+                title_end = offset;
+                break;
+            }
+        }
+        offset += line.len();
+    }
+    // The line and the words before each date are tracked while walking the
+    // candidates in order, so a long line is scanned once, not once per date.
+    // `words` counts the words before the date on its line, up to three.
+    let (mut scanned, mut line_start, mut words, mut in_word) = (0, 0, 0, false);
+    let mut scope_of_line: Option<(usize, usize)> = None;
+    let mut header_line: Option<(usize, bool)> = None;
     let mut best: Option<(i32, f64, String)> = None;
     let mut first_stamp: Option<(usize, String)> = None;
-    for found in candidates(text) {
+    for found in found_all {
+        for (i, c) in text[scanned..found.at].char_indices() {
+            if c == '\n' {
+                (line_start, words, in_word) = (scanned + i + 1, 0, false);
+            } else if c.is_whitespace() {
+                in_word = false;
+            } else if !in_word {
+                in_word = true;
+                words = (words + 1).min(3);
+            }
+        }
+        scanned = found.at;
         let before_raw = &text[..found.at];
-        let line_start = before_raw.rfind('\n').map_or(0, |i| i + 1);
         // The words that give the date its role sit on its line ("Data: …",
         // "Vencimento …") or, when the date opens its line, on the line above…
         // …or when only a word or two precede it ("nascido" / "em 13 de março").
-        let scope = if text[line_start..found.at].split_whitespace().count() <= 2 {
-            before_raw[..line_start]
-                .trim_end()
-                .rfind('\n')
-                .map_or(0, |i| i + 1)
+        let scope = if words <= 2 {
+            match scope_of_line {
+                Some((line, scope)) if line == line_start => scope,
+                _ => {
+                    let scope = before_raw[..line_start]
+                        .trim_end()
+                        .rfind('\n')
+                        .map_or(0, |i| i + 1);
+                    scope_of_line = Some((line_start, scope));
+                    scope
+                }
+            }
         } else {
             line_start
         };
@@ -477,10 +543,18 @@ pub fn scored_date(text: &str) -> Option<(String, i32)> {
             .find_iter(window)
             .last()
             .is_some_and(|m| candidates(&window[m.end()..]).is_empty());
-        let line_end = text[found.at..]
-            .find('\n')
-            .map_or(text.len(), |i| found.at + i);
-        if copy_stamp || PRINT_HEADER.is_match(&text[line_start..line_end]) {
+        let print_header = match header_line {
+            Some((line, header)) if line == line_start => header,
+            _ => {
+                let line_end = text[found.at..]
+                    .find('\n')
+                    .map_or(text.len(), |i| found.at + i);
+                let header = PRINT_HEADER.is_match(&text[line_start..line_end]);
+                header_line = Some((line_start, header));
+                header
+            }
+        };
+        if copy_stamp || print_header {
             continue;
         }
         if STAMP.is_match(&norm(window)) {
@@ -500,13 +574,8 @@ pub fn scored_date(text: &str) -> Option<(String, i32)> {
             // ("DECRETO Nº 010, DE 02 DE ABRIL DE 2020"); "(Lei nº 7.115, de …)"
             // under a title is the law the document rests on.
             let line = &text[line_start..found.at];
-            // nth(2) stops at the third line instead of counting them all.
             let own_title = line.len() <= 300
-                && text[..line_start]
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .nth(2)
-                    .is_none()
+                && line_start <= title_end
                 && line.trim_start().starts_with(char::is_alphabetic)
                 && CITED_ACT.find(&norm(line)).is_some_and(|m| m.start() == 0);
             score += if own_title { 3 } else { -3 };
@@ -520,13 +589,11 @@ pub fn scored_date(text: &str) -> Option<(String, i32)> {
         // A date may run across a line break ("26 de\nmaio de 2026"): what
         // follows it on its line starts where the date ends.
         let date_end = found.at + found.len;
-        let line_end = text[date_end..]
-            .find('\n')
-            .map_or(text.len(), |i| date_end + i);
-        if text[line_start..found.at].trim().is_empty()
-            && text[date_end..line_end]
-                .trim_matches(|c: char| c.is_whitespace() || c == '.')
-                .is_empty()
+        if words == 0
+            && text[date_end..]
+                .chars()
+                .find(|&c| c == '\n' || !(c.is_whitespace() || c == '.'))
+                .is_none_or(|c| c == '\n')
         {
             score += 2; // a date alone on its line heads a letter
         }
@@ -633,6 +700,38 @@ mod tests {
     fn a_date_across_a_line_break() {
         let text = "Relatório anual\n26 de\nmaio de 2026\nTexto do relatório.";
         assert_eq!(document_date(text).as_deref(), Some("2026-05-26"));
+    }
+
+    #[test]
+    fn impossible_dates_are_refused() {
+        for text in [
+            "Porto Alegre, 31 de abril de 2026.",
+            "Porto Alegre, 29 de fevereiro de 2026.",
+            "Emitido em 31/04/2026.",
+            "Emitido em 01/01/0000.",
+            "Publique-se. Trindade, aos 30 dias de fevereiro de 2025.",
+        ] {
+            assert_eq!(document_date(text), None, "{text}");
+        }
+        let leap = "Porto Alegre, 29 de fevereiro de 2024.";
+        assert_eq!(document_date(leap).as_deref(), Some("2024-02-29"));
+    }
+
+    #[test]
+    fn endless_year_words_stay_bounded() {
+        let text = format!(
+            "Aos onze dias do mês de maio de {}mil.",
+            "novecentos ".repeat(5000)
+        );
+        assert_eq!(document_date(&text), None);
+    }
+
+    #[test]
+    fn one_line_of_dates_is_linear() {
+        let text = "01/01/2026 ".repeat(20_000);
+        let started = std::time::Instant::now();
+        assert_eq!(document_date(&text).as_deref(), Some("2026-01-01"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 
     /// Stamps repeat on every page and for every signer; they date a document

@@ -12,9 +12,9 @@
 //! ## No model, on purpose
 //!
 //! Everything here is rules and counting. Small language models were measured on
-//! the same task and corpus (`local-agent-mini/results/RESULTADOS-v2.md`): on an
-//! old dual-core laptop they took a minute or more per file, and they turned safe
-//! "don't know" answers into wrong dates and wrong kinds. The rules answer in
+//! the same task and corpus: on an old dual-core laptop they took a minute or
+//! more per file, and they turned safe "don't know" answers into wrong dates and
+//! wrong kinds. The rules answer in
 //! milliseconds and leave a field empty when the text gives no evidence.
 //!
 //! ## Empty beats wrong

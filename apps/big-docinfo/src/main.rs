@@ -15,7 +15,7 @@
 //! Nothing is renamed without an explicit `rename`, and `rename` never replaces
 //! an existing file: the kernel refuses atomically (`RENAME_NOREPLACE`).
 
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -36,12 +36,18 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // A file name is bytes: one from an old FAT stick may not be UTF-8.
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match args.as_slice() {
-        [cmd, file, name] if cmd == "rename" => rename(Path::new(file), name),
+        [cmd, file, name] if cmd == "rename" => {
+            let Some(name) = name.to_str() else {
+                bail!("Esse nome tem caracteres inválidos. Use outro nome.");
+            };
+            rename(Path::new(file), name)
+        }
         [flag, file] if flag == "--json" => describe(Path::new(file), Output::Json),
         [flag, file] if flag == "--name" => describe(Path::new(file), Output::Name),
-        [file] if !file.starts_with('-') => describe(Path::new(file), Output::Text),
+        [file] if file.as_bytes().first() != Some(&b'-') => describe(Path::new(file), Output::Text),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);

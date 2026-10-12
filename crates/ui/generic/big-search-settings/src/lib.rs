@@ -43,7 +43,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 
 /// Space between groups when the controls are embedded in another window, which
 /// is what `AdwPreferencesPage` puts between its own.
@@ -188,6 +188,11 @@ pub(crate) struct SearchSettings {
     pending_write: RefCell<Vec<(String, String)>>,
     /// Whether a change the service actually reads is waiting for a restart.
     restart_wanted: Cell<bool>,
+    /// A write is on its way to the file. Writes go one at a time: two would
+    /// read the file together and the second would undo the first.
+    writing: Cell<bool>,
+    /// Restart once the queue is written, asked while a write was under way.
+    apply_wanted: Cell<bool>,
     write_timer: RefCell<Option<glib::SourceId>>,
     restart_timer: RefCell<Option<glib::SourceId>>,
     /// The status card, which is also where "applying…" is said.
@@ -196,6 +201,8 @@ pub(crate) struct SearchSettings {
     /// rebuilt from the file after every change, and the widgets alone would not
     /// keep the thing that rebuilds them alive.
     folders: RefCell<Option<Rc<folders::Folders>>>,
+    /// The work presets and their advanced rows, held for the same reason.
+    effort: RefCell<Option<Rc<effort::Effort>>>,
 }
 
 impl SearchSettings {
@@ -241,59 +248,58 @@ impl SearchSettings {
         *self.write_timer.borrow_mut() = Some(timer);
     }
 
-    /// Write everything waiting, and remember that the service is now behind.
+    /// Write everything waiting on a worker thread, and remember that the
+    /// service is now behind.
     fn write_now(self: &Rc<Self>) {
+        if self.writing.get() {
+            return; // the write under way looks at the queue again when it ends
+        }
         let pending = std::mem::take(&mut *self.pending_write.borrow_mut());
         if pending.is_empty() {
+            if self.apply_wanted.replace(false) {
+                self.restart_if_wanted();
+            }
             return;
         }
-        let (blocks, defaults): (Vec<_>, Vec<_>) = pending
-            .iter()
-            .partition(|(key, _)| key.starts_with("origin.") || key.starts_with("history."));
-        let (origin, history): (Vec<_>, Vec<_>) = blocks
-            .into_iter()
-            .partition(|(key, _)| key.starts_with("origin."));
-        let defaults: Vec<(&str, &str)> = defaults
-            .iter()
-            .map(|(key, literal)| (key.as_str(), literal.as_str()))
-            .collect();
-        let origin: Vec<(&str, &str)> = origin
-            .iter()
-            .map(|(key, literal)| (key.strip_prefix("origin.").unwrap_or(key), literal.as_str()))
-            .collect();
-        let history: Vec<(&str, &str)> = history
-            .iter()
-            .map(|(key, literal)| {
-                (
-                    key.strip_prefix("history.").unwrap_or(key),
-                    literal.as_str(),
-                )
-            })
-            .collect();
-        if !defaults.is_empty()
-            && let Err(error) = big_search_config::set_defaults(&defaults)
-        {
-            log::warn!("search settings could not be written: {error}");
-            self.status.show_write_failed();
-            return;
+        self.writing.set(true);
+        // A host that quits when this window closes still waits for the file.
+        let hold = gio::Application::default().map(|app| app.hold());
+        let settings = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            let (wrote, outcome) = gio::spawn_blocking(move || write_config(pending))
+                .await
+                .unwrap_or_else(|_| (false, Err(Vec::new())));
+            settings.writing.set(false);
+            if wrote {
+                settings.restart_wanted.set(true);
+            }
+            if let Err(left) = outcome {
+                settings.requeue(left);
+                if settings.apply_wanted.replace(false) {
+                    settings.restart_if_wanted();
+                } else if wrote {
+                    settings.arm_restart();
+                }
+                settings.status.show_write_failed();
+            } else if settings.apply_wanted.get() || !settings.pending_write.borrow().is_empty() {
+                settings.write_now();
+            } else {
+                settings.status.show_pending_restart();
+                settings.arm_restart();
+            }
+            drop(hold);
+        });
+    }
+
+    /// Put back what did not reach the file, unless the person changed it again
+    /// meanwhile; the next change or closing the window writes it.
+    fn requeue(&self, left: Vec<(String, String)>) {
+        let mut pending = self.pending_write.borrow_mut();
+        for (key, literal) in left {
+            if !pending.iter().any(|(queued, _)| *queued == key) {
+                pending.push((key, literal));
+            }
         }
-        if !origin.is_empty()
-            && let Err(error) = big_search_config::set_origin(&origin)
-        {
-            log::warn!("search settings could not be written: {error}");
-            self.status.show_write_failed();
-            return;
-        }
-        if !history.is_empty()
-            && let Err(error) = big_search_config::set_history(&history)
-        {
-            log::warn!("search settings could not be written: {error}");
-            self.status.show_write_failed();
-            return;
-        }
-        self.restart_wanted.set(true);
-        self.status.show_pending_restart();
-        self.arm_restart();
     }
 
     /// Restart the service after a quiet spell, so a person changing four
@@ -314,19 +320,60 @@ impl SearchSettings {
 
     /// Write anything still waiting and restart the service, now.
     pub(crate) fn apply_now(self: &Rc<Self>) {
-        if let Some(timer) = self.write_timer.borrow_mut().take() {
-            timer.remove();
+        for timer in [&self.write_timer, &self.restart_timer] {
+            if let Some(timer) = timer.borrow_mut().take() {
+                timer.remove();
+            }
         }
+        self.apply_wanted.set(true);
         self.write_now();
-        if let Some(timer) = self.restart_timer.borrow_mut().take() {
-            timer.remove();
-        }
-        if !self.restart_wanted.replace(false) {
-            return;
-        }
-        self.status.show_applying();
-        restart_service();
     }
+
+    fn restart_if_wanted(&self) {
+        if self.restart_wanted.replace(false) {
+            self.status.show_applying();
+            restart_service();
+        }
+    }
+}
+
+/// Write the queued keys one table at a time. Says whether any table reached
+/// the file, and hands back the keys that did not.
+fn write_config(pending: Vec<(String, String)>) -> (bool, Result<(), Vec<(String, String)>>) {
+    type Write = fn(&[(&str, &str)]) -> std::io::Result<()>;
+    let table_of = |key: &str| {
+        ["origin.", "history."]
+            .into_iter()
+            .find(|prefix| key.starts_with(prefix))
+            .unwrap_or("")
+    };
+    let tables: [(&str, Write); 3] = [
+        ("", big_search_config::set_defaults),
+        ("origin.", big_search_config::set_origin),
+        ("history.", big_search_config::set_history),
+    ];
+    let mut left = pending;
+    let mut wrote = false;
+    for (prefix, write) in tables {
+        let (mine, rest): (Vec<_>, Vec<_>) = left
+            .into_iter()
+            .partition(|(key, _)| table_of(key) == prefix);
+        left = rest;
+        if mine.is_empty() {
+            continue;
+        }
+        let values: Vec<(&str, &str)> = mine
+            .iter()
+            .map(|(key, literal)| (&key[prefix.len()..], literal.as_str()))
+            .collect();
+        if let Err(error) = write(&values) {
+            log::warn!("search settings could not be written: {error}");
+            left.extend(mine);
+            return (wrote, Err(left));
+        }
+        wrote = true;
+    }
+    (wrote, Ok(()))
 }
 
 /// Ask systemd to restart the search service, if it is running at all.
@@ -400,19 +447,24 @@ fn build_groups() -> (Vec<adw::PreferencesGroup>, Rc<SearchSettings>) {
     let settings = Rc::new(SearchSettings {
         pending_write: RefCell::new(Vec::new()),
         restart_wanted: Cell::new(false),
+        writing: Cell::new(false),
+        apply_wanted: Cell::new(false),
         write_timer: RefCell::new(None),
         restart_timer: RefCell::new(None),
         status,
         folders: RefCell::new(None),
+        effort: RefCell::new(None),
     });
 
     let folders = folders::Folders::new(&settings);
     *settings.folders.borrow_mut() = Some(Rc::clone(&folders));
+    let effort = effort::Effort::new(&settings);
+    *settings.effort.borrow_mut() = Some(Rc::clone(&effort));
 
     let groups = vec![
         settings.status.group().clone(),
         named(folders.group().clone(), ANCHOR_FOLDERS),
-        named(effort::group(&settings), ANCHOR_EFFORT),
+        named(effort.group().clone(), ANCHOR_EFFORT),
         named(privacy::group(&settings), ANCHOR_ORIGIN),
         named(versions::group(&settings), ANCHOR_VERSIONS),
     ];

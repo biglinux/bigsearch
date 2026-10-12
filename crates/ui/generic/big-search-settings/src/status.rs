@@ -29,6 +29,9 @@ pub(crate) struct StatusCard {
     /// True while a restart is in flight, so an answer that arrives from the
     /// service that is going away does not overwrite "Applying…".
     applying: Rc<Cell<bool>>,
+    /// Whether the service answered the last time it was asked. One that is
+    /// off is not restarted, so there is nothing to show as applying.
+    answering: Rc<Cell<bool>>,
     /// Whether the service said it is paused, which is what the button means.
     paused: Rc<Cell<bool>>,
     poll: Rc<RefCell<Option<glib::SourceId>>>,
@@ -79,6 +82,7 @@ impl StatusCard {
             rebuild,
             turn_on,
             applying: Rc::new(Cell::new(false)),
+            answering: Rc::new(Cell::new(false)),
             paused: Rc::new(Cell::new(false)),
             poll: Rc::new(RefCell::new(None)),
         };
@@ -158,6 +162,9 @@ impl StatusCard {
     }
 
     pub(crate) fn show_applying(&self) {
+        if !self.answering.get() {
+            return;
+        }
         self.applying.set(true);
         self.headline.set_label(&tr("Applying…"));
         self.detail.set_label("");
@@ -211,6 +218,7 @@ impl StatusCard {
 
     fn show(&self, status: &big_indexd_client::Status) {
         self.applying.set(false);
+        self.answering.set(true);
         self.paused.set(status.paused);
         self.turn_on.set_visible(false);
         self.pause.set_visible(true);
@@ -238,7 +246,10 @@ impl StatusCard {
         }
         let bytes = status.name_index_bytes + status.content_index_bytes;
         if bytes > 0 {
-            lines.push(tr("Takes up {size} on the disk").replace("{size}", &human_size(bytes)));
+            lines.push(
+                tr("The list of files takes up {size} on the disk")
+                    .replace("{size}", &human_size(bytes)),
+            );
         }
         self.detail.set_label(&lines.join("\n"));
     }
@@ -249,6 +260,7 @@ impl StatusCard {
         if self.applying.get() {
             return;
         }
+        self.answering.set(false);
         self.headline.set_label(&tr("The search is switched off"));
         self.detail.set_label(&tr(
             "Nothing is being catalogued, so searching reads the folders one by one and takes longer.",

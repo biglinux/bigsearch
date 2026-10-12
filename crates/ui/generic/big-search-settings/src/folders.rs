@@ -139,10 +139,26 @@ impl Folders {
         {
             let folders = Rc::clone(self);
             let path = source.path.clone();
-            inside.connect_state_set(move |_, state| {
+            inside.connect_state_set(move |switch, state| {
+                // Moving the switch back after a failed write asks for the
+                // state it already has; there is nothing to write.
+                if state == switch.state() {
+                    return glib::Propagation::Proceed;
+                }
                 if let Err(error) = big_search_config::set_source_content(&path, state) {
                     log::warn!("the folder setting could not be written: {error}");
-                } else if let Some(settings) = folders.settings() {
+                    folders.say(&tr(
+                        "Your change could not be saved. Check the space left on the disk.",
+                    ));
+                    let switch = switch.downgrade();
+                    glib::idle_add_local_once(move || {
+                        if let Some(switch) = switch.upgrade() {
+                            switch.set_active(!state);
+                        }
+                    });
+                    return glib::Propagation::Stop;
+                }
+                if let Some(settings) = folders.settings() {
                     settings.folders_changed();
                 }
                 glib::Propagation::Proceed
@@ -221,41 +237,36 @@ impl Folders {
         dialog.select_folder(window.as_ref(), gio::Cancellable::NONE, move |chosen| {
             let Ok(file) = chosen else { return };
             let Some(path) = file.path() else { return };
-            folders.add_folder(&path);
+            folders.add_folder(path);
         });
     }
 
-    fn add_folder(self: &Rc<Self>, path: &Path) {
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        // A folder already inside another catalogued folder adds nothing and
-        // would read as two places to turn the same thing on and off.
-        let config = big_search_config::read();
-        let covered = if config.sources.is_empty() {
-            path.starts_with(big_search_config::home_dir())
-        } else {
-            config
-                .sources
-                .iter()
-                .any(|source| path.starts_with(&source.path))
-        };
-        if covered {
-            self.say(&tr("That folder is already inside one being searched."));
-            return;
-        }
-        let mut entry = big_search_config::SourceEntry::new(path.clone());
-        // A disk that comes and goes is recognised, not asked about: the person
-        // knows they plugged in a pendrive, not what "removable source" means.
-        entry.removable = is_removable(&path);
-        entry.network = is_network(&path);
-        if let Err(error) = big_search_config::add_source(&entry) {
-            log::warn!("the folder could not be added: {error}");
-            self.say(&tr("That folder could not be added."));
-            return;
-        }
-        self.reload();
-        if let Some(settings) = self.settings() {
-            settings.folders_changed();
-        }
+    fn add_folder(self: &Rc<Self>, path: PathBuf) {
+        let folders = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            // Off the main loop: resolving a network folder asks its server,
+            // which may not answer.
+            let added = gio::spawn_blocking(move || add_source_at(&path)).await;
+            let Some(folders) = folders.upgrade() else {
+                return;
+            };
+            match added {
+                Ok(Ok(true)) => {
+                    folders.reload();
+                    if let Some(settings) = folders.settings() {
+                        settings.folders_changed();
+                    }
+                }
+                Ok(Ok(false)) => {
+                    folders.say(&tr("That folder is already inside one being searched."));
+                }
+                Ok(Err(error)) => {
+                    log::warn!("the folder could not be added: {error}");
+                    folders.say(&tr("That folder could not be added."));
+                }
+                Err(_) => folders.say(&tr("That folder could not be added.")),
+            }
+        });
     }
 
     fn remove_folder(self: &Rc<Self>, path: &Path) {
@@ -282,6 +293,33 @@ impl Folders {
     fn say(&self, message: &str) {
         self.group.set_description(Some(message));
     }
+}
+
+/// Add `path` to the file; `Ok(false)` when a catalogued folder already holds
+/// it. Blocks on the file system.
+fn add_source_at(path: &Path) -> std::io::Result<bool> {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // A folder already inside another catalogued folder adds nothing and would
+    // read as two places to turn the same thing on and off.
+    let config = big_search_config::read();
+    let covered = if config.sources.is_empty() {
+        path.starts_with(big_search_config::home_dir())
+    } else {
+        config
+            .sources
+            .iter()
+            .any(|source| path.starts_with(&source.path))
+    };
+    if covered {
+        return Ok(false);
+    }
+    let mut entry = big_search_config::SourceEntry::new(path.clone());
+    // A disk that comes and goes is recognised, not asked about: the person
+    // knows they plugged in a pendrive, not what "removable source" means.
+    entry.removable = is_removable(&path);
+    entry.network = is_network(&path);
+    big_search_config::add_source(&entry)?;
+    Ok(true)
 }
 
 /// The name to show for a folder: what the person called it, else the folder's
