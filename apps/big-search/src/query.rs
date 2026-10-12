@@ -51,9 +51,9 @@ pub fn run_query(
     // Only what the page needs is read when the index can answer every filter
     // itself: the date and size filters need a `stat` of each candidate, and the
     // content index knows no folder, extension or type. Otherwise every
-    // candidate up to the ceiling is read, as before. Reading 5 000 stored
-    // documents for a page of 50 was most of a query's cost, and on a cold
-    // disk thousands of scattered reads.
+    // candidate up to the ceiling is read. Reading every stored candidate for
+    // one page would be most of a query's cost, and on a cold disk thousands
+    // of scattered reads.
     //
     // "both" always reads to the ceiling: a file is ranked first when it
     // matches by name and by content, and a page that reads fewer candidates
@@ -99,7 +99,7 @@ pub fn run_query(
         None
     };
 
-    // Cheap, path-only filters first — shrink the set before any `stat`.
+    // Cheap, path-only filters first: shrink the set before any `stat`.
     let under = filter.under.as_deref().map(|d| d.trim_end_matches('/'));
     let exts: Vec<String> = filter
         .ext
@@ -161,11 +161,10 @@ pub fn run_query(
         .collect();
     // A hit that will not stat is one of two very different things, and the
     // caller renders `available == false` as "offline · on <device>". Deciding
-    // that by existence alone announced every *deleted* file as living on an
-    // unplugged disk named after the user's home directory — a wrong answer that
-    // reads like a right one. Only a source that is kept while unreachable
-    // (removable/network) may claim it; anything else is simply gone and is
-    // dropped from the results.
+    // that by existence alone would announce every *deleted* file as living on
+    // an unplugged disk named after the user's home directory. Only a source
+    // that is kept while unreachable (removable/network) may claim it; anything
+    // else is simply gone and is dropped from the results.
     let mut offline_sources = OfflineSources::default();
     hits.retain_mut(|h| {
         h.ext = ext_of(&h.path);
@@ -258,9 +257,9 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
     // `limit` (e.g. -a) doesn't allocate an enormous TopDocs heap.
     let candidate_limit = limit.saturating_mul(4).clamp(40, 50_000);
     // The day of the last change breaks ties, and only ties: among equal
-    // matches — the hundreds of "1.png" — the newest first instead of the
-    // index's order. Measured as a stronger factor on 165 known-item queries
-    // it moved 42 of them, as many down as up.
+    // matches (the hundreds of "1.png") the newest first instead of the
+    // index's order. As a stronger factor it moves known-item queries as often
+    // down as up.
     let candidates = searcher.search(
         &query,
         &TopDocs::with_limit(candidate_limit).tweak_score(
@@ -390,8 +389,9 @@ fn name_query(f: &crate::index::Fields, words: &[String], filter: &Filter) -> Op
         )),
     ));
     // The folder and the extensions narrow the index's own answer: filtered
-    // only afterwards, the candidate ceiling was spent on whatever matched
-    // the words, and `pr` found no video among 5 000 other files.
+    // only afterwards, the candidate ceiling would be spent on whatever
+    // matched the words, and `pr` would find no video among thousands of
+    // other files.
     clauses.extend(filter_clauses(f, filter));
     Some(BooleanQuery::new(clauses))
 }
@@ -428,7 +428,7 @@ fn count_names(reader: &IndexReader, q: &str, filter: &Filter, cap: usize) -> Re
 const WHOLE_NAME_SCORE: f32 = 100_000.0;
 
 /// Score added for each query word whose start or end is a word edge in the
-/// name — far above what the grams' own BM25 adds, so it orders kinds of match
+/// name, far above what the grams' own BM25 adds, so it orders kinds of match
 /// before name length does.
 const WORD_EDGE_SCORE: f32 = 1000.0;
 
@@ -535,8 +535,8 @@ fn filter_clauses(f: &crate::index::Fields, filter: &Filter) -> Vec<(Occur, Box<
 /// The `list` mode: what the name index holds under `filter.under` with one
 /// of `filter.ext`, up to `limit`. Both are answered by the index itself, so
 /// the ceiling counts matches rather than a sample of the whole index: cut
-/// first and filtered after, "every video in ~/Videos" came back empty from
-/// an index of 170 000 files whose first 5 000 held none.
+/// first and filtered after, "every video in ~/Videos" would come back empty
+/// whenever the first files of the index held none.
 ///
 pub fn list_matching(reader: &IndexReader, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
     let clauses = filter_clauses(&fields(reader.searcher().index())?, filter);
@@ -704,7 +704,7 @@ fn content_query(searcher: &tantivy::Searcher, q: &str) -> Result<Option<Boolean
 const MIN_PREFIX_CHARS: usize = 3;
 /// Most indexed words a prefix stands for.
 const MAX_PREFIX_TERMS: usize = 32;
-/// Most documents, summed over the words a prefix stands for, read for it —
+/// Most documents, summed over the words a prefix stands for, read for it:
 /// the bound that matters on a cold disk, where reads follow the postings.
 const PREFIX_DOC_BUDGET: u64 = 50_000;
 /// Indexed words looked at per segment for a prefix, against a very short
@@ -712,9 +712,9 @@ const PREFIX_DOC_BUDGET: u64 = 50_000;
 const MAX_SCANNED_TERMS: usize = 20_000;
 
 /// One word of a content query: the word itself, ranked first, or its plural
-/// or singular (see [`inflections`]) — "relatorios" finds "relatorio", "acao"
+/// or singular (see [`inflections`]): "relatorios" finds "relatorio", "acao"
 /// finds "acoes". The last word is also read as typed so far: it finds any
-/// indexed word it begins — as-you-type in a launcher — the most frequent
+/// indexed word it begins (as-you-type in a launcher), the most frequent
 /// first (see [`words_beginning`]). A Russian or Ukrainian word also matches
 /// its other case endings (see [`slavic_stem`]). Every form keeps its BM25
 /// score. A CJK bigram or character is matched exactly, and a last word
@@ -838,11 +838,10 @@ fn words_beginning(
 /// word, by suffix: "acao" ↔ "acoes", "responsavel" ↔ "responsaveis",
 /// "imagem" ↔ "imagens", "flor" ↔ "flores", "relatorio" ↔ "relatorios".
 ///
-/// Snowball stemming was measured on this index's own vocabulary first: on
-/// folded words it joined none of the -ões/-ais/-eis/-ns plurals to their
-/// singulars and merged "casa" with "caso", "casado" and "case". These rules
-/// joined every such pair the vocabulary held (670 -ões, 421 -ais, 261 -eis,
-/// 194 -ns, 93 % of -s), in both directions. A form counts only if it has four
+/// Snowball stemming does not fit folded words: it joins none of the
+/// -ões/-ais/-eis/-ns plurals to their singulars and merges "casa" with
+/// "caso", "casado" and "case". These rules join such pairs in both
+/// directions. A form counts only if it has four
 /// letters or more (against "tres" → "tre", "pais" → "pai"), and it ranks below
 /// the word as typed.
 fn inflections(word: &str) -> Vec<String> {
@@ -973,9 +972,8 @@ impl Candidate {
     /// Which band this file sorts in; lower comes first.
     ///
     /// Both indexes agreeing about a file beats a filename match, which beats a
-    /// match found only inside the file. This is the order the function has
-    /// always promised; what changed is that it is now the FIRST sort key rather
-    /// than something inferred from arithmetic on incomparable scores.
+    /// match found only inside the file. The band is the first sort key, never
+    /// inferred from arithmetic on incomparable scores.
     fn tier(&self) -> u8 {
         match self.hit.match_kind {
             MatchKind::Both => 0,
@@ -988,8 +986,7 @@ impl Candidate {
     ///
     /// A name or both match reports its filename score, a body match its content
     /// score. Never a blend: a number that mixes the two would be a scale no
-    /// caller can reason about, which is how the old ranking lost the name score
-    /// in the first place.
+    /// caller can reason about.
     fn into_hit(mut self) -> Hit {
         self.hit.score = self.name_score.or(self.body_score).unwrap_or_default();
         self.hit
@@ -997,29 +994,24 @@ impl Candidate {
 }
 
 /// Filename ∪ content matches, ranked by band and then by relevance within it:
-/// files matching in **both** name and content rank highest, then name-only,
+/// files matching in both name and content rank highest, then name-only,
 /// then content-only.
 ///
-/// **The order is total, so it is the same on every run for the same input.** It
-/// used to be decided by `HashMap` iteration: every filename hit had its BM25
-/// overwritten with a constant, so all name-only results tied and a stable sort
-/// preserved whatever order the merge happened to hand it — a different one each
-/// process. The same query could answer in two orders with nothing having changed
-/// on disk.
+/// The order is total, so it is the same on every run for the same input; a
+/// tie left to the merge would follow `HashMap` iteration, which differs per
+/// process.
 ///
 /// Within `Both`, the filename score leads and the content score is secondary
 /// evidence: a strong filename hit must not be pushed down by a weak body match.
 ///
-/// The final tie-break is the path — raw, not folded, because determinism is all
-/// it has to provide and folding would allocate a second string per candidate for
-/// a cosmetic ordering nobody sees. **That tie-break carries far more weight than
-/// it looks like it should**, and it is worth knowing why: the name field is
-/// indexed as ngrams with [`IndexRecordOption::Basic`], which stores no term
-/// frequencies, so BM25 over it gives every document matching the same grams the
-/// SAME score. Measured — `alpha.md` and `alpha_alpha.md` both score 1.5297492
-/// for `alpha`. The name band is therefore mostly one big tie, and the path is
-/// what actually orders it. The content band does rank, because the body field
-/// keeps frequencies.
+/// The final tie-break is the path, raw rather than folded: determinism is all
+/// it has to provide, and folding would allocate a second string per candidate.
+/// That tie-break carries more weight than it looks: the name field is indexed
+/// as ngrams with [`IndexRecordOption::Basic`], which stores no term
+/// frequencies, so BM25 over it gives every document matching the same grams
+/// the same score (`alpha.md` and `alpha_alpha.md` tie for `alpha`). The name
+/// band is therefore mostly one big tie, and the path is what actually orders
+/// it. The content band does rank, because the body field keeps frequencies.
 pub fn search_both(
     reader: &IndexReader,
     content_reader: &IndexReader,
@@ -1093,8 +1085,8 @@ pub fn search_both(
         .collect())
 }
 
-/// How many entries are cataloged (alive indexed documents — files and the
-/// visible directories the scan indexes — with deletions excluded).
+/// How many entries are cataloged (alive indexed documents: files and the
+/// visible directories the scan indexes, with deletions excluded).
 pub fn count(reader: &IndexReader) -> Result<u64> {
     crate::index::document_count(reader)
 }
@@ -1202,11 +1194,11 @@ mod tests {
     /// "Every PDF in my home folder" has no words to search for.
     ///
     /// The name search refuses a query under two characters, because the ngram
-    /// index cannot narrow one — so a caller narrowing purely by filter had no
-    /// way in at all, and the file manager's Library would have had to walk
-    /// the disk itself beside an index that already knew the answer.
+    /// index cannot narrow one, so a caller narrowing purely by filter needs
+    /// this mode or would have to walk the disk itself beside an index that
+    /// already knows the answer.
     #[test]
-    fn the_list_mode_answers_a_query_with_no_words_in_it() {
+    fn list_mode_answers_wordless_queries() {
         let root = std::env::temp_dir().join(format!("lsearch-list-{}", std::process::id()));
         let mine = root.join("me");
         let other = root.join("elsewhere");
@@ -1267,7 +1259,7 @@ mod tests {
     /// sample cut first (the first `limit` documents of all) held none of
     /// the videos, and the listing came back empty.
     #[test]
-    fn a_type_filter_finds_videos_by_what_they_are() {
+    fn type_filter_finds_videos_by_content() {
         let dir = std::env::temp_dir().join(format!("lsearch-mime-query-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -1331,9 +1323,9 @@ mod tests {
     }
 
     /// One or two letters find the names that are exactly them, then the names
-    /// where they stand as a word — never a name that merely contains them.
+    /// where they stand as a word, and never a name that merely contains them.
     #[test]
-    fn short_queries_find_whole_names_then_whole_words() {
+    fn short_queries_prefer_whole_names() {
         let index = index_with(
             "short-words",
             &[
@@ -1361,7 +1353,7 @@ mod tests {
     /// A name is found the way a person types it, whatever script, accents,
     /// decomposition or letter forms it was written with.
     #[test]
-    fn names_match_across_scripts_and_letter_forms() {
+    fn names_match_across_letter_forms() {
         let index = index_with(
             "scripts",
             &[
@@ -1446,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_search_finds_videos_past_a_ceiling_of_other_files() {
+    fn name_search_sees_past_the_ceiling() {
         let mut paths: Vec<String> = (0..40)
             .map(|i| format!("/home/u/src/prompt-{i}.rs"))
             .collect();
@@ -1483,7 +1475,7 @@ mod tests {
     }
 
     #[test]
-    fn list_finds_matches_past_a_ceiling_of_other_files() {
+    fn list_sees_past_the_ceiling() {
         let mut paths: Vec<String> = (0..40)
             .map(|i| format!("/home/u/docs/note-{i}.txt"))
             .collect();
@@ -1560,8 +1552,7 @@ mod tests {
     }
 
     /// Several words match a name that holds them all, in any order and with
-    /// anything in between. `raio bruno` used to find nothing while `raio` and
-    /// `bruno` each found the file.
+    /// anything in between: `raio bruno` finds what `raio` and `bruno` each find.
     #[test]
     fn every_typed_word_matches_separately() {
         let index = index_with(
@@ -1680,11 +1671,8 @@ mod tests {
     /// Relevance survives the merge inside every band, and the band a hit is in
     /// is reported to the client.
     ///
-    /// The old merge overwrote each filename hit's BM25 with a constant, so every
-    /// name-only result tied at exactly the same score. This asserts the thing
-    /// that constant destroyed: two name-only files whose names differ in how
-    /// well they match come back in that order, and the same for two body-only
-    /// files.
+    /// Two name-only files whose names differ in how well they match come back
+    /// in that order, and the same for two body-only files.
     #[test]
     fn both_keeps_relevance_inside_each_band() {
         // Three name matches for "alpha", one of which also matches in content.
@@ -1728,20 +1716,16 @@ mod tests {
         );
 
         // Within the body band, the file mentioning the word six times outranks
-        // the one mentioning it once. This is the assertion the old code could
-        // not pass for names, and it must not regress for bodies either.
+        // the one mentioning it once.
         let position = |path: &str| hits.iter().position(|hit| hit.path == path).unwrap();
         assert!(
             position("/r/many.md") < position("/q/plain.md"),
             "content relevance was flattened: {hits:?}"
         );
 
-        // **The assertion the old constant made impossible.** `search` alone IS
-        // the filename-relevance order, so the name band of a merged result has
-        // to agree with it. Overwriting each name score with `NAME_WEIGHT` tied
-        // them all, and a tie is decided by whatever order the merge happened to
-        // hand the sort — so this agreement was luck, not ranking. Derived from
-        // `search` rather than hardcoded, so the test follows BM25 if it changes.
+        // `search` alone is the filename-relevance order, so the name band of a
+        // merged result has to agree with it. Derived from `search` rather than
+        // hardcoded, so the test follows BM25 if it changes.
         let name_only_order: Vec<String> = search(&index, "alpha", &Filter::default(), 10)
             .unwrap()
             .into_iter()
@@ -1758,13 +1742,9 @@ mod tests {
             "the merge reordered the name band away from filename relevance"
         );
 
-        // **And this is the assertion that actually fails on the old merge.**
-        // Agreement about ORDER was luck there: two name hits tied at exactly
-        // `NAME_WEIGHT` and the merge happened to hand them over in relevance
-        // order. The scores themselves cannot be lucky — flattened, two files
-        // whose names match differently report the same number. `search` says
-        // what the real spread is, so the test asserts the merge reproduces it
-        // rather than hardcoding BM25 output.
+        // An order can agree by luck when scores tie; the scores themselves
+        // cannot. Each name hit must report the score `search` gives it, so two
+        // files whose names match differently report different numbers.
         let name_relevance = |path: &str| {
             search(&index, "alpha", &Filter::default(), 10)
                 .unwrap()
@@ -1787,10 +1767,9 @@ mod tests {
     /// first, and only then by what the body said.
     ///
     /// This is the one ordering rule inside a band that the merge has to get
-    /// right on its own — the brief says the filename leads and the body is
-    /// secondary evidence — and nothing else exercised it.
+    /// right on its own: the filename leads and the body is secondary evidence.
     #[test]
-    fn between_two_both_matches_the_filename_leads() {
+    fn filename_leads_between_both_matches() {
         let index = index_with("pair-name", &["/a/omega.md", "/b/omega.md"]);
         let content_index = content_index_with(
             "pair",
@@ -1804,8 +1783,8 @@ mod tests {
         let hits = search_both(&index, &content_index, "omega", 10).unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|hit| hit.match_kind == MatchKind::Both));
-        // The name scores tie, so the body score decides — and it decides in the
-        // right direction.
+        // The name scores tie, so the body score decides, in the right
+        // direction.
         assert_eq!(
             hits[0].path, "/b/omega.md",
             "the stronger body evidence did not break the name tie: {hits:?}"
@@ -1822,7 +1801,7 @@ mod tests {
     /// A compact index has no term frequencies. Its body relevance still must
     /// survive the merge, but repeated words are not evidence it stored.
     #[test]
-    fn basic_content_preserves_bands_and_its_own_relevance() {
+    fn basic_content_keeps_band_relevance() {
         let names = index_with("basic-band-name", &["/a/alpha.md", "/b/alpha.md"]);
         let bodies = content_index_with_profile(
             "basic-band",
@@ -1854,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_content_ties_have_a_stable_path_order() {
+    fn basic_content_ties_follow_path() {
         let names = index_with("basic-tie-name", &["/b/omega.md", "/a/omega.md"]);
         let bodies = content_index_with_profile(
             "basic-tie",
@@ -1873,13 +1852,11 @@ mod tests {
 
     /// The same query gives the same order every time, ties included.
     ///
-    /// The old ranking tied every name-only hit at one score and then let a
-    /// stable sort preserve `HashMap` iteration order — which differs per
-    /// process, so two runs of one query could disagree with nothing having
-    /// changed. Three files whose names match identically well is exactly that
-    /// case, so the tie-break has to decide it, and decide it the same way twice.
+    /// Three files whose names match identically well tie on score, and
+    /// `HashMap` iteration order differs per process, so the tie-break has to
+    /// decide it, and decide it the same way twice.
     #[test]
-    fn both_orders_ties_the_same_way_every_run() {
+    fn both_orders_ties_stably() {
         let index = index_with("tie-name", &["/a/tie.md", "/b/tie.md", "/c/tie.md"]);
         let content_index = content_index_with("tie", &[("/unrelated/x.md", "nothing")]);
 
@@ -1980,7 +1957,7 @@ mod tests {
     /// and a document holding exactly that word ranks first. Earlier words, and
     /// a last word under three letters, match whole words only.
     #[test]
-    fn the_last_content_word_is_a_prefix() {
+    fn last_content_word_is_prefix() {
         let content = content_index_with(
             "prefix",
             &[
@@ -2069,7 +2046,7 @@ mod tests {
     /// however many different characters follow it elsewhere (expanding it to
     /// the grams it begins stopped at 64).
     #[test]
-    fn one_cjk_character_is_found_wherever_it_stands() {
+    fn single_cjk_character_is_found() {
         let mut paths: Vec<String> = (0..70)
             .map(|i| format!("/h/报{}.txt", char::from_u32(0x4E00 + i).unwrap()))
             .collect();
@@ -2105,7 +2082,7 @@ mod tests {
     /// An Arabic word typed so far, article included, finds the indexed word
     /// that lost its article.
     #[test]
-    fn an_arabic_word_being_typed_keeps_its_article() {
+    fn typed_arabic_word_keeps_article() {
         let content = content_index_with(
             "arabic-typing",
             &[("/h/a.txt", "إعادة الاتصال"), ("/h/b.txt", "مدرسة")],
@@ -2153,7 +2130,7 @@ mod tests {
     /// Every word finds its plural or singular, in both directions and whatever
     /// its place; the form as typed ranks first; a short word is left alone.
     #[test]
-    fn content_words_find_their_plural_and_singular() {
+    fn content_words_match_plural_and_singular() {
         let content = content_index_with(
             "inflection",
             &[
@@ -2452,11 +2429,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A deleted file used to come back labelled `offline · on <name>`, which
-    /// reads as "it lives on a disk you unplugged". With no removable or network
-    /// source configured, a path that will not stat is simply gone.
+    /// `offline · on <name>` reads as "it lives on a disk you unplugged". With
+    /// no removable or network source configured, a path that will not stat is
+    /// gone and is dropped.
     #[test]
-    fn a_deleted_file_is_dropped_not_reported_as_offline() {
+    fn deleted_file_is_dropped() {
         let dir = std::env::temp_dir().join(format!("lsearch-offline-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();

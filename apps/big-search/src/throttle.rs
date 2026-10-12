@@ -20,8 +20,7 @@ struct SchedAttr {
 
 /// Highest utilization the indexer may ask the CPU frequency for, out of 1024:
 /// half the CPU's own capacity, which under `schedutil` keeps a core just below
-/// its base clock — no turbo for background work. Measured on an i5-13400:
-/// 2.3 GHz on a P-core (base 2.5, turbo 4.1), 1.7 GHz on an E-core (base 1.8).
+/// its base clock: no turbo for background work.
 pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
 
 /// Lower the calling thread, and the programs it starts, to background
@@ -34,8 +33,8 @@ pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
 /// - `SCHED_IDLE`: the thread runs on CPU time nobody else wants, and a normal
 ///   task that wakes preempts it at once. A thread's policy only counts inside
 ///   its cgroup, though: without the indexer's cgroup it only puts the indexer
-///   behind the query thread (measured: a program sharing a core with the
-///   indexer lost 32 % under a weight-20 unit, ~1 % with the idle cgroup).
+///   behind the query thread, and a program sharing a core with the indexer
+///   still loses a large share of it.
 /// - The utilization clamp ([`INDEXER_UTIL_MAX`]) holds the clock down where
 ///   the frequency driver follows the scheduler (`schedutil`); drivers that pick
 ///   frequencies in hardware (`intel_pstate`/`amd-pstate` active) ignore it.
@@ -87,8 +86,8 @@ static IDLE_CGROUP: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLoc
 /// `DelegateSubgroup=main` put the daemon in `<unit>.service/main`, a group
 /// systemd creates for nothing else, and hand it that subtree; with
 /// `ProtectControlGroups=private` the unit's group is the root of the daemon's
-/// own cgroup namespace and the path reads `/main`. Started any other way —
-/// from a terminal, a session scope — the daemon's cgroup belongs to someone
+/// own cgroup namespace and the path reads `/main`. Started any other way
+/// (from a terminal, a session scope) the daemon's cgroup belongs to someone
 /// else and is left alone.
 ///
 /// The layout is cgroup v2's threaded mode, which lets the threads of one
@@ -154,9 +153,9 @@ pub fn prepare_idle_cgroup() -> Option<&'static str> {
 }
 
 /// Return freed heap pages to the kernel. glibc retains them by default, so a
-/// resident daemon would keep the indexing-burst peak (~50 MB measured) as RSS
-/// forever. Called on the transition to idle after an indexing burst; the idle
-/// footprint then reflects the idle working set. Best-effort, glibc-only.
+/// resident daemon would keep the indexing-burst peak as RSS forever. Called on
+/// the transition to idle after an indexing burst; the idle footprint then
+/// reflects the idle working set. Best-effort, glibc-only.
 pub fn release_idle_memory() {
     #[cfg(target_env = "gnu")]
     // SAFETY: malloc_trim only releases free arena pages; thread-safe.
@@ -251,7 +250,7 @@ struct Signals {
     /// CPU the rest of the machine used, in logical CPUs, since the previous batch.
     others_cores: f64,
     /// Physical cores this process may run on, and whether some carry two
-    /// hardware threads (SMT) — see [`topology`].
+    /// hardware threads (SMT); see [`topology`].
     cores: f64,
     smt: bool,
     /// Extraction workers that will run at once.
@@ -261,18 +260,15 @@ struct Signals {
 
 /// Classify how much this service would be in the way.
 ///
-/// CPU time is not the question any more: the indexer only runs on CPU time
-/// nobody else wants (`SCHED_IDLE`, its `cpu.idle` cgroup), and a program that
-/// wakes takes its CPU back at once — so its own CPU stall only says others are
-/// busy, and on a CPU without SMT that harms nobody. What still harms is a
-/// shared core: on an SMT CPU a worker on the sibling thread of a busy program's
-/// core slows it however low its priority. Measured on simulated machines (a
-/// CPU loop in the program's place, workers running flat out): sharing every
-/// worker's core cost the program 42-49 %, one of two 23-28 %, none -1-8 %
-/// (noise); without SMT ~0 % in every case. The scheduler gives each busy
-/// program a core of its own while it can, so the free cores are the cores
-/// minus the CPUs the others keep busy; with fewer free cores than workers,
-/// some worker shares one.
+/// CPU time is not the question: the indexer only runs on CPU time nobody else
+/// wants (`SCHED_IDLE`, its `cpu.idle` cgroup), and a program that wakes takes
+/// its CPU back at once, so its own CPU stall only says others are busy, and on
+/// a CPU without SMT that harms nobody. What still harms is a shared core: on
+/// an SMT CPU a worker on the sibling thread of a busy program's core slows it
+/// however low its priority. The scheduler gives each busy program a core of
+/// its own while it can, so the free cores are the cores minus the CPUs the
+/// others keep busy; with fewer free cores than workers, some worker shares
+/// one.
 ///
 /// Memory is system-wide, because page cache this service fills stalls
 /// everyone else, and so is the disk: most disk schedulers ignore I/O priority.
@@ -359,8 +355,8 @@ fn pause_after(work: Duration, load: Load) -> Duration {
 /// The duty cycle is kept on the CPU time the service used in the batch, not
 /// on the batch's wall time: at idle priority on a busy machine most of that
 /// time is spent waiting for a CPU nobody else wants, which harms nobody, and
-/// resting four times as long as that waiting turned a 250-file batch of 29 s
-/// into a two-minute pause — an index of 88 000 documents into a night.
+/// resting four times as long as that waiting would turn a half-minute batch
+/// into a two-minute pause.
 pub fn backfill_pace(work: Duration) -> (Load, Duration) {
     let cgroup = own_cgroup_dir();
     let own = |name: &str| {
@@ -392,8 +388,8 @@ pub fn backfill_pace(work: Duration) -> (Load, Duration) {
 static CPU_SAMPLE: Mutex<Option<(Instant, f64, f64)>> = Mutex::new(None);
 
 /// Start the window [`backfill_pace`] judges: what the others use while a batch
-/// runs. Measured from the previous batch instead, the first batch after a
-/// quiet spell averaged minutes of idle machine and ran flat out under load.
+/// runs. Measured from the previous batch, the first batch after a quiet spell
+/// would average minutes of idle machine and run flat out under load.
 pub fn begin_cpu_window() {
     let own = own_cgroup_dir();
     if let (Some(busy), Some(own)) = (
@@ -529,7 +525,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_ten_second_percentages_not_cumulative_totals() {
+    fn reads_ten_second_pressure_averages() {
         let p = parse_pressure("some avg10=21.5 avg60=0 total=999\nfull avg10=2.5 total=123\n")
             .unwrap();
         assert_eq!(
@@ -543,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_rests_in_proportion_to_its_work_and_the_load() {
+    fn backfill_rest_scales_with_load() {
         let calm = Pressure {
             some: 1.0,
             full: 0.0,
@@ -632,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_is_not_recorded_as_zero_but_does_not_block_progress() {
+    fn unknown_pressure_keeps_progress_moving() {
         assert_eq!(pressure_delay(None, None), Duration::ZERO);
         assert_eq!(
             pressure_delay(

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 BigLinux contributors
 // SPDX-License-Identifier: MIT
 
-//! What a document is, read from its text alone — and a file name built from that.
+//! What a document is, read from its text alone, and a file name built from that.
 //!
 //! Given the text a desktop extractor gets out of a file (`pdftotext`, the XML of
 //! an OpenDocument), [`analyze`] finds the document's kind (contract, invoice,
@@ -9,13 +9,13 @@
 //! sentences worth showing, then builds a file name such as
 //! `contrato-locacao-residencial-2026-04-22.pdf`.
 //!
-//! ## No model, on purpose
+//! ## No model
 //!
 //! Everything here is rules and counting. Small language models were measured on
 //! the same task and corpus: on an old dual-core laptop they took a minute or
 //! more per file, and they turned safe "don't know" answers into wrong dates and
-//! wrong kinds. The rules answer in
-//! milliseconds and leave a field empty when the text gives no evidence.
+//! wrong kinds. The rules answer in milliseconds and leave a field empty when the
+//! text gives no evidence.
 //!
 //! ## Empty beats wrong
 //!
@@ -25,9 +25,9 @@
 //!
 //! ## Reference implementation
 //!
-//! The behaviour started as a port of a Python reference measured on an
-//! evaluation corpus; `tests/parity.rs` holds the recorded answers it is checked
-//! against, re-recorded deliberately when a measured change improves them.
+//! `tests/parity.rs` checks every field against recorded answers, first taken
+//! from a Python reference measured on an evaluation corpus and re-recorded when
+//! a measured change improves them.
 
 mod date;
 mod entity;

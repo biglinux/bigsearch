@@ -51,7 +51,7 @@ fn wait_socket(sock: &Path, timeout: Duration) -> bool {
 }
 
 #[test]
-fn second_daemon_refuses_and_leaves_first_intact() {
+fn second_daemon_leaves_first_intact() {
     let base = scratch::scratch_dir("bs-singleton");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");

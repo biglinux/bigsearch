@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: 2026 BigLinux contributors
 // SPDX-License-Identifier: MIT
 
-//! Keeping earlier versions of documents — the switch, and the honest sentence
-//! when this computer cannot.
+//! Keeping earlier versions of documents: the switch, and the sentence that
+//! explains when this computer cannot.
 //!
 //! The service finds out for itself whether the disk can share blocks, and says
 //! why when it cannot: ext4 and FAT cannot, a network folder cannot, a live
-//! session keeps nothing anyway. Where that is the answer, **the switch is not
-//! shown at all** — a control that changes nothing is a control that lies — and
+//! session keeps nothing anyway. Where that is the answer, the switch is not
+//! shown at all (a control that changes nothing is a control that lies), and
 //! the reason takes its place.
 
 use std::rc::Rc;

@@ -3,8 +3,8 @@
 //! The name decides whenever the shared-mime-info globs give it one type: that
 //! costs a map lookup and no read, which is the case for nearly every file.
 //! Only a name with no type, or with several (`.ts` is a video, TypeScript or a
-//! Qt translation), has its first bytes read — `file-format`, pure Rust like
-//! every parser here — and among the name's candidates the one the content is,
+//! Qt translation), has its first bytes read (`file-format`, pure Rust like
+//! every parser here), and among the name's candidates the one the content is,
 //! or descends from most closely, wins: text makes a `.ts` TypeScript, a
 //! transport stream makes it a video. Directories, empty files and anything not
 //! a regular file are never opened (a FIFO would block the scan).
@@ -228,8 +228,8 @@ fn sniff(path: &Path) -> Option<String> {
     // Text is UTF-8 without a NUL; the head may end inside a character.
     let text = !head.contains(&0)
         && std::str::from_utf8(&head).map_or_else(|e| e.error_len().is_none(), |_| true);
-    // A media signature inside text is a coincidence — "### freedreno" holds
-    // QuickTime's `free` atom at byte 4 — for 40 KiB of real audio, video or a
+    // A media signature inside text is a coincidence ("### freedreno" holds
+    // QuickTime's `free` atom at byte 4), for 40 KiB of real audio, video or a
     // raster image always hold a NUL. Other signatures found in text (PGP
     // armour, HTML, SVG) are what the text is.
     let media = ["video/", "audio/", "image/"]
@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_with_one_type_is_not_read() {
+    fn single_type_name_skips_read() {
         let db = database();
         // The path does not exist: a read would fail and give no type.
         let missing = Path::new("/nowhere/Film.MP4");
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ambiguous_or_missing_extension_is_told_by_the_content() {
+    fn content_settles_ambiguous_extensions() {
         let db = database();
         let dir = std::env::temp_dir().join(format!("lsearch-mime-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn a_type_matches_itself_or_its_group() {
+    fn type_matches_itself_or_group() {
         assert!(matches("video/mp2t", "video/*"));
         assert!(matches("video/mp2t", "video/mp2t"));
         assert!(!matches("application/typescript", "video/*"));

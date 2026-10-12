@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 BigLinux contributors
 // SPDX-License-Identifier: MIT
 
-//! The lines a document sets in large type at its opening — what a reader takes
+//! The lines a document sets in large type at its opening: what a reader takes
 //! for its title, and what `big-docinfo` weighs as one.
 //!
 //! Every format gives the same answer: runs of consecutive lines in one type
@@ -46,7 +46,7 @@ pub fn prominent_lines(path: &Path, ext: &str) -> Vec<String> {
 }
 
 /// Runs of consecutive lines in one size (with `join`; otherwise each line is
-/// its own run), kept when set larger than the body — the size that carries
+/// its own run), kept when set larger than the body, the size that carries
 /// the most characters. A largest size shared by three runs or more marks
 /// section headings, and then nothing is kept. When large type is no small part of the opening
 /// (scanned pages, slides saved as text), no size stands out and none is kept.
@@ -136,7 +136,7 @@ fn push_event_text(event: &Event<'_>, out: &mut String) {
 }
 
 /// Lines of page 1 with their heights. A line taller than it is wide runs
-/// vertically — a publisher's stamp up the margin — and is left out.
+/// vertically (a publisher's stamp up the margin) and is left out.
 fn pdf_lines(xhtml: &[u8]) -> Vec<(String, f32)> {
     let mut reader = quick_xml::Reader::from_reader(xhtml);
     let mut buf = Vec::new();
@@ -581,7 +581,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runs_larger_than_the_body_rank_by_size() {
+    fn larger_runs_rank_by_size() {
         let lines = vec![
             ("CARDIOLOGY".to_owned(), 9.0),
             (
@@ -630,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn pdf_lines_skip_vertical_stamps_and_decode_words() {
+    fn pdf_lines_skip_vertical_stamps() {
         let xhtml = br#"<doc><page><flow><block>
 <line xMin="10" yMin="10" xMax="20" yMax="300"><word>Downloaded</word></line>
 <line xMin="50" yMin="100" xMax="400" yMax="121"><word>Fish</word><word>&amp;</word><word>chips</word></line>
@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn docx_styles_give_base_and_half_point_sizes() {
+    fn docx_styles_give_half_point_sizes() {
         let (styles, default) = read_docx_styles(
             br#"<w:styles><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>
 <w:style w:type="paragraph" w:styleId="Title"><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="56"/></w:rPr></w:style>

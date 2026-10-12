@@ -86,7 +86,7 @@ fn count_and_list_subcommands_report_catalog() {
 }
 
 #[test]
-fn reindex_empty_index_reextracts_content_despite_stale_content_state() {
+fn reindex_rebuilds_missing_index() {
     let base = scratch::scratch_dir("bs-cli-stale-content");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
@@ -105,7 +105,7 @@ fn reindex_empty_index_reextracts_content_despite_stale_content_state() {
 }
 
 #[test]
-fn reindex_empty_content_index_reextracts_content_despite_stale_content_state() {
+fn reindex_rebuilds_missing_content_index() {
     let base = scratch::scratch_dir("bs-cli-stale-content-index");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");

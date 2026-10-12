@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Adversarial input probes for the content-extraction path (untrusted documents in
-# the indexed tree) and the IPC socket. Boundedness is asserted by running reindex
-# inside a MemoryMax cgroup: OOM-kill (exit 137) => unbounded => FAIL; exit 0 => the
-# 1 MiB extraction caps held. Run standalone; isolated index.
+# the indexed tree) and the IPC socket, against an isolated index. Boundedness is
+# checked by running reindex inside a MemoryMax scope: an OOM kill (exit 137)
+# means unbounded memory and fails; exit 0 means the extraction caps held.
+# Needs a release build, systemd-run --user, python3 and socat.
 set -uo pipefail
 
 BIN="$(cd "$(dirname "$0")/../../.." && pwd)/target/release/big-search"
@@ -39,7 +40,7 @@ echo "  $r  ($(((t1-t0)/1000000)) ms; no entity expansion)"
 echo "== 3. huge text file (512 MiB) =="
 yes "alpha beta line to index repeatedly" | head -c $((512*1024*1024)) > "$HOME_D/docs/huge.txt"
 echo "  size: $(du -h "$HOME_D/docs/huge.txt" | cut -f1)"
-capped reindex "$HOME_D" >/dev/null 2>&1 && echo "  PASS (read_text caps at 1 MiB)" || echo "  FAIL exit=$? (OOM)"
+capped reindex "$HOME_D" >/dev/null 2>&1 && echo "  PASS (read_text stops at the extraction cap)" || echo "  FAIL exit=$? (OOM)"
 
 echo "== 4. IPC oversized line (100 MiB, no newline) =="
 env HOME="$HOME_D" XDG_DATA_HOME="$DATA_D" XDG_CONFIG_HOME="$CFG_D" XDG_RUNTIME_DIR="$RUN_D" RUST_LOG=off "$BIN" daemon >/dev/null 2>&1 &
@@ -57,6 +58,6 @@ head -c $((100*1024*1024)) /dev/zero | tr '\0' 'x' | timeout 30 socat - "UNIX-CO
 sleep 1
 peak=$(awk '/VmHWM/{print $2}' "/proc/$DPID/status" 2>/dev/null || echo DEAD)
 echo "  daemon RSS before=${rss0} kB  peak(VmHWM) after 100MiB-no-newline=${peak} kB"
-echo "  (read_line buffers the whole line — peak ~100 MB confirms an unbounded-read hardening gap)"
+echo "  (requests are capped at 64 KiB; a peak near 100 MB means the cap is gone)"
 kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 echo "DONE"

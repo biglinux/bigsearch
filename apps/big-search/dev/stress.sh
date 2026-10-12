@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Long-run leak/growth probe for the daemon: hammer it with file churn (→ inotify
-# → reconcile → commit) interleaved with queries, sampling RSS / thread count /
-# open-fd count over time. Flat curves => no leak; monotonic growth => leak.
+# Long-run leak probe for the daemon: file churn (inotify, reconcile, commit)
+# interleaved with queries, sampling RSS, thread count and open fds over time.
+# Flat curves mean no leak; steady growth means a leak.
+# Usage: stress.sh [ROUNDS], default 1500. Needs a release build.
 set -euo pipefail
 
 BIN="$(cd "$(dirname "$0")/../../.." && pwd)/target/release/big-search"

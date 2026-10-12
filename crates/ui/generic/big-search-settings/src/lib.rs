@@ -4,9 +4,9 @@
 //! The window every BigLinux program opens to configure the system search.
 //!
 //! The search service catalogues the person's files and answers the file
-//! manager, the menu and anything else that asks. Until now it could only be
-//! configured by editing a text file, which for the people this desktop is built
-//! for means it could not be configured at all.
+//! manager, the menu and anything else that asks. Without this window it can
+//! only be configured by editing a text file, which for the people this desktop
+//! is built for means not at all.
 //!
 //! One window, opened in whichever program the person is already in:
 //!
@@ -26,9 +26,9 @@
 //!
 //! Every control writes `~/.config/big-search/config.toml` through
 //! [`big_search_config`] two seconds after the last change. The service reads
-//! that file once when it starts, so a change only takes effect on a restart —
+//! that file once when it starts, so a change only takes effect on a restart,
 //! and a restart re-reads every catalogued folder and drops the socket for a
-//! moment, which is why this window restarts it **once**, when it is closed or
+//! moment. That is why this window restarts it once, when it is closed or
 //! after ten seconds of quiet, and only when a setting the service reads
 //! actually changed.
 
@@ -51,9 +51,9 @@ const GROUP_SPACING: i32 = 24;
 
 /// One row of this page, as another program's settings search needs it.
 ///
-/// The words come from here because the groups are built here: the file manager
-/// used to retype the four titles, and renaming a group left its settings search
-/// advertising a heading that no longer existed.
+/// The words come from here because the groups are built here, so renaming a
+/// group cannot leave another program's settings search advertising a heading
+/// the page does not have.
 pub struct SearchEntry {
     /// The widget name to scroll to, one of the `ANCHOR_*` values.
     pub anchor: &'static str,
@@ -134,11 +134,10 @@ thread_local! {
 ///
 /// `textdomain` is process-global and belongs to whoever booted the process, so
 /// in a host that runs several products a plain `gettext` here answers from the
-/// wrong catalogue — every row in English inside a translated window. The domain
+/// wrong catalogue: every row in English inside a translated window. The domain
 /// is an argument of [`present`] rather than a separate call somebody has to
-/// remember to make: a window opened with the wrong words is exactly what a
-/// forgettable setup call produces, and it went unnoticed until the window was
-/// opened from the installed multicall host.
+/// remember to make, because a forgotten setup call only shows once the window
+/// opens from the installed multicall host.
 fn set_text_domain(domain: &str) {
     TEXT_DOMAIN.with_borrow_mut(|slot| *slot = Some(domain.to_owned()));
 }
@@ -146,7 +145,7 @@ fn set_text_domain(domain: &str) {
 /// Mark a literal for extraction without translating it here.
 ///
 /// The group titles are constants, used both to draw the heading and to tell the
-/// embedding window what to call the group — and `xgettext` only ever sees
+/// embedding window what to call the group, and `xgettext` only ever sees
 /// literals. Without this the four titles reach no catalogue at all, and the
 /// settings search shows them in English inside a translated window.
 pub(crate) const fn msgid(text: &'static str) -> &'static str {
@@ -249,7 +248,7 @@ impl SearchSettings {
     }
 
     /// Write everything waiting on a worker thread, and remember that the
-    /// service is now behind.
+    /// service is behind the file.
     fn write_now(self: &Rc<Self>) {
         if self.writing.get() {
             return; // the write under way looks at the queue again when it ends
@@ -410,7 +409,7 @@ pub fn page(text_domain: &str) -> gtk::Widget {
     set_text_domain(text_domain);
     // A plain box, not an `AdwPreferencesPage`: that widget brings its own
     // scrolling, and inside the settings window's scroller it is squeezed into
-    // one screenful with everything below it — privacy, kept versions — out of
+    // one screenful with everything below it (privacy, kept versions) out of
     // reach and no way to scroll to them.
     let page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -420,7 +419,7 @@ pub fn page(text_domain: &str) -> gtk::Widget {
     for group in &groups {
         page.append(group);
     }
-    // Off the screen — the window closed, or another section was chosen — is
+    // Off the screen (the window closed, or another section was chosen) is
     // where pending changes are written and the service is restarted, and the
     // moment to stop asking the service how it is doing. Nothing is restarted
     // unless a setting the service reads actually changed.

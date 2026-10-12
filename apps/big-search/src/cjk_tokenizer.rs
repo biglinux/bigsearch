@@ -1,18 +1,18 @@
 //! Body tokenizer that makes space-less-script content searchable without a
-//! segmentation dictionary — CJK (Han / Kana / Hangul) plus the SE-Asian
+//! segmentation dictionary: CJK (Han / Kana / Hangul) plus the SE-Asian
 //! abugidas (Thai / Lao / Khmer / Myanmar). Those scripts write without inter-
 //! word spaces, so a plain word tokenizer indexes a whole sentence as one
-//! (often over-long, dropped) token. Here such a run emits **overlapping
-//! bigrams** (中文内容 → 中文, 文内, 内容), so a query of ≥2 chars matches by
-//! substring — the same effect the ngram name field already gives. An isolated
+//! (often over-long, dropped) token. Here such a run emits overlapping
+//! bigrams (中文内容 → 中文, 文内, 内容), so a query of ≥2 chars matches by
+//! substring, the same effect the ngram name field already gives. An isolated
 //! char is a unigram, and the index also holds every char of a run alone (see
 //! [`CjkFriendlyTokenizer`]). Everything else is split into alphanumeric words
 //! exactly like `SimpleTokenizer`, so Latin / Cyrillic / Hebrew / Arabic / etc.
 //! (all space-separated) behave unchanged.
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 
-/// Scripts written without inter-word spaces — Han/kana/Hangul plus the
-/// space-less SE-Asian abugidas — get bigram tokenization. Punctuation and
+/// Scripts written without inter-word spaces (Han/kana/Hangul plus the
+/// space-less SE-Asian abugidas) get bigram tokenization. Punctuation and
 /// symbols are treated as separators (not folded into runs).
 pub(crate) fn is_unspaced(c: char) -> bool {
     matches!(c as u32,
@@ -49,11 +49,10 @@ fn mk(text: String, from: usize, to: usize, position: usize) -> Token {
     }
 }
 
-/// The reference implementation, kept only for the tests.
+/// The reference implementation, for the tests only.
 ///
-/// It builds every token of the text up front, which is what the streaming
-/// version replaced: a 32 MiB body cost 925 MiB of resident memory and 1.6 s
-/// here. It stays as the thing the streaming tokenizer is proved equal to,
+/// It builds every token of the text up front, which costs memory in
+/// proportion to the body. The streaming tokenizer is proved equal to it,
 /// token for token, offset for offset.
 #[cfg(test)]
 fn tokenize(text: &str) -> Vec<Token> {
@@ -75,7 +74,7 @@ fn tokenize(text: &str) -> Vec<Token> {
                 tokens.push(mk(c.to_string(), off, off + c.len_utf8(), position));
                 position += 1;
             } else {
-                // Overlapping bigrams only — NO trailing unigram. A query of ≥2
+                // Overlapping bigrams only, no trailing unigram. A query of ≥2
                 // chars tokenizes to the same bigrams the doc holds; a trailing
                 // unigram would add a Must clause for a standalone char the doc
                 // only carries inside a bigram, killing the match.
@@ -113,9 +112,8 @@ fn tokenize(text: &str) -> Vec<Token> {
 
 /// One token at a time, holding nothing but the cursor and the token itself.
 ///
-/// The whole point is what is *not* here: no vector of every character in the
-/// document, and no `String` per token. A 32 MiB body used to need about 925 MiB
-/// of memory to be tokenized, on a service whose whole budget is 63 MiB.
+/// Memory stays constant in the body's size: no vector of every character in
+/// the document, and no `String` per token.
 ///
 /// The cursor is a byte offset rather than a character iterator because most
 /// bodies are mostly ASCII: a separator or a letter below 0x80 is decided from
@@ -237,7 +235,7 @@ impl TokenStream for CjkTokenStream<'_> {
                 continue; // separator
             }
             // Where the word ends is where the next character begins, or the end
-            // of the text — the same byte offset the old tokenizer reported.
+            // of the text, the same byte offset the reference tokenizer reports.
             let end = self.word_end(self.cursor);
             self.cursor = end;
             self.token.text.clear();
@@ -312,12 +310,12 @@ mod tests {
         streamed(text).into_iter().map(|t| t.text).collect()
     }
 
-    /// The streaming tokenizer and the one it replaced must agree completely:
+    /// The streaming tokenizer and the reference one must agree completely:
     /// same texts, same byte offsets, same positions. An offset that moves by
     /// one byte is a highlight pointing at the wrong character; a position that
     /// moves breaks phrase queries.
     #[test]
-    fn the_stream_says_exactly_what_the_old_tokenizer_said() {
+    fn stream_matches_reference_tokenizer() {
         let corpus = [
             "",
             " ",
@@ -363,7 +361,7 @@ mod tests {
     /// Long input, every script mixed, checked the same way: a bug in the run
     /// bookkeeping only shows up where runs meet each other repeatedly.
     #[test]
-    fn the_two_agree_on_a_long_mixed_body() {
+    fn tokenizers_agree_on_long_body() {
         let mut text = String::new();
         for round in 0..2000 {
             text.push_str("contrato 2026 中文内容 relatório ทดสอบ 文 ");
@@ -393,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn latin_and_hebrew_split_into_words_unchanged() {
+    fn latin_and_hebrew_split_into_words() {
         assert_eq!(texts("hello world"), ["hello", "world"]);
         assert_eq!(texts("שלום עולם"), ["שלום", "עולם"]);
     }
@@ -405,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn decomposed_and_halfwidth_text_tokenizes_like_what_people_type() {
+    fn decomposed_halfwidth_text_tokenizes_composed() {
         assert_eq!(
             texts("\u{1112}\u{1161}\u{11AB}\u{1100}\u{116E}\u{11A8}어"),
             texts("한국어")
@@ -415,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn the_index_also_holds_every_character_of_a_run() {
+    fn index_holds_every_run_character() {
         let indexed: Vec<String> = streamed_with("报告 中文内容 文", true)
             .into_iter()
             .map(|t| t.text)

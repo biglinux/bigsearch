@@ -1,7 +1,7 @@
 #![no_main]
 //! Fuzz the OOXML/ODF extractor with arbitrary bytes as the zip archive. Exercises
 //! the zip crate plus our entry selection / XML walk on malformed or hostile
-//! documents — the primary untrusted-input surface for a search daemon.
+//! documents, the primary untrusted-input surface for a search daemon.
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 

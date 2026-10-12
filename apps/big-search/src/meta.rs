@@ -1,4 +1,4 @@
-//! Optional metadata enrichment: content-based file **kind** plus media/image
+//! Optional metadata enrichment: content-based file kind plus media/image
 //! metadata, indexed as searchable `body` text (no schema change, no new wire
 //! fields). Every metadata parser is pure safe Rust (`symphonia` is
 //! `#![forbid(unsafe)]`, `file-format`/`imagesize` are pure Rust), so a malicious
@@ -296,7 +296,8 @@ pub fn metadata_text(path: &Path, with_content: bool) -> Option<String> {
 }
 
 /// Audio/video facts via symphonia: container tag values (artist/album/title/…)
-/// and duration in seconds. Probing reads the container header only — no decode.
+/// and duration in seconds. Probing reads the container header only, without
+/// decoding.
 fn media_text(path: &Path) -> Vec<String> {
     use symphonia::core::formats::probe::Hint;
     use symphonia::core::formats::{FormatOptions, TrackType};
@@ -398,7 +399,7 @@ mod tag_tests {
     }
 
     #[test]
-    fn a_tag_list_is_read_as_the_person_wrote_it() {
+    fn desktop_tag_list_is_read() {
         let dir = std::env::temp_dir().join(format!("big-search-tags-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("test dir");
@@ -453,7 +454,8 @@ mod tests {
     }
 
     /// A minimal PNG (signature + IHDR only) so `imagesize` reads dimensions from
-    /// the header without any decode — proves the image metadata path end to end.
+    /// the header without any decode, which proves the image metadata path end
+    /// to end.
     fn minimal_png(width: u32, height: u32) -> Vec<u8> {
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
         png.extend_from_slice(&[0, 0, 0, 13]); // IHDR length

@@ -40,7 +40,7 @@ struct ContentSignatureMap {
 struct ContentRepresentative {
     path: String,
     /// Files skipped as copies of it. When it is edited they hold the only
-    /// copy of the old text, and must be read again.
+    /// copy of the text it had, and must be read again.
     #[serde(default)]
     duplicates: Vec<String>,
 }
@@ -115,8 +115,8 @@ impl ContentSignatures {
         )
     }
 
-    /// `current_identity` reads a representative's identity as it is now: one
-    /// edited since it claimed `identity` no longer holds that text, so the
+    /// `current_identity` reads a representative's present identity: one
+    /// edited since it claimed `identity` has lost that text, so the
     /// claimant takes its place instead of being dropped as its duplicate.
     fn claim_identity(
         &mut self,
@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn content_signatures_do_not_compare_equal_files_without_physical_identity() {
+    fn equal_text_needs_physical_identity() {
         let base = std::env::temp_dir().join(format!(
             "lsearch-content-no-identity-{}",
             std::process::id()
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn physical_identity_matches_reflink_extents_when_supported() {
+    fn reflinked_files_share_physical_identity() {
         let base = std::env::current_dir()
             .unwrap()
             .join("target")

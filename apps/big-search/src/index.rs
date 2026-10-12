@@ -57,7 +57,7 @@ fn build_name_schema() -> Schema {
         TextOptions::default().set_indexing_options(name_indexing),
     );
     // Source/device display name (stored, untokenised) so a hit can report which
-    // device it lives on — kept even when that device is offline.
+    // device it lives on, kept even when that device is offline.
     sb.add_text_field("source", TextOptions::default().set_stored());
     // Every folder above the file, one exact term each, and its lowercase
     // extension: "under ~/Videos" and "videos only" are then one posting list
@@ -187,9 +187,9 @@ impl TokenStream for NameGramStream<'_> {
 
 /// The text the `name` field indexes and every name comparison reads: folded
 /// (see [`crate::extract::fold_lower`]), separators as spaces, and a space at
-/// each end. The spaces make the edges of words grams of their own — " go"
+/// each end. The spaces make the edges of words grams of their own (" go"
 /// exists only where a word starts with "go", "go " only where one ends with
-/// it — so one or two letters find the names that are those letters
+/// it), so one or two letters find the names that are those letters
 /// ("GO.pdf", "Contrato GO.pdf") instead of every name containing them.
 pub fn name_text(name: &str) -> String {
     let mut text = String::with_capacity(name.len() + 2);
@@ -202,7 +202,7 @@ pub fn name_text(name: &str) -> String {
 }
 
 /// The `stem` term of a file name: its words without the extension, folded and
-/// joined by single spaces — what a query for exactly that name joins to.
+/// joined by single spaces, what a query for exactly that name joins to.
 pub fn stem_key(name: &str) -> String {
     let stem = Path::new(name)
         .file_stem()
@@ -388,7 +388,7 @@ pub fn content_fields(index: &Index) -> Result<ContentFields> {
 /// [`open_or_create`] deletes and recreates on a schema mismatch or an unreadable
 /// index. That is right for the daemon, which owns the data, but wrong for a
 /// query: `count`, `list` and the daemonless `search` fallback would silently
-/// wipe the catalogue — and a query racing a daemon that holds the writer lock
+/// wipe the catalogue, and a query racing a daemon that holds the writer lock
 /// but has not yet bound its socket would do it underneath the daemon. A read
 /// command must fail instead.
 pub fn open_read_only(dir: &Path) -> Result<Index> {
@@ -406,9 +406,7 @@ pub fn open_for_queries(dir: &Path) -> Result<Index> {
 
 /// A reader for answering queries on an index from [`open_for_queries`]: its
 /// cache of decompressed store blocks holds 8 per segment instead of tantivy's
-/// 100. A query reads only the documents of its page, a few blocks. Measured
-/// on fresh daemons after the same 60 queries: 23.6 MB of anonymous memory
-/// against 26.2-27.0 MB.
+/// 100. A query reads only the documents of its page, a few blocks.
 pub fn query_reader(index: &Index) -> Result<tantivy::IndexReader> {
     Ok(index
         .reader_builder()
@@ -540,7 +538,7 @@ pub fn is_content_state_synced(dir: &Path) -> bool {
 pub fn mark_content_state_synced(dir: &Path) -> Result<()> {
     let marker = content_state_sync_marker(dir);
     if marker.exists() {
-        return Ok(()); // already marked — avoid a disk write per backfill pass
+        return Ok(()); // already marked: avoid a disk write per backfill pass
     }
     std::fs::write(marker, b"1\n")
         .with_context(|| format!("write content sync marker {}", dir.display()))
@@ -555,8 +553,8 @@ fn content_state_sync_marker(dir: &Path) -> std::path::PathBuf {
 /// catalogue that is already clean is pure cost.
 ///
 /// The marker is only trustworthy because exactly one thing creates such
-/// documents — [`crate::content::clear_content_state`], which drops every row
-/// and leaves the documents behind — and that function clears this marker. A
+/// documents ([`crate::content::clear_content_state`], which drops every row
+/// and leaves the documents behind) and that function clears this marker. A
 /// "done once" flag without that coupling would suppress the repair precisely
 /// when it became necessary again.
 pub fn is_unreferenced_pruned(dir: &Path) -> bool {
@@ -652,18 +650,15 @@ fn low_impact_writer(index: &Index, memory_budget: usize) -> Result<IndexWriter<
 /// Whether merging every segment into one is worth what it costs, given each
 /// segment's `(documents, deleted)`: when a tenth of the index has changed.
 /// A new file lands outside the largest segment, a removed one is a deletion,
-/// and an edit is both — so the larger of the two counts the changed files,
+/// and an edit is both, so the larger of the two counts the changed files,
 /// each once.
 ///
-/// One segment answers a cold query with a fraction of the disk reads: on a
-/// 5400 rpm notebook disk, the first query on its own 11-segment index took
-/// 743-1041 ms, 42-62 ms after merging, and the index shrank from 61 to 32 MB.
-/// Deleted documents only leave a segment when it is merged, and tantivy's
-/// merge policy never merges a large segment for its deletes: the daemon's
-/// largest segments carried a third of dead documents. Each merge rewrites
-/// the whole index (117 MB in 8 s for a 149 MB index), so it waits until a
-/// tenth has changed: in a simulated stretch of edits the merges added 10 %
-/// to what the edits themselves wrote.
+/// One segment answers a cold query with a fraction of the disk reads, and a
+/// merged index is smaller. Deleted documents only leave a segment when it is
+/// merged, and tantivy's merge policy never merges a large segment for its
+/// deletes: the daemon's largest segments carry many dead documents. Each merge
+/// rewrites the whole index, so it waits until a tenth has changed, which keeps
+/// merge writes a small share of what the edits themselves write.
 pub fn worth_compacting(segments: &[(u32, u32)]) -> bool {
     let total: u64 = segments.iter().map(|&(docs, _)| u64::from(docs)).sum();
     let Some(&(largest, _)) = segments.iter().max_by_key(|&&(docs, _)| docs) else {
@@ -683,7 +678,7 @@ pub fn document_count(reader: &tantivy::IndexReader) -> Result<u64> {
 }
 
 /// Visit the `path` of every live document. Resolves the field by name rather
-/// than through [`fields`] so it serves the content index too — that schema has
+/// than through [`fields`] so it serves the content index too: that schema has
 /// no `name`/`source`, and the orphan sweep has to walk it.
 pub fn for_each_indexed_path(
     index: &Index,
@@ -772,7 +767,7 @@ mod tests {
 
     /// The name grams are tantivy's 2- and 3-grams, plus each CJK character.
     #[test]
-    fn name_grams_add_single_cjk_characters_to_the_ngrams() {
+    fn name_grams_add_cjk_characters() {
         for text in [" relatorio final ", " go ", " a ", "", " ab"] {
             let mut ngram = tantivy::tokenizer::NgramTokenizer::all_ngrams(2, 3).unwrap();
             let mut stream = ngram.token_stream(text);
@@ -791,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn compacts_once_a_tenth_of_the_index_changed() {
+    fn compacts_after_a_tenth_changes() {
         assert!(!worth_compacting(&[]));
         assert!(!worth_compacting(&[(1000, 0)]));
         assert!(!worth_compacting(&[(1000, 50), (40, 0)]));
@@ -811,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn inflated_document_count_allows_small_drift_only() {
+    fn inflated_count_allows_small_drift() {
         assert!(!is_inflated_document_count(0, 0));
         assert!(is_inflated_document_count(1, 0));
         assert!(!is_inflated_document_count(120_000, 100_000));
@@ -845,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn content_schema_keeps_body_out_of_name_index() {
+    fn body_stays_out_of_name_index() {
         let name_schema = build_name_schema();
         assert!(name_schema.get_field("body").is_err());
 
@@ -859,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_content_uses_stored_profile_without_rewriting_it() {
+    fn read_only_content_keeps_stored_profile() {
         for record in [IndexRecordOption::Basic, IndexRecordOption::WithFreqs] {
             let dir = std::env::temp_dir().join(format!(
                 "big-search-read-profile-{}-{record:?}",
@@ -894,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn open_or_create_recreates_corrupt_non_empty_index() {
+    fn corrupt_index_is_recreated() {
         let dir = std::env::temp_dir().join(format!("bs-index-corrupt-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -907,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_deflated_index_adds_missing_state_paths_without_wipe() {
+    fn deflated_index_repair_adds_missing_paths() {
         let dir = std::env::temp_dir().join(format!("bs-index-repair-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();

@@ -254,7 +254,7 @@ impl StatusCard {
         self.detail.set_label(&lines.join("\n"));
     }
 
-    /// Nobody answered. **Not** the same as an empty index: saying "0 files"
+    /// Nobody answered. That differs from an empty index: saying "0 files"
     /// here would tell the person their disk is empty.
     fn show_off(&self) {
         if self.applying.get() {
@@ -336,7 +336,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_long_count_is_grouped_the_way_it_is_read() {
+    fn long_counts_group_thousands() {
         assert_eq!(grouped(0), "0");
         assert_eq!(grouped(999), "999");
         assert_eq!(grouped(1_000), "1.000");

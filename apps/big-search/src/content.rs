@@ -67,14 +67,13 @@ pub fn record_skipped_candidates(entries: &[(PathBuf, i64, u64)]) -> Result<()> 
 pub type CatalogCursor = Option<String>;
 
 /// Delete documents whose path the name catalogue does not have, walking the
-/// **index** rather than the content state. Returns how many went.
+/// index rather than the content state. Returns how many went.
 ///
 /// [`prune_orphaned_content`] cannot find these: it is driven by content state
-/// rows, and [`clear_content_state`] (seven callers, one of them the daemon's
-/// own startup when the name index is empty) wipes every row while leaving the
+/// rows, and [`clear_content_state`] (called among others by the daemon's own
+/// startup when the name index is empty) wipes every row while leaving the
 /// documents in place. From then on nothing references them, no bookkeeping can
-/// see them, and they answer content searches forever — measured at 55.9 % of
-/// the hits for eight ordinary queries, every one of them a file that is gone.
+/// see them, and they answer content searches with files that are gone.
 ///
 /// Walks every live document, so this is a startup repair, not a per-pass step.
 pub fn prune_unreferenced_content_docs(index: &Index) -> Result<usize> {
@@ -88,7 +87,7 @@ pub fn prune_unreferenced_content_docs(index: &Index) -> Result<usize> {
     );
     // Fail safe, not deadly. `State::load` degrades to an empty in-memory state
     // when the database will not open (disk full, permissions), and an empty
-    // catalogue references nothing — which would make this delete every content
+    // catalogue references nothing, which would make this delete every content
     // document there is. Refusing costs a stale document; the alternative costs a
     // full re-extraction of the corpus for a transient error.
     if catalog.is_empty() {
@@ -128,19 +127,18 @@ const ORPHAN_PRUNE_BATCH: usize = 2048;
 /// the watcher; the startup prune runs uncapped.
 pub const ORPHAN_PRUNE_STEADY_LIMIT: usize = 8192;
 
-/// Drop content documents and rows for paths the catalogue no longer has,
+/// Drop content documents and rows for paths missing from the catalogue,
 /// stopping after `limit` of them. Returns how many went and whether more remain.
 ///
 /// Deleting a file removes its name document and catalogue row (three places do
-/// it: the watcher's reconcile and the two scan sweeps), but nothing removed the
-/// content side, so the content index answered searches with paths that no
-/// longer exist — 55.9 % of hits when measured. Doing it here rather than at
-/// each deletion site is what keeps the content index's writer out of the scan
-/// code: this is the one place that already holds both.
+/// it: the watcher's reconcile and the two scan sweeps), but leaves the content
+/// side, which would answer searches with paths that have disappeared. Doing it
+/// here rather than at each deletion site keeps the content index's writer out
+/// of the scan code: this is the one place that already holds both.
 ///
 /// The document always goes before its row: a crash in between leaves a row
 /// whose document is already gone, and the next run deletes it again for free.
-/// The reverse order would strand the document — no row left to find it by, and
+/// The reverse order would strand the document: no row left to find it by, and
 /// it would answer searches until a full rebuild. Commits are batched because a
 /// commit is the expensive part, and a keyset cursor (not the deletions
 /// themselves) advances the scan, so nothing has to be flushed to make progress.
@@ -201,7 +199,7 @@ pub fn prune_orphaned_content(index: &Index, limit: usize) -> Result<(usize, boo
 const CATALOG_PATH_BATCH: usize = 2048;
 const DEFAULT_CATALOG_CONTENT_BATCH: usize = 1000;
 
-/// Default worker count: 2 on desktop-class machines (the DESIGN §3.5 pool
+/// Default worker count: 2 on desktop-class machines (the DESIGN.md §6 pool
 /// width), 1 on low-memory or dual-core hardware so extraction never dominates
 /// the machine.
 pub(crate) fn default_workers() -> usize {
@@ -428,7 +426,7 @@ pub fn index_content_limited_with_writer(
     }
     if let Some(signatures) = signatures {
         let mut signatures = signatures.lock().expect("signature lock");
-        // Copies of text their representative no longer holds: forgotten, so
+        // Copies of text their representative has lost: forgotten, so
         // the next pass reads them.
         for path in signatures.take_released() {
             content_state.remove(&path);
@@ -458,11 +456,11 @@ pub fn pending_catalog_batch(
 
 /// One pending backfill batch, resuming a pass at `cursor`. Pending work is
 /// selected with a single indexed SQL join between the name and content state
-/// namespaces — no `stat` and no per-file query — so a full pass over the
+/// namespaces (no `stat` and no per-file query), so a full pass over the
 /// catalogue costs O(catalogue) once, not per batch. Returns the batch plus the
 /// cursor for the next call (`None` when this pass reached the catalogue end).
 /// Files whose catalogued mtime is younger than `min_change_age` are deferred,
-/// not extracted — pass `Duration::ZERO` to bypass the cooldown.
+/// not extracted; pass `Duration::ZERO` to bypass the cooldown.
 pub fn pending_catalog_batch_after(
     cursor: CatalogCursor,
     limit: usize,
@@ -500,10 +498,8 @@ fn catalog_content_batch_limit() -> usize {
 /// modification time exactly as they were, so [`pending_batch`] calls the file
 /// unchanged and skips it. Forgetting the catalogue row alone does not help:
 /// the content index keeps its own record, and the tag token lives there.
-///
-/// Without this, a tag put on a file was never findable by that tag — the
-/// forced reindex committed a name-index document with nothing new in it and
-/// the content pass declined the work.
+/// Without this, the forced reindex commits a name-index document with nothing
+/// new in it, the content pass declines the work, and the tag is never findable.
 pub fn forget_content_state(path: &Path) -> Result<()> {
     let mut content_state = state::State::load(
         &crate::config::state_db_path(),
@@ -612,11 +608,11 @@ fn pending_catalog_batch_with_byte_limit(
             // answers `sniff_type` (on by default) for anything without an
             // extension, and never asks whether the path is a file. A directory
             // has no body and no media metadata, but its mtime changes whenever
-            // an entry is added or removed inside it — so `$HOME` itself sat
-            // permanently inside the edit cooldown and every content search
-            // ended with "1 file being indexed, try again shortly", forever.
+            // an entry is added or removed inside it, so `$HOME` itself would
+            // sit inside the edit cooldown and every content search would end
+            // with "1 file being indexed, try again shortly".
             let settled = match std::fs::symlink_metadata(&path) {
-                Err(_) => true,        // gone before we reached it
+                Err(_) => true,        // gone before the pass reached it
                 Ok(md) => md.is_dir(), // nothing to extract from a directory
             };
             if !is_extraction_candidate(&path) || settled {
@@ -629,7 +625,7 @@ fn pending_catalog_batch_with_byte_limit(
                 continue;
             }
             // Cooldown: a file changed less than the quiet period ago is being
-            // edited — defer its (re-)extraction. A future mtime (bad clock)
+            // edited: defer its (re-)extraction. A future mtime (bad clock)
             // is treated as eligible rather than deferred forever.
             let change_age_secs = now_epoch_secs.saturating_sub(mtime);
             if cooldown_secs > 0 && (0..cooldown_secs).contains(&change_age_secs) {
@@ -789,7 +785,7 @@ mod tests {
     use crate::test_env::{ENV_LOCK, EnvVarGuard};
 
     #[test]
-    fn pending_batch_reports_more_work_beyond_limit() {
+    fn pending_batch_reports_more_work() {
         let base =
             std::env::temp_dir().join(format!("lsearch-content-batch-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
@@ -817,7 +813,7 @@ mod tests {
     /// thing that gets the work done, and a tag nobody can search for is a tag
     /// that does not work at all.
     #[test]
-    fn a_forgotten_row_is_read_again_although_the_file_did_not_change() {
+    fn forgotten_row_is_read_again() {
         let base =
             std::env::temp_dir().join(format!("lsearch-content-forget-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
@@ -901,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_batch_defers_recently_changed_files_until_cooldown() {
+    fn catalog_batch_defers_recent_edits() {
         let base =
             std::env::temp_dir().join(format!("lsearch-content-cooldown-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
@@ -911,7 +907,7 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
 
-        // Real files: a catalogue entry with nothing on disk is now tombstoned
+        // Real files: a catalogue entry with nothing on disk is tombstoned
         // rather than queued, so a fictional path would not exercise this at all.
         let quiet = base.join("quieto.md");
         let editing = base.join("sendo-editado.md");
@@ -981,7 +977,7 @@ mod tests {
             2
         );
 
-        // The file goes, and so does its catalogue row — exactly what the
+        // The file goes, and so does its catalogue row, as the
         // watcher and the scan sweeps do on a delete.
         std::fs::remove_file(&removed).unwrap();
         let mut catalog = state::State::load(
@@ -1009,7 +1005,7 @@ mod tests {
     /// The sweep must not become a one-shot: clearing content state is exactly
     /// what strands documents, so it has to re-arm the sweep that finds them.
     #[test]
-    fn clearing_content_state_rearms_the_unreferenced_sweep() {
+    fn clearing_state_rearms_unreferenced_sweep() {
         let _lock = ENV_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!("lsearch-rearm-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
@@ -1034,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_skipped_entries_become_tombstones_and_leave_the_pending_join() {
+    fn skipped_entries_become_tombstones() {
         let base =
             std::env::temp_dir().join(format!("lsearch-content-tombstone-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
@@ -1042,9 +1038,9 @@ mod tests {
 
         let movie = base.join("filme.bin");
         let note = base.join("nota.md");
-        // Catalogued, then deleted before the content pass reached it — the case
-        // that used to stay pending forever because the extraction worker skips
-        // it silently and never records a content row.
+        // Catalogued, then deleted before the content pass reached it: the
+        // extraction worker skips it silently and never records a content row,
+        // so only the tombstone keeps it from staying pending forever.
         let vanished = base.join("apagado.md");
         // A directory: extensionless, so the metadata sniffer claims it, but it
         // has nothing to extract and its mtime moves whenever its contents do.
@@ -1099,11 +1095,11 @@ mod tests {
     }
 
     #[test]
-    fn symlink_paths_are_not_content_extraction_targets() {
+    fn symlinks_skip_content_extraction() {
         use std::os::unix::fs::symlink;
 
         // `index_content` writes the content state through `config`, so this must
-        // own XDG_DATA_HOME — without the lock it would race other tests for the
+        // own XDG_DATA_HOME: without the lock it would race other tests for the
         // process-wide variable and, with none set, write to the real database.
         let _lock = ENV_LOCK.lock().unwrap();
         let base =
@@ -1132,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn content_knobs_resolve_env_overrides_and_defaults() {
+    fn content_knobs_resolve_overrides() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _clear = [
             EnvVarGuard::unset("BIG_SEARCH_CATALOG_CONTENT_BATCH"),
@@ -1183,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_pool_width_matches_machine_class_and_env_override() {
+    fn worker_pool_width_follows_machine() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _clear = EnvVarGuard::unset("BIG_SEARCH_CONTENT_WORKERS");
         let cores = std::thread::available_parallelism()
@@ -1210,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_batch_byte_budget_boundary_is_exclusive() {
+    fn catalog_byte_budget_is_exclusive() {
         let base = std::env::temp_dir().join(format!(
             "lsearch-catalog-byte-boundary-{}",
             std::process::id()
@@ -1219,7 +1215,7 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let mib = 1u64 << 20;
         // The catalogue records the sizes the budget uses; the files only have to
-        // exist, since a missing one is now tombstoned instead of queued.
+        // exist, since a missing one is tombstoned instead of queued.
         let (a, b, c) = (base.join("a.txt"), base.join("b.txt"), base.join("c.txt"));
         for path in [&a, &b, &c] {
             std::fs::write(path, b"x").unwrap();
@@ -1248,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_batch_byte_budget_boundary_is_exclusive() {
+    fn pending_byte_budget_is_exclusive() {
         let base = std::env::temp_dir().join(format!(
             "lsearch-pending-byte-boundary-{}",
             std::process::id()
@@ -1279,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_catalog_pass_indexes_all_batches_and_records_tombstones() {
+    fn catalog_pass_indexes_every_batch() {
         let _lock = ENV_LOCK.lock().unwrap();
         let base =
             std::env::temp_dir().join(format!("lsearch-catalog-pass-{}", std::process::id()));
@@ -1344,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_body_upsert_keeps_one_live_document_per_path() {
+    fn body_upsert_keeps_one_document() {
         let base = std::env::temp_dir().join(format!("lsearch-content-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(&base).unwrap();

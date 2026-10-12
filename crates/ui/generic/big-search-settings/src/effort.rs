@@ -4,15 +4,15 @@
 //! How much of the machine the search is allowed to use.
 //!
 //! Four named amounts of work rather than the eight numbers underneath them.
-//! The numbers only make sense together — an index that keeps word frequencies
+//! The numbers only make sense together (an index that keeps word frequencies
 //! next to a four-megabyte reading limit is a contradiction nobody would pick on
-//! purpose — so they are chosen as sets, and each set says what it costs and
+//! purpose), so they are chosen as sets, and each set says what it costs and
 //! what it buys.
 //!
 //! ## When the file is somebody's own mixture
 //!
 //! Somebody who edited the file by hand, or who opened the advanced section, has
-//! values that are not any of the four. Then **no** option is selected and a line
+//! values that are not any of the four. Then no option is selected and a line
 //! says why. A fifth option called "Custom" that cannot be clicked is a control
 //! that lies about being one.
 
@@ -37,7 +37,7 @@ const MODES: [ContentIndexMode; 3] = [
 /// The whole section: the four choices, then the advanced part folded away.
 ///
 /// The two halves show the same values: choosing a preset moves the advanced
-/// rows to it, and moving a row selects whichever preset the values now are,
+/// rows to it, and moving a row selects whichever preset matches the values,
 /// if any.
 pub(crate) struct Effort {
     group: adw::PreferencesGroup,

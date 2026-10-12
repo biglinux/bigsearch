@@ -2,28 +2,25 @@
 //!
 //! Both indexes are a cache derived from the filesystem, so the worst a forced
 //! reboot can cost is re-indexing the files whose commits did not reach the
-//! disk — work the startup reconcile already does. Paying `fsync` to avoid that
+//! disk, work the startup reconcile already does. Paying `fsync` to avoid that
 //! costs far more than the work it saves: tantivy issues two per commit (the
 //! `meta.json` temporary at `MmapDirectory::atomic_write`, then the index
 //! directory at `sync_directory`), and on btrfs each one is a log-tree
-//! transaction. Measured on this daemon, ten minutes of near-idle churn: 145
-//! `fsync` calls to write a few kilobytes, and 4.07 GB of logical writes landing
-//! as 17.9 GB at the block layer.
+//! transaction that amplifies a few kilobytes into many block-layer writes.
 //!
-//! What we give up is stated plainly: after a power cut the index may be torn
-//! rather than merely stale. That is survivable only because a torn index fails
-//! to open and [`crate::index::open_or_create`] recreates it — the recovery path
-//! is what makes this trade honest, not the absence of the syncs.
+//! After a power cut the index may be torn rather than merely stale. That is
+//! survivable because a torn index fails to open and
+//! [`crate::index::open_or_create`] recreates it.
 //!
 //! All three of tantivy's sync sites are covered: the `meta.json` temporary and
-//! the directory (95 % of the daemon's calls, since most commits write no new
+//! the directory (most of the daemon's calls, since most commits write no new
 //! segment) plus the per-segment sync in `SafeFileWriter`, which dominates
 //! instead during a bulk reindex.
 //!
 //! It also watches `meta.json` with inotify instead of letting `MmapDirectory`
 //! poll it. Tantivy's watcher opens, reads and checksums the file every 500 ms
-//! for as long as the index is open — one thread per index, so an idle daemon
-//! woke four times a second to learn that nothing had changed.
+//! for as long as the index is open, one thread per index: an idle daemon would
+//! wake four times a second to learn that nothing had changed.
 use notify::event::{EventKind, ModifyKind, RenameMode};
 use notify::{RecursiveMode, Watcher};
 use std::io::Write;
@@ -78,10 +75,9 @@ impl NoFsyncDirectory {
     /// `MADV_RANDOM`, so a page fault reads the page it needs instead of the
     /// kernel's read-ahead window. A query touches a few blocks of a term
     /// dictionary and a few posting lists; with read-ahead, the first query on a
-    /// cold cache read whole files — 35 MB for a 47 MB index, every query, on
-    /// a notebook disk with an 8 MB read-ahead. Measured on its 5400 rpm disk:
-    /// 6.2 MB instead of 35.9 MB read. Not for the writer: merges read segments
-    /// front to back, and without read-ahead a build took 104 s instead of 49 s.
+    /// cold cache reads most of the index on a disk with a large read-ahead
+    /// window. Not for the writer: merges read segments front to back, and
+    /// without read-ahead a build takes about twice as long.
     pub fn open_for_queries(root: &Path) -> tantivy::Result<Self> {
         Ok(Self {
             inner: MmapDirectory::open_with_madvice(root, tantivy::directory::Advice::Random)?,
@@ -127,7 +123,7 @@ impl MetaWatch {
     }
 }
 
-/// Whether `event` is a new `meta.json` landing — the rename that publishes a
+/// Whether `event` is a new `meta.json` landing, the rename that publishes a
 /// commit. Opens and reads are left out on purpose: a reload reads the file, and
 /// counting that as a change would reload forever. Of a rename only the arrival
 /// counts: inotify reports it again as the `Both` pair, which would reload twice.
@@ -180,7 +176,7 @@ impl Directory for NoFsyncDirectory {
 
     /// Write-then-rename, like `MmapDirectory`, minus the `fsync` of the
     /// temporary. The rename still makes the swap atomic against a *reader*; it
-    /// is only a power cut that may leave the new content unwritten.
+    /// is a power cut that may leave the new content unwritten.
     ///
     /// The temporary is named after the target plus our pid rather than taken
     /// from `tempfile`: only the process holding the tantivy writer lock ever
@@ -221,8 +217,8 @@ impl Directory for NoFsyncDirectory {
             Some(meta_watch) => {
                 let handle = meta_watch.callbacks.subscribe(watch_callback);
                 // A reader loads `meta.json` before it subscribes, and a commit in
-                // between is announced to nobody — tantivy's poller hid that by
-                // firing once at start and noticing changes only 500 ms later.
+                // between is announced to nobody (tantivy's poller hid that by
+                // firing once at start and noticing changes 500 ms later).
                 // Reloading once now closes the gap; a reload with nothing new
                 // opens nothing.
                 let _ = meta_watch.callbacks.broadcast().wait();
@@ -238,7 +234,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn atomic_write_replaces_content_and_leaves_no_temp() {
+    fn atomic_write_leaves_no_temp() {
         let dir = std::env::temp_dir().join(format!("bs-nosync-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -275,10 +271,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A commit wakes the readers once, and reading `meta.json` — which is what a
-    /// reload does — wakes nobody: an open counted as a change reloads forever.
+    /// A commit wakes the readers once, and reading `meta.json` (which is what a
+    /// reload does) wakes nobody: an open counted as a change reloads forever.
     #[test]
-    fn a_commit_wakes_the_watch_and_a_read_does_not() {
+    fn only_commits_wake_the_watch() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = std::env::temp_dir().join(format!("bs-nosync-watch-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
@@ -321,7 +317,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A reader opened before the commits sees them without being reopened —
+    /// A reader opened before the commits sees them without being reopened:
     /// the daemon's query readers live for its whole life.
     #[test]
     fn a_long_lived_reader_follows_commits() {
@@ -348,7 +344,7 @@ mod tests {
     /// through another mapped for random reads. The query reader must still see
     /// each commit, and its files must carry the advice (`rr` in smaps).
     #[test]
-    fn a_query_instance_follows_the_writer_and_reads_at_random() {
+    fn query_instance_follows_the_writer() {
         let dir = std::env::temp_dir().join(format!("bs-nosync-query-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let index = crate::index::open_or_create(&dir).unwrap();
@@ -396,7 +392,7 @@ mod tests {
 
     /// Commit repeatedly through the real index stack. Run under `strace` this is
     /// also the fsync-count probe; as a test it guards the part that matters
-    /// either way — dropping the syncs must not drop the data.
+    /// either way: dropping the syncs must not drop the data.
     #[test]
     fn commits_through_the_index_stay_searchable() {
         let dir = std::env::temp_dir().join(format!("bs-nosync-idx-{}", std::process::id()));

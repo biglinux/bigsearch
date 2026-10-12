@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn escapes_are_decoded_and_malformed_ones_kept() {
+    fn escapes_decode_and_malformed_stay() {
         assert_eq!(unescape_octal("a\\040b\\011c"), "a b\tc");
         assert_eq!(unescape_octal("trailing\\"), "trailing\\");
         assert_eq!(unescape_octal("bad\\9zz"), "bad\\9zz");

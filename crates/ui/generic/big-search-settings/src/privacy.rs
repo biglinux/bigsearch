@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: 2026 BigLinux contributors
 // SPDX-License-Identifier: MIT
 
-//! Remembering where files came from — and the one switch that is off until
+//! Remembering where files came from, and the one switch that is off until
 //! somebody asks for it.
 //!
 //! The file manager can say "you downloaded this from that site in March", which
 //! is often the only thing that explains why a file is on the machine at all.
 //! Two of the places that answer are the person's own browsers, and reading
 //! those is a different kind of permission from cataloguing their files:
-//! **nobody expects a file manager to have read the browser's download list**,
+//! nobody expects a file manager to have read the browser's download list,
 //! so that one starts switched off and says exactly what it reads.
 //!
 //! What the screen promises about the network is not a promise: the service runs

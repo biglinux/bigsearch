@@ -136,11 +136,10 @@ pub fn write_effective_ignore() -> Result<()> {
 /// The walker gets these rules through `add_ignore`, but a walker can only
 /// answer for entries it produces. Two callers need the same answer without
 /// walking: the watcher, for each inotify event, and every subtree walk, for its
-/// own root — the `ignore` crate never tests the root it is given, so a freshly
-/// created `target/` was walked whole and every directory in it got a watch.
-/// That is how 130 871 `target/` paths reached a catalogue whose rules exclude
-/// them. One compiled matcher, shared, is what stops the walker and the watcher
-/// from disagreeing again.
+/// own root. The `ignore` crate never tests the root it is given, so without
+/// this a freshly created `target/` would be walked whole and every directory
+/// in it watched. One compiled matcher, shared, keeps the walker and the
+/// watcher in agreement.
 ///
 /// Per-repository `.gitignore` files are not compiled in: they are asked of
 /// [`repo_ignored`] for paths new to the catalogue only, rather than re-read for
@@ -185,10 +184,10 @@ impl Scope {
 /// walker would have decided had it come to `path` from the repository's root.
 ///
 /// The walker never tests the root it is given, so a directory its repository
-/// ignores, created again after the scan, was walked whole the moment it
-/// appeared: `cargo fuzz` recreating `fuzz/corpus/` put 79 176 files into a
-/// catalogue of 170 000. Asked only for paths the catalogue does not hold yet,
-/// so an event on a known file costs nothing more.
+/// ignores, created again after the scan (`cargo fuzz` recreating
+/// `fuzz/corpus/`), would be walked whole the moment it appears. Asked only for
+/// paths the catalogue does not hold yet, so an event on a known file costs
+/// nothing more.
 pub fn repo_ignored(path: &Path, is_dir: bool) -> bool {
     // Nearest first: a deeper `.gitignore` overrides a shallower one.
     let mut rules = Vec::new();
@@ -210,7 +209,7 @@ pub fn repo_ignored(path: &Path, is_dir: bool) -> bool {
     false
 }
 
-/// A dotfile or any path under a dot-directory — the churny 90 % the design
+/// A dotfile or any path under a dot-directory: the churny majority the design
 /// excludes. Mirrors the walker's `hidden(true)`.
 pub fn is_hidden(path: &Path) -> bool {
     path.components().any(|c| {
@@ -219,13 +218,13 @@ pub fn is_hidden(path: &Path) -> bool {
 }
 
 /// `ignore` walker: skip hidden + every gitignore source + our effective ignore.
-/// Symlinks are never followed during the walk (`follow_links(false)`) — symlinked
-/// directories the user deliberately placed at a scan root are instead resolved
+/// Symlinks are never followed during the walk (`follow_links(false)`); symlinked
+/// directories the user placed at a scan root are instead resolved
 /// into separate roots by [`crate::scan_roots::resolve_roots`], which avoids chasing the thousands
 /// of deep symlinks a tree contains (and the loops/duplication that brings).
 fn walker(root: &Path) -> ignore::Walk {
     let mut b = WalkBuilder::new(root);
-    b.hidden(true) // skip dotfiles/dirs — the churny, non-indexed 90%
+    b.hidden(true) // skip dotfiles/dirs: churny and never indexed
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
@@ -238,7 +237,7 @@ fn walker(root: &Path) -> ignore::Walk {
     b.build()
 }
 
-/// Index one entry by name only (no content extraction) — the fast scan path.
+/// Index one entry by name only (no content extraction): the fast scan path.
 pub fn add_name_only(
     writer: &IndexWriter,
     f: &Fields,
@@ -310,7 +309,7 @@ pub fn delete_tree(writer: &IndexWriter, f: &Fields, path: &Path) {
 }
 
 /// Replace the document for `path` by name only. Content/metadata extraction is
-/// intentionally deferred to the throttled background backfill; doing it here
+/// deferred to the throttled background backfill; doing it here
 /// would make inotify bursts read large files synchronously.
 pub fn upsert_path(
     writer: &IndexWriter,
@@ -328,8 +327,9 @@ pub fn path_term(f: &Fields, path: &Path) -> Term {
 
 /// What a cache-aware reconcile actually touched. A metadata-only change (same
 /// path, new mtime/size, same day) updates the state cache and schedules
-/// content work without rewriting the name index at all — `index_changed` demands a Tantivy commit,
-/// `state_changed` a state persist + content backfill.
+/// content work without rewriting the name index at all: `index_changed`
+/// demands a Tantivy commit, `state_changed` a state persist + content
+/// backfill.
 #[derive(Clone, Copy, Default)]
 pub struct ReconcileOutcome {
     pub index_changed: bool,
@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_its_repository_ignores_is_not_walked_when_it_appears() {
+    fn repo_ignored_directory_is_skipped() {
         let base = scratch_dir("lsearch-scan-repo-ignore");
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
@@ -751,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_only_change_skips_name_index_rewrite() {
+    fn metadata_change_skips_name_rewrite() {
         let base = scratch_dir("lsearch-scan-metaonly");
         let tree = base.join("tree");
         std::fs::create_dir_all(&tree).unwrap();
@@ -802,9 +802,9 @@ mod tests {
         assert!(!is_hidden(Path::new("/home/u/Report.md")));
     }
 
-    /// The leak this scope exists to close: the `ignore` walker exempts its own
-    /// root, so a `target/` created after startup used to be walked whole and
-    /// watched. The subtree walk must refuse the root itself.
+    /// The `ignore` walker exempts its own root, so a `target/` created after
+    /// startup would be walked whole and watched. The subtree walk must refuse
+    /// the root itself.
     #[test]
     fn subtree_walk_refuses_an_excluded_root() {
         let base = scratch_dir("lsearch-scope");
@@ -861,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_user_ignore_creates_template_then_preserves_edits() {
+    fn user_ignore_seed_keeps_edits() {
         let _lock = ENV_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!("lsearch-ignore-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
@@ -887,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn default_ignore_prunes_nested_dependency_and_build_dirs() {
+    fn default_ignore_prunes_build_dirs() {
         let _lock = ENV_LOCK.lock().unwrap();
         let base = scratch_dir("lsearch-default-ignore");
         let home = base.join("home");

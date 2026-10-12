@@ -19,8 +19,9 @@ SQLite.
 
 - **Nomes:** busca por trecho, sem diferenciar maiúsculas, no caminho completo,
   com filtro por pasta e extensão na CLI e por tipo de mídia pelo socket.
-- **Conteúdo:** texto puro, Markdown, código-fonte, PDF (via `pdftotext`) e
-  documentos OpenDocument / Office Open XML. Chinês, japonês, coreano e as
+- **Conteúdo:** texto puro, Markdown, código-fonte, HTML, PDF (via
+  `pdftotext`), documentos OpenDocument e Office Open XML, EPUB, e-mails salvos,
+  RTF e Word 97-2003 (via `antiword`). Chinês, japonês, coreano e as
   escritas do Sudeste Asiático são indexados em bigramas sobrepostos, então
   podem ser buscados sem dicionário.
 - **Índice ao vivo:** inotify em cada pasta visível; um arquivo salvo aparece na
@@ -29,8 +30,8 @@ SQLite.
 - **Versões anteriores:** em sistemas de arquivos com reflink (Btrfs, XFS), uma
   cópia do documento é guardada antes de cada gravação, dentro de um limite de
   espaço.
-- **Origem:** de onde um arquivo veio — download do navegador, cópia,
-  movimentação — quando isso é conhecido.
+- **Origem:** de onde um arquivo veio (download do navegador, cópia,
+  movimentação), quando isso é conhecido.
 - **Leve para a máquina:** a extração roda com prioridade ociosa e se ajusta à
   carga de CPU, à pressão de E/S e de memória e ao uso de bateria. Parado, o
   daemon dorme até algum arquivo mudar.
@@ -39,7 +40,8 @@ SQLite.
 
 - Linux com inotify, e systemd para o serviço do usuário.
 - Rust 1.98.1; com rustup, o `rust-toolchain.toml` o seleciona.
-- SQLite 3 e, para conteúdo de PDF, poppler (`pdftotext`).
+- SQLite 3; poppler (`pdftotext`) para conteúdo de PDF e `antiword` para
+  documentos do Word 97-2003.
 - Só para a página de configurações: GTK 4.22 e libadwaita 1.9.
 
 ## Compilar e instalar

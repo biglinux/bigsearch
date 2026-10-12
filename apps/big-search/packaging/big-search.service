@@ -1,9 +1,9 @@
-# systemd *user* unit — install to ~/.config/systemd/user/big-search.service
-# then: systemctl --user enable --now big-search.service
+# systemd user unit: install to ~/.config/systemd/user/big-search.service,
+# then run `systemctl --user enable --now big-search.service`.
 #
 # Runs unprivileged. Indexing threads lower themselves (idle cgroup, SCHED_IDLE,
-# clock clamp, idle I/O; throttle.rs), so the unit does NOT set Nice,
-# CPUSchedulingPolicy or a low CPUWeight — searching runs like a normal program.
+# clock clamp, idle I/O; throttle.rs), so the unit sets no Nice,
+# CPUSchedulingPolicy or low CPUWeight: searching runs like a normal program.
 [Unit]
 Description=big-search file index daemon
 Documentation=https://github.com/biglinux/bigsearch
@@ -15,16 +15,15 @@ Restart=on-failure
 RestartSec=5
 UMask=0077
 Environment=RUST_LOG=info,tantivy=warn,symphonia_core=error,symphonia_format_isomp4=error,symphonia_bundle_mp3=error
-# Provenance (`[origin]`) and metadata extraction (`metadata`) are NOT set here
-# on purpose: config.toml owns them. An Environment= line would silently win
-# over the user's config and make that setting a no-op.
-# Bound total memory: soft-throttle reclaims page cache, hard cap is a safety net
-# (the extraction worker pool uses a bounded queue so anonymous RSS stays low).
+# Provenance (`[origin]`) and metadata extraction (`metadata`) stay out of
+# Environment=: config.toml owns them, and an environment variable would win
+# over the user's config and turn that setting into a no-op.
+# MemoryHigh reclaims page cache first; MemoryMax is the safety net. The
+# extraction pool's bounded queue keeps anonymous memory low.
 # The cpu controller is handed to the daemon, which runs in <unit>/main and puts
 # its indexing threads in a threaded child group with cpu.idle: indexing takes
 # only CPU time nobody else wants, searching keeps a normal program's share. A
-# thread's SCHED_IDLE alone counts only inside its cgroup (a program sharing a
-# core with the indexer lost 32 % at CPUWeight=20, ~1 % with the idle group).
+# thread's SCHED_IDLE alone counts only inside its cgroup (DESIGN.md, section 7).
 Delegate=cpu
 DelegateSubgroup=main
 IOAccounting=yes
@@ -33,11 +32,11 @@ MemoryHigh=512M
 MemoryMax=768M
 TasksMax=64
 
-# --- hardening ---
+# Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-# Writable holes: only the daemon's data dir (index, state, history, and
+# Writable paths: only the daemon's data dir (index, state, history and
 # SQLITE_TMPDIR) and the socket dir, the standard paths the CLI finds too.
 # Anything wider lets a parser compromised by an indexed file plant units,
 # .desktop or D-Bus service files that run outside the sandbox. The `+` runs the
@@ -45,9 +44,9 @@ ProtectHome=read-only
 # exist. A custom XDG_DATA_HOME in the service environment is not covered.
 ExecStartPre=+/usr/bin/mkdir -p -m 0700 %h/.local/share/big-search %t/biglinux
 ReadWritePaths=%h/.local/share/big-search %t/biglinux
-# Private writable /tmp: with ProtectSystem=strict + ProtectHome=read-only every
-# default temp dir is read-only, which broke SQLite temp spill files
-# (SQLITE_IOERR_GETTEMPPATH) and aborted the startup reconcile. The daemon also
+# Private writable /tmp: with ProtectSystem=strict and ProtectHome=read-only
+# every default temp dir is read-only, and SQLite cannot spill
+# (SQLITE_IOERR_GETTEMPPATH), which aborts the startup reconcile. The daemon
 # sets SQLITE_TMPDIR to its data dir; this covers any other temp user (poppler).
 PrivateTmp=yes
 # A cgroup namespace of its own: the daemon sees only its unit's subtree, and may

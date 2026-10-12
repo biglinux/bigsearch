@@ -8,12 +8,11 @@
 //! ## What a version costs
 //!
 //! `FICLONE` makes the filesystem write a second file pointing at the same
-//! blocks; nothing is copied and nothing is charged. On the machine this was
-//! written for, cloning a thousand documents took 1,3 s and 0 MiB.
+//! blocks; nothing is copied and nothing is charged.
 //!
-//! **That is the price of the FIRST version only.** Every document editor saves
+//! That is the price of the first version only. Every document editor saves
 //! by writing a temporary file and renaming it over the original, so the file
-//! that comes out shares no block with the version before it — and the old
+//! that comes out shares no block with the version before it, and the earlier
 //! version starts costing its full size. The real bill is the sum of every
 //! superseded version, which is why the budget below is the part that makes this
 //! shippable rather than the clone.
@@ -81,9 +80,9 @@ const MISSING_GRACE_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// The documents a version is kept for.
 ///
 /// An allow list, not a block list: that is what keeps a 100 GB file somebody
-/// invented an extension for out of the store. Source code is deliberately
-/// absent from this first version — people who write code have git, and
-/// `json`/`yaml` files are usually state that changes on its own.
+/// invented an extension for out of the store. Source code is left out: people
+/// who write code have git, and `json`/`yaml` files are usually state that
+/// changes on its own.
 const DOCUMENT_EXTENSIONS: [&str; 13] = [
     "odt", "docx", "ods", "xlsx", "odp", "pptx", "txt", "md", "csv", "rtf", "svg", "kra", "xcf",
 ];
@@ -339,21 +338,21 @@ impl History {
         Ok(())
     }
 
-    /// A document was renamed: keep its history under the new name.
+    /// Follow a renamed document: keep its history under the destination name.
     ///
-    /// The watcher hears the rename as a pair — the kernel gives both names in
-    /// one event — and that pair is the only reliable way to follow a document
+    /// The watcher hears the rename as a pair (the kernel gives both names in
+    /// one event), and that pair is the only reliable way to follow a document
     /// that is renamed and then saved: the save replaces the inode, so by the
-    /// time anything looks, neither the old name nor the old identity is there
+    /// time anything looks, neither the source name nor its identity is there
     /// to match on.
     pub fn note_rename(&self, from: &Path, to: &Path) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
         // Only to a place the versions could be asked for again. A document
-        // renamed into a hidden name is on its way out — that is exactly how a
-        // file manager deletes for good, one rename to `.something-delete-...`
-        // and then an unlink — and following it there would file the history
+        // renamed into a hidden name is on its way out: a file manager deletes
+        // for good with one rename to `.something-delete-...` and then an
+        // unlink, and following it there would file the history
         // under a name nobody can type, out of reach of the request to forget it.
         if eligible_name(to).is_none() {
             return Ok(());
@@ -361,7 +360,7 @@ impl History {
         follow_rename(conn, from, to)
     }
 
-    /// The **earlier** versions of one document, newest first.
+    /// The earlier versions of one document, newest first.
     ///
     /// The state the document is in right now is left out, and that is the
     /// difference between a useful list and a confusing one: the newest version
@@ -460,7 +459,7 @@ impl History {
         }
         let file_id = self.upsert_file(path, &metadata)?;
         if self.matches_newest_version(file_id, &metadata)? {
-            // The state is already kept, so there is nothing to clone — but when
+            // The state is already kept, so there is nothing to clone. But when
             // the file manager is about to write an older version over this one,
             // *this* row is the undo, and thinning would drop it as an ordinary
             // save minutes later. Marking it is what keeps the promise the
@@ -595,7 +594,7 @@ impl History {
     ///
     /// Two rules, in order. The path comes first because that is what an atomic
     /// save looks like: same name, brand-new inode. Identity comes second, and
-    /// only when the old name is gone — otherwise two hard links to one inode
+    /// only when the row's path is gone; otherwise two hard links to one inode
     /// would take turns renaming each other's history. Identity includes the
     /// birth time where the filesystem records one: XFS hands a deleted
     /// document's inode number to the next new file, which must not inherit
@@ -687,8 +686,8 @@ impl History {
                     log::info!("file history is not available here: {}", reason.as_str());
                 }
             }
-            // This one file cannot be cloned — `nodatacow`, an immutable flag,
-            // a file being executed. Everything else on the disk still can.
+            // This one file cannot be cloned (`nodatacow`, an immutable flag,
+            // a file being executed). Everything else on the disk still can.
             Refusal::File => {}
             Refusal::OutOfSpace => self.paused_for_space = true,
         }
@@ -697,7 +696,7 @@ impl History {
     /// Thin one document's versions by time, then by count.
     ///
     /// Ten presses of Ctrl+S in five minutes are ten nearly identical versions,
-    /// and keeping "the newest ten" would throw away yesterday's — the one that
+    /// and keeping "the newest ten" would throw away yesterday's, the one that
     /// mattered. So: the last hour keeps one, today keeps one per hour, this
     /// week one per day, then one per week. The count is a ceiling that is
     /// rarely reached.
@@ -729,14 +728,13 @@ impl History {
             let newest = index == 0;
             // Nor is the state the document was in before this feature ever saw
             // it. Thinning by time would drop it the moment somebody saves, and
-            // it is the only copy of what they started from — "como estava antes
-            // de eu mexer" is the whole point. Age still retires it.
+            // it is the only copy of what they started from ("como estava antes
+            // de eu mexer" is the whole point). Age still retires it.
             //
-            // **The oldest row, not the one marked `baseline`.** A document
-            // created while the service is watching earns its first version from
-            // the watcher, which calls that a save; keying the protection on the
-            // reason lost the original of every file born after the feature was
-            // installed, which is most of them.
+            // The protection keys on the oldest row, whatever its reason: a
+            // document created while the service is watching earns its first
+            // version from the watcher, which calls that a save, and that covers
+            // most files.
             let first_ever = index == oldest_index;
             // And neither is the state a document was in just before somebody
             // asked to go back to an older one. The dialog that asks promises
@@ -813,8 +811,7 @@ impl History {
     /// Throw away objects nobody claims and rows whose object is gone.
     ///
     /// A crash between the clone and the row leaves a file holding disk space
-    /// that nothing will ever free. Twenty lines here are what make the store
-    /// honest about being durable data.
+    /// that nothing else would ever free.
     pub fn sweep_orphans(&mut self) -> Result<()> {
         if self.conn.is_none() {
             return Ok(());
@@ -867,12 +864,11 @@ impl History {
 
     /// What the store actually costs, in bytes.
     ///
-    /// **The newest version of each document is not counted.** A clone shares
-    /// the live file's blocks, so the newest version costs nothing until the
-    /// document is saved again; what costs is every version that has been
+    /// The newest version of each document is left out of the count. A clone
+    /// shares the live file's blocks, so the newest version costs nothing until
+    /// the document is saved again; what costs is every version that has been
     /// superseded. Counting the whole sum would have the budget evicting
-    /// versions that are free — on this machine, four thousand versions whose
-    /// real cost is zero.
+    /// versions that are free.
     fn total_bytes(&self) -> Result<u64> {
         let Some(conn) = &self.conn else {
             return Ok(0);
@@ -996,7 +992,7 @@ fn disk_capacity(path: &Path) -> io::Result<DiskCapacity> {
 /// Clone `source` into `destination`, sharing its blocks.
 ///
 /// The destination is created exclusively and read-only: a version somebody can
-/// save over is not a version. Nothing here ever copies bytes — a refusal is a
+/// save over is not a version. Nothing here ever copies bytes: a refusal is a
 /// refusal.
 pub(crate) fn clone_file(source: &Path, destination: &Path) -> std::result::Result<(), Refusal> {
     let before = std::fs::symlink_metadata(source).map_err(|_| Refusal::File)?;
@@ -1061,8 +1057,8 @@ fn classify(error: &io::Error) -> Refusal {
 
 /// Whether this document earns a version, and its metadata if so.
 ///
-/// Cheapest test first. The allow list is deliberately an allow list: a block
-/// list is how somebody discovers the problem with a 100 GB file.
+/// Cheapest test first. Extensions are an allow list because a block list is
+/// how somebody discovers the problem with a 100 GB file.
 pub fn eligible_metadata(path: &Path) -> Option<std::fs::Metadata> {
     eligible_name(path)?;
     let metadata = std::fs::symlink_metadata(path).ok()?;
@@ -1089,7 +1085,7 @@ pub fn may_be_a_document(path: &Path) -> bool {
 }
 
 /// The half of eligibility that is about the name alone, with nothing read from
-/// disk — so it can also answer about a path that no longer exists.
+/// disk, so it can also answer about a path that has disappeared.
 fn eligible_name(path: &Path) -> Option<()> {
     // The extension first, and without building a string: it rejects almost
     // every path the watcher reports, and the checks below allocate.
@@ -1115,7 +1111,7 @@ fn scope() -> &'static crate::scan::Scope {
     SCOPE.get_or_init(crate::scan::Scope::compile)
 }
 
-/// The nearest folder above `path` that holds a `.git` — a directory in an
+/// The nearest folder above `path` that holds a `.git`: a directory in an
 /// ordinary clone, a file in a linked worktree or a submodule.
 ///
 /// The walk stops at the catalogued folder that owns `path`: a `.git` above it
@@ -1246,7 +1242,7 @@ fn open_store(path: &Path) -> Result<Connection> {
 /// The store is locked to read the catalogue and to write the outcome, not
 /// while the filesystem is asked about every document: the worker runs at idle
 /// priority, and a file manager's request for a version waits on the same lock.
-/// A row renamed or saved in between no longer matches what was checked and is
+/// A row renamed or saved in between stops matching what was checked and is
 /// left for the next sweep.
 fn expire_missing(history: &SharedHistory) -> Result<()> {
     let files: Vec<(i64, String, Option<i64>)> = {
@@ -1464,10 +1460,9 @@ const QUIET_PERIOD: std::time::Duration = std::time::Duration::from_secs(3);
 const HOUSEKEEPING: std::time::Duration = std::time::Duration::from_secs(60);
 /// How often the store checks whether documents it knows are still there.
 ///
-/// Once an hour, not once a minute: it asks the filesystem about every document
-/// it keeps versions of, and on a machine with twenty thousand of them that is
-/// twenty thousand questions. What it is looking for — a file gone for a week —
-/// does not move in a minute.
+/// Once an hour: it asks the filesystem about every document it keeps versions
+/// of, and what it is looking for, a file gone for a week, does not move in a
+/// minute.
 const MISSING_SWEEP: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 /// How long the worker rests between bursts while it still has files waiting.
 ///
@@ -1518,8 +1513,8 @@ fn enforce_budget(history: &SharedHistory) -> Result<()> {
 ///
 /// Stopping alone would not be enough. When the disk fills for some other
 /// reason, the person deletes files and the space does not come back,
-/// because these versions are still holding the old blocks, and they have
-/// no idea this store exists.
+/// because these versions are still holding the superseded blocks, and the
+/// person has no idea this store exists.
 fn watch_free_space(history: &SharedHistory) -> Result<()> {
     if history.lock().expect("versions store lock").conn.is_none() {
         return Ok(());
@@ -1810,7 +1805,7 @@ mod tests {
     }
 
     /// A document gone past the grace period is forgotten; one that came back
-    /// is no longer counted missing; one just gone starts its grace period.
+    /// stops counting as missing; one just gone starts its grace period.
     #[test]
     fn missing_documents_expire_after_the_grace() {
         let dir = crate::test_env::scratch_dir("bs-history-missing");
@@ -1870,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn git_work_trees_and_their_ignore_rules_are_found() {
+    fn git_work_trees_and_ignores_found() {
         let root = crate::test_env::scratch_dir("bs-history-git");
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join(".git/info")).unwrap();
@@ -1905,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    fn unvisited_history_paths_survive_a_partial_batch() {
+    fn partial_batch_keeps_unvisited_paths() {
         let mut pending = Pending::new();
         for name in ["a", "b", "c"] {
             pending.note(name.into(), std::time::Duration::ZERO);
@@ -1918,7 +1913,7 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_budget_does_not_remove_ready_history_paths() {
+    fn zero_budget_keeps_ready_paths() {
         let mut pending = Pending::new();
         pending.note("a".into(), std::time::Duration::ZERO);
         pending.note("b".into(), std::time::Duration::ZERO);
@@ -1927,7 +1922,7 @@ mod tests {
     }
 
     #[test]
-    fn oldest_history_deadlines_run_first_and_future_paths_wait() {
+    fn due_paths_run_oldest_first() {
         let mut pending = Pending::new();
         let now = std::time::Instant::now();
         pending.deadlines.insert("newest".into(), now);
@@ -1945,7 +1940,7 @@ mod tests {
     }
 
     #[test]
-    fn a_later_save_keeps_its_debounce_after_a_short_history_batch() {
+    fn later_save_keeps_its_debounce() {
         let mut pending = Pending::new();
         pending.note("a".into(), std::time::Duration::ZERO);
         pending.note("b".into(), std::time::Duration::ZERO);
@@ -1956,7 +1951,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_batches_do_not_release_queue_capacity_for_unvisited_paths() {
+    fn unvisited_paths_keep_queue_capacity() {
         let mut pending = Pending::new();
         pending.limit = 2;
         pending.note("a".into(), std::time::Duration::ZERO);
@@ -1976,7 +1971,7 @@ mod tests {
     /// slot, so only the newest of the burst is kept, and yesterday sits in a
     /// slot of its own.
     #[test]
-    fn a_burst_of_saves_does_not_evict_yesterday() {
+    fn save_burst_keeps_yesterday() {
         let now = 1_800_000_000;
         let burst: Vec<i64> = (0..10).map(|minute| now - minute * 30).collect();
         let buckets: Vec<i64> = burst.iter().map(|at| time_bucket(now, *at)).collect();
@@ -1991,7 +1986,7 @@ mod tests {
     /// Older versions are kept further apart: hours today, days this week,
     /// weeks after that.
     #[test]
-    fn versions_are_kept_further_apart_as_they_age() {
+    fn versions_thin_out_with_age() {
         let now = 1_800_000_000;
         const HOUR: i64 = 3600;
         const DAY: i64 = 24 * HOUR;
@@ -2019,7 +2014,7 @@ mod tests {
     /// one file switches the feature off for everything, and blaming the file
     /// for the disk means retrying on every document forever.
     #[test]
-    fn each_refusal_is_about_what_it_is_about() {
+    fn errno_maps_to_its_refusal() {
         let of = |code| classify(&io::Error::from_raw_os_error(code));
         assert!(matches!(
             of(libc::EOPNOTSUPP),
@@ -2038,7 +2033,7 @@ mod tests {
     /// After a restart the pass over the catalogue checks only what the newest
     /// version does not already hold, without touching the disk.
     #[test]
-    fn the_catalogue_pass_skips_documents_already_kept() {
+    fn catalogue_pass_skips_kept_documents() {
         let dir = std::env::temp_dir().join(format!("bs-history-unkept-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let conn = open_store(&dir.join("history.sqlite")).unwrap();
@@ -2107,8 +2102,9 @@ mod tests {
         let _env = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let data = crate::test_env::scratch_dir("bs-history-erase");
-        let _data_home = crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", data.to_str().unwrap());
+        let xdg_data = crate::test_env::scratch_dir("bs-history-erase");
+        let _data_home =
+            crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", xdg_data.to_str().unwrap());
         let objects = crate::config::history_dir().join("objects/ab");
         std::fs::create_dir_all(&objects).unwrap();
         std::fs::write(objects.join("cdef"), "kept").unwrap();
@@ -2121,7 +2117,7 @@ mod tests {
         store.forget_everything().unwrap();
         assert!(!crate::config::history_dir().join("objects").exists());
         assert!(!crate::config::history_db_path().exists());
-        std::fs::remove_dir_all(&data).ok();
+        std::fs::remove_dir_all(&xdg_data).ok();
     }
 
     #[test]

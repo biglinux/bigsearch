@@ -32,10 +32,10 @@ pub(crate) fn read_pdf(path: &Path) -> Option<String> {
     text_layer(text, cap)
 }
 
-/// Pages read to describe a PDF. Its title, kind and date are in its opening —
-/// on the evaluation corpus ten pages give the answers the whole text gives,
-/// and a 738-page book is read in 74 ms instead of 6 s — and, past them, a
-/// signature on its last pages ("Goiânia, 06 de janeiro de 2026", page 26).
+/// Pages read to describe a PDF. Its title, kind and date are in its opening,
+/// where ten pages answer as well as the whole text and a long book costs no
+/// more than a short one; past them, a signature on its last pages ("Goiânia,
+/// 06 de janeiro de 2026") can carry the date.
 const DESCRIBED_PAGES: u32 = 10;
 const CLOSING_PAGES: u32 = 2;
 
@@ -69,8 +69,8 @@ pub(crate) fn read_pdf_titled(path: &Path) -> Option<(String, Option<String>)> {
 
 /// The number of pages `pdfinfo` reports.
 fn page_count(path: &Path) -> Option<u32> {
-    let info = run_capped("pdfinfo", path, 64 * 1024, &[])?;
-    String::from_utf8_lossy(&info)
+    let report = run_capped("pdfinfo", path, 64 * 1024, &[])?;
+    String::from_utf8_lossy(&report)
         .lines()
         .find_map(|line| line.strip_prefix("Pages:"))
         .and_then(|n| n.trim().parse().ok())
@@ -132,7 +132,7 @@ pub(crate) fn read_word(path: &Path) -> Option<String> {
     text_layer(String::from_utf8_lossy(&bytes).into_owned(), cap)
 }
 
-/// Runs `program` — `pdftotext` (to stdout), `pdfinfo` or `antiword` — on
+/// Runs `program` (`pdftotext` to stdout, `pdfinfo` or `antiword`) on
 /// `path` with a deadline, an address-space limit and capped output.
 fn run_capped(
     program: &'static str,
@@ -163,7 +163,7 @@ fn run_capped(
 
     // Returning early here must still reap: `Child`'s drop does not wait, so a
     // bare `?` would leave a zombie (and the watchdog thread alive) until the
-    // daemon exits — one per unreadable file.
+    // daemon exits, one per unreadable file.
     let Some(mut stdout) = child.stdout.take() else {
         kill_child_tree(&mut child);
         let _ = child.wait();
@@ -272,10 +272,10 @@ fn spawn_capped(
 
 /// Wall-clock deadline for one extraction subprocess, enforced through a pidfd:
 /// a watcher thread polls the pidfd and SIGKILLs on expiry. The pidfd is a
-/// stable handle to that exact process — the liveness wait cannot race a
+/// stable handle to that exact process: the liveness wait cannot race a
 /// recycled PID, and the poll wakes as soon as the child exits. On expiry the
-/// whole process group is killed (the child runs in its own group), matching
-/// what `timeout(1)` did before: helpers the extractor forked die with it.
+/// whole process group is killed (the child runs in its own group), as
+/// `timeout(1)` does: helpers the extractor forked die with it.
 struct SubprocessDeadline {
     watcher: std::thread::JoinHandle<()>,
 }
@@ -308,8 +308,8 @@ impl SubprocessDeadline {
                     let rc = unsafe { libc::poll(&mut fds, 1, remaining_ms) };
                     if rc == 0 {
                         // Deadline reached and the child still runs (the pidfd is not
-                        // readable), so it is unreaped and its process group id — the
-                        // child's own pid — is still valid: group-kill cannot hit a
+                        // readable), so it is unreaped and its process group id (the
+                        // child's own pid) is still valid: group-kill cannot hit a
                         // recycled pid. Also signal through the pidfd for certainty.
                         // SAFETY: kill(-pgid) on the live child's group; the pidfd
                         // signal targets exactly the process the fd was opened for.
@@ -484,7 +484,7 @@ mod tests {
 
     /// The title is escaped in the HTML head; the text in `<pre>` is not.
     #[test]
-    fn htmlmeta_output_splits_into_title_and_text() {
+    fn htmlmeta_splits_title_and_text() {
         let html = "<html><head>\n<title>Fish &amp; chips: &lt;a&gt; &quot;study&quot;</title>\n</head>\n<body>\n<pre>\nA & B </pre> C\n</pre>\n</body>\n</html>\n";
         let (title, body) = split_html_meta(html);
         assert_eq!(title.as_deref(), Some("Fish & chips: <a> \"study\""));
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn pdf_extraction_caps_subprocess_stdout_before_waiting() {
+    fn subprocess_stdout_capped_before_wait() {
         let _env_guard = subprocess_env_guard();
         let dir = temporary_extract_dir("pdfcap");
         let bin = temporary_executable_dir("pdfcap");
@@ -530,7 +530,7 @@ mod tests {
     /// A `.doc` is read by what it holds: OLE2 through `antiword` (argv checked by
     /// a fake one on PATH), RTF saved as `.doc` by the RTF reader, text as text.
     #[test]
-    fn doc_files_go_to_antiword_or_the_rtf_reader_by_content() {
+    fn doc_files_route_by_content() {
         let _env_guard = subprocess_env_guard();
         let dir = temporary_extract_dir("doc");
         let bin = temporary_executable_dir("doc");
@@ -582,7 +582,7 @@ mod tests {
     /// RLIMIT_CPU (2 s for a 1 s setting at half clock), well before the
     /// wall-clock backstop (6 s), and the text it wrote first is kept.
     #[test]
-    fn pdf_extraction_stops_a_spinning_extractor_by_cpu_time() {
+    fn spinning_extractor_stopped_by_cpu_time() {
         let _env_guard = subprocess_env_guard();
         let dir = temporary_extract_dir("pdfspin");
         let bin = temporary_executable_dir("pdfspin");
@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn pdf_extraction_kills_hung_extractor_at_deadline() {
+    fn hung_extractor_killed_at_deadline() {
         let _env_guard = subprocess_env_guard();
         let dir = temporary_extract_dir("pdfhang");
         let bin = temporary_executable_dir("pdfhang");

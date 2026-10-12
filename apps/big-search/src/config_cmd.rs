@@ -184,8 +184,7 @@ pub(super) fn set_config_key(key: &str, value: &str) -> Result<()> {
 /// The literal to write for a yes/no setting.
 ///
 /// A literal, not a parsed value: what goes into the file is text, and building
-/// a `toml::Value` first only to print it again was the service's whole reason
-/// for depending on a TOML parser of its own.
+/// a `toml::Value` only to print it again would need a TOML parser here.
 pub(super) fn parse_bool_value(value: &str) -> Result<String> {
     match value.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok("true".to_string()),
@@ -228,8 +227,8 @@ pub(super) fn string_literal(value: &str) -> String {
 ///
 /// The rewriting itself lives in `big-search-config`, which the desktop's
 /// settings window uses too: one description of the file, so the two ways of
-/// changing it cannot disagree about what a line means. That crate also writes
-/// through a rename, which this used to do in place.
+/// changing it cannot disagree about what a line means. That crate replaces
+/// the file through a rename.
 pub(super) fn set_default_config_literals(values: &[(&str, String)]) -> Result<()> {
     settings::seed_config_template();
     let pairs: Vec<(&str, &str)> = values

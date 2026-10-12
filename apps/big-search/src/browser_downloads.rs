@@ -1,28 +1,26 @@
 //! The download list the web browsers keep, read once at start.
 //!
 //! On a real machine this is where the answer to "where did this file come
-//! from?" actually lives. The freedesktop way — a `user.xdg.origin.url`
-//! extended attribute on the file — was never implemented by Firefox and was
-//! removed from Chrome: on the machine this was written for, exactly one file in
-//! the whole Downloads folder carries it, and it is a test fixture. The
-//! browser's own list, by contrast, holds thousands of rows, and it is the only
-//! place that knows the file saved straight into the home folder came from a
-//! particular site.
+//! from?" actually lives. The freedesktop way, a `user.xdg.origin.url`
+//! extended attribute on the file, was never implemented by Firefox and was
+//! removed from Chrome, so almost no file in a Downloads folder carries it. The
+//! browser's own list holds thousands of rows, and it is the only place that
+//! knows the file saved straight into the home folder came from a particular
+//! site.
 //!
 //! ## Off unless the person asks
 //!
 //! Reading it is gated on `[origin] browser_history` in the configuration file,
-//! which the desktop's search settings window switches, and which is **false**
+//! which the desktop's search settings window switches, and which is false
 //! by default. That list belongs to the browser; nobody expects a search service
 //! to have read it, so it is only read once somebody says so in as many words.
 //!
 //! ## What is kept, and what is refused
 //!
-//! Only the **host** of the address, the date, the kind and the size. Never the
-//! path or the query string: on this machine 950 of the recorded download
-//! addresses carry a query, and 577 of those carry a signed token — an address
-//! that is a credential. A record nobody can leak is better than a record with a
-//! good reason for existing.
+//! Only the host of the address, the date, the kind and the size. Never the
+//! path or the query string: many download addresses carry a signed token in
+//! the query, which makes the address a credential. A record nobody can leak
+//! is better than a record with a good reason for existing.
 //!
 //! ## The file is never copied
 //!
@@ -212,9 +210,9 @@ mod tests {
 
     /// The date a browser records is the date the person sees.
     #[test]
-    fn a_browser_timestamp_becomes_a_real_date() {
-        // A real row from this machine's Chrome history: 2026-09-03 03:49:59
-        // UTC, which is 1 788 407 399 seconds since 1970.
+    fn browser_timestamp_becomes_unix_time() {
+        // A row from a Chrome history: 2026-09-03 03:49:59 UTC, which is
+        // 1 788 407 399 seconds since 1970.
         assert_eq!(webkit_epoch_to_unix(13_432_880_999_211_718), 1_788_407_399);
         assert_eq!(webkit_epoch_to_unix(0), 0);
         assert_eq!(webkit_epoch_to_unix(-5), 0);

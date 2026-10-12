@@ -34,7 +34,7 @@ fn arg(p: &Path) -> &str {
 }
 
 #[test]
-fn suggests_a_free_name_with_the_extension_kept() {
+fn suggests_free_name_keeping_extension() {
     let dir = scratch("suggest");
     let doc = dir.join("scan0001.txt");
     fs::write(&doc, CONTRACT).expect("write");
@@ -108,7 +108,7 @@ fn rename_keeps_the_extension_and_rejects_paths() {
 }
 
 #[test]
-fn a_file_without_text_is_an_error_not_a_guess() {
+fn file_without_text_is_an_error() {
     let dir = scratch("empty");
     let doc = dir.join("image.png");
     fs::write(&doc, [0x89, b'P', b'N', b'G', 0, 0, 0, 0]).expect("write");
@@ -119,7 +119,7 @@ fn a_file_without_text_is_an_error_not_a_guess() {
 }
 
 #[test]
-fn a_document_with_nothing_to_go_on_keeps_its_name() {
+fn uninformative_document_keeps_its_name() {
     let dir = scratch("kept");
     let doc = dir.join("Planilha de horas.txt");
     fs::write(&doc, "12 345 678\n9 10 11\n").expect("write");

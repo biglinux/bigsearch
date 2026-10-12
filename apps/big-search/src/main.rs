@@ -1,4 +1,4 @@
-//! big-search — lean unprivileged search: filename (P1) + incremental (P2) + content (P3).
+//! big-search: lean unprivileged search: filename (P1) + incremental (P2) + content (P3).
 use big_search::{
     config, content, extract, index, ipc, origin, query, scan, settings, state, throttle, watch,
 };
@@ -163,12 +163,10 @@ fn main() -> Result<()> {
     }
 
     // One malloc arena. Our few threads allocate in coordinated bursts, and
-    // glibc's default per-thread arenas fragment those bursts across ~8 pools:
-    // measured 104–125 MB peak reindex RSS vs 63 MB with a single arena, with
-    // no query-latency cost (5–6 ms under churn either way) and equal wall
-    // time. Also benchmarked against jemalloc (70–74 MB), mimalloc (76–78 MB)
-    // and tcmalloc (85 MB) — single-arena glibc wins on the metric that matters
-    // for the 2 GB target machines, with zero extra dependencies.
+    // glibc's default per-thread arenas fragment those bursts across several
+    // pools and raise peak reindex RSS with no gain in query latency or wall
+    // time. Single-arena glibc also beats jemalloc, mimalloc and tcmalloc on
+    // peak RSS, the metric that matters on 2 GB machines, without a dependency.
     // SAFETY: mallopt before any threads are spawned.
     #[cfg(target_env = "gnu")]
     unsafe {
@@ -190,7 +188,7 @@ fn main() -> Result<()> {
 
     // SQLite temp files (large-scan spill B-trees, statement journals) must land
     // somewhere writable. Under the hardened systemd unit (`ProtectSystem=strict`
-    // + `ProtectHome=read-only`) every default candidate — /tmp, /var/tmp, cwd —
+    // + `ProtectHome=read-only`) every default candidate (/tmp, /var/tmp, cwd)
     // is read-only and SQLite fails with SQLITE_IOERR_GETTEMPPATH, aborting the
     // reconcile scan. Point it at our own (always writable) data dir.
     if std::env::var_os("SQLITE_TMPDIR").is_none() {
@@ -609,7 +607,7 @@ fn cmd_daemon() -> Result<()> {
                 .unwrap_or(true);
             // An empty name index is rebuilt from the walk below. The content
             // index is another matter: its rows are kept unless it is empty too,
-            // the same rule as for a full one — a new name schema (which
+            // the same rule as for a full one: a new name schema (which
             // recreates the name index) must not re-extract every document,
             // hours on a slow disk. Rows of files gone by then are pruned after
             // the walk.
@@ -634,7 +632,7 @@ fn cmd_daemon() -> Result<()> {
                     let _ = state.persist();
                     // The sync just deleted every catalogue row whose file is
                     // gone. Their content documents would otherwise keep
-                    // answering searches, so clear them before serving — and
+                    // answering searches, so clear them before serving, and
                     // uncapped, because a first start after an upgrade can face
                     // millions of them and the per-pass cap would take days.
                     match content::prune_orphaned_content(&watch_content_index, usize::MAX) {
@@ -644,7 +642,7 @@ fn cmd_daemon() -> Result<()> {
                         }
                         Err(e) => log::warn!("content prune at start failed: {e:#}"),
                     }
-                    // Documents no state row references at all — left behind by
+                    // Documents no state row references at all, left behind by
                     // every past `clear_content_state`. Only a walk of the index
                     // itself finds them.
                     match content::prune_unreferenced_content_docs(&watch_content_index) {
@@ -911,7 +909,7 @@ fn cmd_origin(tokens: &[String]) -> Result<()> {
 /// `versions PATH`: what earlier states of this document are kept.
 ///
 /// The way this whole subsystem is used, tested and supported before any window
-/// exists — and the way somebody helping over the telephone can find out whether
+/// exists, and the way somebody helping over the telephone can find out whether
 /// a machine keeps versions at all.
 fn cmd_versions(tokens: &[String]) -> Result<()> {
     let Some(path) = single_arg(tokens, "versions PATH")? else {
@@ -1112,7 +1110,7 @@ fn print_origin(path: &str, origin: Option<&big_indexd_client::OriginProvenance>
 }
 
 /// Send a lifecycle command (`pause`/`resume`/`rebuild`) to the running daemon.
-/// These need a live daemon — without one there is nothing to control. The daemon
+/// These need a live daemon: without one there is nothing to control. The daemon
 /// accepts them asynchronously (it replies at once; the work runs in the watcher).
 fn cmd_lifecycle(action: &str) -> Result<()> {
     let client = daemon_client()?;

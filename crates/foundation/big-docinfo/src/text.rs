@@ -57,7 +57,7 @@ pub fn norm(s: &str) -> String {
     out
 }
 
-/// Lines split on every line boundary Python's `str.splitlines` knows — PDF text
+/// Lines split on every line boundary Python's `str.splitlines` knows: PDF text
 /// separates pages with a form feed, which `str::lines` would keep.
 pub fn lines(s: &str) -> Vec<&str> {
     let mut out = Vec::new();

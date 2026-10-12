@@ -64,7 +64,7 @@ fn await_content_result(
     needle: &str,
 ) -> bool {
     // The daemon paces its backfill by the machine's load and rests 30 s between
-    // batches when the machine is busy (`throttle::pause_after`, `Load::Heavy`) —
+    // batches when the machine is busy (`throttle::pause_after`, `Load::Heavy`);
     // a parallel build is enough. The wait covers one such rest; a calm machine
     // answers in about a second.
     let deadline = Instant::now() + Duration::from_secs(45);
@@ -81,6 +81,33 @@ fn await_content_result(
             return true;
         }
         sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Send one lifecycle command; whether the daemon accepted it.
+fn command_accepted(sock: &Path, cmd: &str) -> bool {
+    send_daemon_request(sock, &format!("{{\"v\":2,\"cmd\":\"{cmd}\"}}")).contains("\"kind\":\"ok\"")
+}
+
+/// The `indexed` count a status reply reports.
+fn indexed_count(sock: &Path) -> Option<u64> {
+    let reply = send_daemon_request(sock, "{\"v\":2,\"cmd\":\"status\"}");
+    let rest = &reply[reply.find("\"indexed\":")? + "\"indexed\":".len()..];
+    rest[..rest.find(|c: char| !c.is_ascii_digit())?]
+        .parse()
+        .ok()
+}
+
+/// Poll `status` until `indexed` reaches `want`. A rebuild walks the disk in
+/// the background, as slowly as the backfill on a busy machine.
+fn await_indexed(sock: &Path, want: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline {
+        if indexed_count(sock) == Some(want) {
+            return true;
+        }
+        sleep(Duration::from_millis(50));
     }
     false
 }
@@ -133,49 +160,30 @@ fn pause_resume_rebuild_cycle() {
         send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"status\"}").contains("\"paused\":false")
     );
 
-    let indexed = |reply: &str| -> Option<u64> {
-        let rest = &reply[reply.find("\"indexed\":")? + "\"indexed\":".len()..];
-        rest[..rest.find(|c: char| !c.is_ascii_digit())?]
-            .parse()
-            .ok()
-    };
-    let before = indexed(&send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"status\"}"))
-        .expect("status reports indexed");
+    let before = indexed_count(&sock).expect("status reports indexed");
 
     // Pause → status reports paused.
-    assert!(send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"pause\"}").contains("\"kind\":\"ok\""));
+    assert!(command_accepted(&sock, "pause"));
     assert!(await_paused(&sock, true), "daemon did not report paused");
 
     // A file written while paused produces no indexing; only the rebuild's
     // walk can catalogue it.
     std::fs::write(home.join("docs/added.txt"), "beta").unwrap();
+    assert!(command_accepted(&sock, "rebuild"));
     assert!(
-        send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"rebuild\"}").contains("\"kind\":\"ok\"")
-    );
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let mut rebuilt = false;
-    while Instant::now() < deadline {
-        let status_reply = send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"status\"}");
-        if indexed(&status_reply) == Some(before + 1) {
-            rebuilt = true;
-            break;
-        }
-        sleep(Duration::from_millis(50));
-    }
-    assert!(
-        rebuilt,
+        await_indexed(&sock, before + 1),
         "rebuild did not catalogue the file written while paused"
     );
 
     // Resume → status reports running again.
-    assert!(send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"resume\"}").contains("\"kind\":\"ok\""));
+    assert!(command_accepted(&sock, "resume"));
     assert!(await_paused(&sock, false), "daemon did not report resumed");
 
     std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
-fn daemon_content_backfill_continues_after_first_limited_batch() {
+fn content_backfill_continues_past_batch() {
     let base = scratch::scratch_dir("bs-content-backfill");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
@@ -240,7 +248,7 @@ fn moved_folder_leaves_the_index() {
     );
     assert!(wait_socket(&sock), "daemon never bound socket");
     // `total` counts index postings before any file is stat'ed, so a document
-    // left behind for a file that no longer exists still counts.
+    // left behind for a file that has disappeared still counts.
     let total = || {
         let reply = send_daemon_request(
             &sock,

@@ -11,7 +11,7 @@
 //!
 //! A configuration with no folders in it means "my home folder", and the list
 //! says so rather than showing nothing. Writing the first folder writes the home
-//! folder with it — [`big_search_config::add_source`] does that, so adding an
+//! folder with it; [`big_search_config::add_source`] does that, so adding an
 //! external disk cannot quietly remove the person's own files from the search.
 
 use std::cell::RefCell;
@@ -124,10 +124,20 @@ impl Folders {
             .subtitle(glib::markup_escape_text(&subtitle_for(source)))
             .build();
         // The row carries its own folder, so the answer about which disks are
-        // plugged in — which arrives later, from the service — knows which row
-        // it is talking about.
+        // plugged in, which arrives later from the service, knows which row it
+        // is talking about.
         row.set_widget_name(&source.path.to_string_lossy());
+        row.add_suffix(&self.content_switch(source, reads_content_by_default));
+        row.add_suffix(&self.remove_button(&source.path));
+        row
+    }
 
+    /// The switch for reading the text inside one folder's files.
+    fn content_switch(
+        self: &Rc<Self>,
+        source: &big_search_config::SourceEntry,
+        reads_content_by_default: bool,
+    ) -> gtk::Switch {
         let inside = gtk::Switch::builder()
             .valign(gtk::Align::Center)
             .active(source.content.unwrap_or(reads_content_by_default))
@@ -164,8 +174,10 @@ impl Folders {
                 glib::Propagation::Proceed
             });
         }
-        row.add_suffix(&inside);
+        inside
+    }
 
+    fn remove_button(self: &Rc<Self>, path: &Path) -> gtk::Button {
         let remove = gtk::Button::builder()
             .icon_name("list-remove-symbolic")
             .valign(gtk::Align::Center)
@@ -177,11 +189,10 @@ impl Folders {
         ))]);
         {
             let folders = Rc::clone(self);
-            let path = source.path.clone();
+            let path = path.to_path_buf();
             remove.connect_clicked(move |_| folders.remove_folder(&path));
         }
-        row.add_suffix(&remove);
-        row
+        remove
     }
 
     /// Ask the service which of these folders it can reach, so an unplugged

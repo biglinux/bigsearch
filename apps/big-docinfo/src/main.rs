@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 BigLinux contributors
 // SPDX-License-Identifier: MIT
 
-//! `big-docinfo` — suggest a name for a document from what it says.
+//! `big-docinfo`: suggest a name for a document from what it says.
 //!
 //! ```text
 //! big-docinfo FILE              what the document is, and a suggested name
@@ -70,26 +70,26 @@ fn describe(path: &Path, output: Output) -> Result<()> {
         declared_title: file.declared_title.as_deref(),
         prominent: &file.prominent,
     };
-    let info = analyze(&file.text, ext, &hints);
+    let analysis = analyze(&file.text, ext, &hints);
     // A suggestion with nothing to say ("documento.odt") would say less than the
     // current name, so the current name stays.
-    let kept =
-        info.suggested_name == format!("documento.{ext}") || info.suggested_name == "documento";
+    let kept = analysis.suggested_name == format!("documento.{ext}")
+        || analysis.suggested_name == "documento";
     let free = if kept {
         path.file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
     } else {
-        free_name(path, &info.suggested_name, ext)
+        free_name(path, &analysis.suggested_name, ext)
     };
     match output {
         Output::Json => {
             let value = serde_json::json!({
-                "kind": info.kind,
-                "date": info.date,
-                "entity": info.entity,
-                "title": info.title,
-                "highlights": info.highlights,
-                "suggested_name": info.suggested_name,
+                "kind": analysis.kind,
+                "date": analysis.date,
+                "entity": analysis.entity,
+                "title": analysis.title,
+                "highlights": analysis.highlights,
+                "suggested_name": analysis.suggested_name,
                 "free_name": free,
                 "kept_name": kept,
             });
@@ -99,10 +99,10 @@ fn describe(path: &Path, output: Output) -> Result<()> {
         Output::Text => {
             let show =
                 |label: &str, value: Option<&str>| println!("{label}: {}", value.unwrap_or("—"));
-            show("Tipo", info.kind.map(kind_label));
-            show("Data", info.date.as_deref());
-            show("Entidade", info.entity.as_deref());
-            show("Título", info.title.as_deref());
+            show("Tipo", analysis.kind.map(kind_label));
+            show("Data", analysis.date.as_deref());
+            show("Entidade", analysis.entity.as_deref());
+            show("Título", analysis.title.as_deref());
             if kept {
                 println!(
                     "Não encontrei tipo nem título neste documento; o nome atual foi mantido."

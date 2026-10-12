@@ -203,7 +203,7 @@ const RULES: &[(&str, &str, &str)] = &[
 ];
 
 /// All rules as one alternation, one group per rule: the leftmost match wins and,
-/// at the same position, the earlier rule — the tie order of `RULES`. One
+/// at the same position, the earlier rule (the tie order of `RULES`). One
 /// automaton instead of one per rule keeps start-up time and memory small.
 static COMBINED: LazyLock<Regex> = LazyLock::new(|| {
     // Groups inside a rule become non-capturing, so group i + 1 is rule i.
@@ -262,7 +262,7 @@ pub fn opens_with_kind(normalized: &str) -> bool {
     COMBINED.find(normalized).is_some_and(|m| m.start() == 0)
 }
 
-/// The word a file name opens with for `kind`, in the language that named it —
+/// The word a file name opens with for `kind`, in the language that named it,
 /// only for kinds whose own words are evidence enough (an invoice says
 /// "nota fiscal"); an article or a report is named by its title alone.
 pub fn label(kind: &str, lang: &str) -> Option<&'static str> {

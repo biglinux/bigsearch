@@ -1,8 +1,8 @@
 //! The versions store against a real filesystem.
 //!
 //! This is the one test that exercises `FICLONE` itself, so it needs a disk that
-//! can share blocks. **On a disk that cannot — ext4, tmpfs, a container's
-//! overlay — it declares itself unsupported and passes**, because the suite has
+//! can share blocks. On a disk that cannot (ext4, tmpfs, a container's
+//! overlay) it declares itself unsupported and passes, because the suite has
 //! to be green on every machine this ships from, and the feature's whole answer
 //! there is "this computer keeps no versions".
 //!
@@ -24,7 +24,7 @@ use big_search::history::{History, Reason, Support, Unavailable};
 ///
 /// Not under `/tmp`: that is usually `tmpfs`, which cannot share blocks, and the
 /// test would skip itself on the very machine it was meant to cover. And no
-/// hidden component anywhere in the path — the scanner excludes those, so the
+/// hidden component anywhere in the path: the scanner excludes those, so the
 /// documents would not be eligible.
 fn scratch_home() -> PathBuf {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("history-store");
@@ -51,7 +51,7 @@ fn write_by_replacing(path: &Path, contents: &str) {
 }
 
 #[test]
-fn a_version_survives_the_save_that_replaced_it() {
+fn versions_survive_replacing_saves() {
     let home = scratch_home();
     // SAFETY: this test binary is its own process and sets these once, before
     // anything reads them.
@@ -66,8 +66,8 @@ fn a_version_survives_the_save_that_replaced_it() {
 
     let mut history = History::open(&big_search_config::FileHistory::default());
     // `Saved`, not `Baseline`: a document created while the service is watching
-    // earns its first version from the watcher, and that is the path that broke
-    // once — the state it started from has to survive thinning either way.
+    // earns its first version from the watcher, and the state it started from
+    // has to survive thinning either way.
     let kept = history
         .save_version(&document, Reason::Saved)
         .expect("save the first version");
@@ -148,8 +148,8 @@ fn a_version_survives_the_save_that_replaced_it() {
         "the history did not follow the renamed document: {after_rename:?}"
     );
     // The state it started from is still there, under the new name. Two saves
-    // inside the same hour share one slot, so the middle one is gone — that is
-    // the thinning working, and the first version surviving it is the promise.
+    // inside the same hour share one slot, so thinning drops the middle one and
+    // keeps the first.
     assert_eq!(after_rename.len(), 1, "{after_rename:?}");
     let first = after_rename.last().expect("the oldest version");
     assert_eq!(
@@ -159,13 +159,13 @@ fn a_version_survives_the_save_that_replaced_it() {
 
     // The state a document was in right before somebody went back to an older
     // version survives the next save, minutes later, in the same hour slot.
-    // The dialog that asks promises exactly that, and thinning used to break it.
+    // The dialog that asks promises exactly that.
     write_by_replacing(&renamed, "versão D");
     history
         .save_version(&renamed, Reason::Saved)
         .expect("the watcher keeps this state first");
     // The file manager asks for the same state again, right before writing an
-    // older version over it. Nothing new to clone — and that row is the undo.
+    // older version over it. Nothing new to clone, and that row is the undo.
     history
         .save_version(&renamed, Reason::BeforeRestore)
         .expect("keep the state before going back");

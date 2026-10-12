@@ -6,8 +6,8 @@
 //! RTF is text with control words: `\par` ends a paragraph, `\'e9` is a byte in
 //! the document's ANSI code page (read as Windows-1252, the common one), `\u233`
 //! a Unicode character followed by `\ucN` fallback characters to skip. Groups
-//! that are not text — fonts, colours, styles, pictures, embedded objects and
-//! every `{\* …}` destination — are skipped whole.
+//! that are not text (fonts, colours, styles, pictures, embedded objects and
+//! every `{\* …}` destination) are skipped whole.
 
 /// Destinations whose contents are not the document's text.
 const SKIPPED: &[&str] = &[
@@ -218,7 +218,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rtf_reads_as_text_with_its_declared_title() {
+    fn rtf_reads_text_and_title() {
         let rtf =
             br"{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0 Arial;}}{\colortbl;\red0\green0\blue0;}
 {\info{\title Ata da reuni\'e3o}{\author Bruno}}{\*\generator Writer;}

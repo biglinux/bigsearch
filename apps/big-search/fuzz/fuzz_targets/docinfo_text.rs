@@ -13,8 +13,8 @@ fuzz_target!(|data: &[u8]| {
         declared_title: text.lines().next(),
         prominent: &prominent,
     };
-    let info = big_docinfo::analyze(text, "pdf", &hints);
-    let name = &info.suggested_name;
+    let analysis = big_docinfo::analyze(text, "pdf", &hints);
+    let name = &analysis.suggested_name;
     assert!(!name.contains(['/', '\0']), "unsafe name {name:?}");
     assert!(name.ends_with(".pdf") && name.len() > ".pdf".len(), "extension lost in {name:?}");
     assert!(name.chars().count() <= 120 + ".pdf".len(), "name too long: {name:?}");

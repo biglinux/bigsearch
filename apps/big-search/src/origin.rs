@@ -98,13 +98,11 @@ pub struct OriginSettings {
 }
 
 impl OriginSettings {
-    /// **The configuration file decides; the environment only overrides it.**
+    /// The configuration file decides; the environment only overrides it.
     ///
-    /// These used to be environment variables and nothing else, with the service
-    /// unit pinning them — so the desktop's own switch for "remember where files
-    /// came from" would have been a control wired to nothing. The file is now
-    /// the answer, and the variables stay for a developer running the service by
-    /// hand.
+    /// The desktop's switch for "remember where files came from" writes the
+    /// file, so a value pinned in the service unit would leave that switch wired
+    /// to nothing. The variables are for a developer running the service by hand.
     fn load() -> Self {
         let configured = big_search_config::read().origin;
         Self {
@@ -321,7 +319,7 @@ impl OriginWriter {
         self.register_web_download_at(path, domain, now_secs())
     }
 
-    /// The same, for a download whose date is known — from the list a browser
+    /// The same, for a download whose date is known: from the list a browser
     /// keeps, where the file may have arrived months ago.
     ///
     /// The stored `label` stays what the rest of this file writes, for the
@@ -361,7 +359,7 @@ impl OriginWriter {
     ///
     /// A browser's download list is thousands of rows, read in one go when the
     /// service starts. One at a time is one commit each against a database that
-    /// syncs — thousands of them before the first file is even indexed.
+    /// syncs, thousands of them before the first file is even indexed.
     ///
     /// Returns how many were recorded.
     pub fn register_web_downloads_at(&self, downloads: &[(PathBuf, String, i64)]) -> Result<usize> {
@@ -637,9 +635,8 @@ fn select_record(conn: &Connection, path: &str) -> Result<Option<OriginRecord>> 
         return Ok(by_path);
     }
     // Renamed, or moved by something that did not tell us. The file is the same
-    // file — same device, same inode — and where it came from did not change
-    // because somebody gave it a new name. Without this, renaming a downloaded
-    // document in any program erased the only record of where it came from.
+    // file (same device, same inode), and where it came from did not change
+    // because somebody gave it a different name.
     select_by_identity(conn, Path::new(path))
 }
 
@@ -690,13 +687,12 @@ fn select_records(
 
 /// Fill in the paths the name lookup missed, by what the file *is*.
 ///
-/// Renaming a downloaded document used to erase where it came from everywhere
-/// but the properties dialog, which has done this since the beginning: the row
-/// still holds the old name, and the file is the same file — same device, same
-/// inode. The record found this way is filed under the name that was *asked*
-/// for, not the stale one it is stored under.
+/// A downloaded document renamed in another program keeps its origin: the row
+/// still holds the earlier name, and the file is the same file (same device,
+/// same inode). The record found this way is filed under the name that was
+/// asked for, not the stale one it is stored under.
 ///
-/// The price, the same one the dialog already pays: on a filesystem that reuses
+/// The price, the same the properties dialog pays: on a filesystem that reuses
 /// inode numbers, a deleted download's origin can land on an unrelated new file.
 fn attach_by_identity(
     conn: &Connection,
@@ -981,12 +977,11 @@ mod tests {
         dir.join("origin.sqlite")
     }
 
-    /// Another writer holding the lock for a while — the watcher set aside by
-    /// the scheduler mid-transaction — delays a writer instead of failing it.
-    /// Opening writes (the schema), and it is where the daemon's IPC test
-    /// failed with "database is locked" under load.
+    /// Another writer holding the lock for a while (the watcher set aside by
+    /// the scheduler mid-transaction) delays a writer instead of failing it.
+    /// Opening writes the schema, so it waits too.
     #[test]
-    fn a_writer_waits_out_another_writers_transaction() {
+    fn writer_waits_for_open_transaction() {
         let db = temporary_origin_path("busy");
         drop(OriginWriter::open(db.clone()).unwrap());
         let holder = Connection::open(&db).unwrap();
@@ -1020,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_schema_and_returns_none_for_unknown_path() {
+    fn fresh_store_has_no_origin() {
         let db = temporary_origin_path("schema");
         let writer = OriginWriter::open(db.clone()).unwrap();
         assert!(writer.origin(Path::new("/missing")).unwrap().is_none());
@@ -1031,7 +1026,7 @@ mod tests {
     /// Only the site survives: no credential, path or query, and nothing that
     /// is not a host name or IP literal.
     #[test]
-    fn only_the_site_is_kept_from_an_address() {
+    fn address_keeps_only_the_site() {
         let cases = [
             ("https://Example.com/files/a.pdf", Some("example.com")),
             ("https://user@[2001:db8::1]/a", Some("2001:db8::1")),
@@ -1094,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn download_dir_falls_back_to_home_downloads() {
+    fn downloads_default_to_home_downloads() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _home = EnvVarGuard::set("HOME", "/tmp/bs-origin-home");
         let _config = EnvVarGuard::unset("XDG_CONFIG_HOME");
@@ -1106,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn xdg_origin_probe_only_accepts_completed_direct_downloads() {
+    fn probe_accepts_completed_direct_downloads() {
         let base =
             std::env::temp_dir().join(format!("bs-origin-download-probe-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();

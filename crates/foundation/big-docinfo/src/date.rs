@@ -62,7 +62,7 @@ static DAYS_OF: LazyLock<Regex> = LazyLock::new(|| {
     ))
     .expect("valid")
 });
-/// Words before a date that make it NOT the document's date (pt, es, en).
+/// Words before a date that rule it out as the document's date (pt, es, en).
 static AGAINST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"venc|validade|valid[ao] ate|nasc|\bdn\b|inicio|termino|prazo|\bate\b|a partir|periodo|referen|leitura|coleta|vigen|proxim|previst|lancamento|entrega",
@@ -138,8 +138,9 @@ static CITED_ACT: LazyLock<Regex> = LazyLock::new(|| {
     ))
     .expect("valid")
 });
-/// "Porto Alegre, ", "Lyon, le ", "Москва, ", "北京，" — a place and a comma, alone
-/// before the date: a capital in scripts with case, any letter in those without.
+/// A place and a comma alone before the date ("Porto Alegre, ", "Lyon, le ",
+/// "Москва, ", "北京，"): a capital in scripts with case, any letter in those
+/// without.
 static SIGNATURE_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         // Place length is checked in code (`signature_line`): a counted repeat of
@@ -655,7 +656,7 @@ mod tests {
 
     /// In English "04/10/2026" is April or October depending on the country.
     #[test]
-    fn english_swappable_numeric_dates_are_not_guessed() {
+    fn english_swappable_dates_stay_unknown() {
         let us = "This agreement is made by and between the parties for the lease of the apartment. Signed on 04/10/2026.";
         assert_eq!(document_date(us), None);
         let unambiguous = "This agreement is made by and between the parties for the lease of the apartment. Signed on 10/24/2026.";
@@ -695,7 +696,7 @@ mod tests {
         assert_eq!(document_date(own).as_deref(), Some("2020-04-02"));
     }
 
-    /// A date broken across two lines used to slice the text backwards.
+    /// A date broken across two lines reads as one date.
     #[test]
     fn a_date_across_a_line_break() {
         let text = "Relatório anual\n26 de\nmaio de 2026\nTexto do relatório.";

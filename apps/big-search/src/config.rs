@@ -26,10 +26,9 @@ pub fn data_dir() -> PathBuf {
 /// Everything under it describes the user's private files: `state.sqlite` is a
 /// complete list of every path in their home, and the content index holds the
 /// extracted *text* of their documents. SQLite and the walker create their files
-/// through the process umask, which on this system is `0022` — so `state.sqlite`
-/// and `content-signatures.json` were mode 0644 inside a 0755 directory, and any
-/// other local account could read them. The Tantivy `index/` directory was
-/// already 0700, which is why only it escaped.
+/// through the process umask, typically `0022`, which leaves `state.sqlite` and
+/// `content-signatures.json` readable by every local account. Tantivy creates
+/// `index/` as 0700 on its own; nothing else does.
 ///
 /// Restricting the directory covers every file inside it, present and future,
 /// without having to remember a mode at each creation site.
@@ -64,13 +63,13 @@ pub fn state_db_path() -> PathBuf {
     data_dir().join("state.sqlite")
 }
 
-/// Cache of content fingerprints already extracted or intentionally skipped.
+/// Cache of content fingerprints already extracted or skipped on purpose.
 pub fn content_signature_path() -> PathBuf {
     data_dir().join("content-signatures.json")
 }
 
-/// Origin/provenance store. This is intentionally separate from Tantivy and
-/// the state database so normal search does not depend on it.
+/// Origin/provenance store, kept apart from Tantivy and the state database so
+/// normal search does not depend on it.
 pub fn origin_db_path() -> PathBuf {
     data_dir().join("origin.sqlite")
 }
@@ -127,10 +126,9 @@ pub fn runtime_subdir() -> Option<PathBuf> {
 
 /// The session's private runtime directory, or nothing.
 ///
-/// No `/tmp` fallback. The socket used to land in `/tmp/biglinux` without
-/// `XDG_RUNTIME_DIR`, and `big_indexd_client::default_socket` has no fallback at
-/// all — so the service was listening where no program looks, in a directory any
-/// local account can create first. Refusing is the honest failure.
+/// No `/tmp` fallback: `big_indexd_client::default_socket` has none either, so a
+/// socket there would listen where no client looks, in a directory any local
+/// account can create first.
 fn runtime_dir() -> Option<PathBuf> {
     // An empty or relative value is unset (XDG Base Directory spec), as the
     // client reads it.

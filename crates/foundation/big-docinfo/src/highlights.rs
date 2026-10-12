@@ -6,7 +6,7 @@
 //! Nothing is rewritten, so nothing can be invented: sentences are scored by how
 //! close they are to the document as a whole (TF-IDF, cosine to the centroid),
 //! picked greedily against redundancy (MMR) up to about 90 words, and shown in
-//! reading order. Documents made of short lines — bills, forms, lists — get no
+//! reading order. Documents made of short lines (bills, forms, lists) get no
 //! preview: their fields say more than any sentence.
 
 use std::collections::HashMap;

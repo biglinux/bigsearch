@@ -4,7 +4,7 @@
 //! An e-mail message saved as a file (`.eml`, RFC 5322 with MIME): its headers
 //! and the text of its body, decoded.
 //!
-//! The text keeps the headers a reader looks at — Subject, From, To, Date — as
+//! The text keeps the headers a reader looks at (Subject, From, To, Date) as
 //! lines, then the body: the plain-text part when there is one, else the HTML
 //! part read as text. Base64 and quoted-printable bodies and RFC 2047 encoded
 //! headers (`=?UTF-8?B?…?=`) are decoded; attachments are left out. The subject
@@ -15,7 +15,7 @@ const MAX_DEPTH: usize = 6;
 
 /// The text of a message and its subject.
 ///
-/// The message is read as Latin-1 — one character per byte, nothing lost — so it
+/// The message is read as Latin-1 (one character per byte, nothing lost) so it
 /// can be split into headers and parts before each body is decoded by its own
 /// charset.
 pub(crate) fn read_eml(bytes: &[u8]) -> Option<(String, Option<String>)> {
@@ -164,7 +164,7 @@ fn raw_text(latin1: &str) -> String {
 }
 
 /// Bytes in a charset as text: UTF-8 (lossy), else Latin-1 / Windows-1252,
-/// byte for character — what old mail clients send.
+/// byte for character, which is what old mail clients send.
 fn decode_charset(bytes: &[u8], charset: Option<&str>) -> String {
     let latin = charset.is_some_and(|c| {
         let c = c.to_ascii_lowercase();
@@ -279,7 +279,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_multipart_message_reads_as_headers_and_plain_text() {
+    fn multipart_reads_headers_and_plain_text() {
         let eml = "From: =?UTF-8?B?Sm/Do28=?= <joao@example.org>\r\n\
 To: maria@example.org\r\n\
 Subject: =?iso-8859-1?Q?Or=E7amento_da?=\r\n =?UTF-8?Q?_reforma?=\r\n\
@@ -306,7 +306,7 @@ Content-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n--b1--\r\n";
     }
 
     #[test]
-    fn base64_html_bodies_and_latin1_text_decode() {
+    fn encoded_bodies_and_charsets_decode() {
         let eml = "Subject: Aviso\nContent-Type: text/html; charset=utf-8\nContent-Transfer-Encoding: base64\n\nPHA+UmV1bmnDo288L3A+\n";
         let (text, _) = read_eml(eml.as_bytes()).expect("text");
         assert!(text.contains("Reunião"), "{text}");

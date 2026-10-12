@@ -237,7 +237,7 @@ fn classify_fstype(fstype: &str) -> MountKind {
 }
 
 /// Sort canonical paths and drop any that is equal to, or nested under, an
-/// earlier (shorter) one — leaving a disjoint set so the walk scans each subtree
+/// earlier (shorter) one, leaving a disjoint set so the walk scans each subtree
 /// exactly once.
 fn prune_nested(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
     roots.sort();
@@ -259,7 +259,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_roots_expands_top_level_symlinks_and_prunes_nested() {
+    fn resolve_roots_expands_and_prunes() {
         use std::os::unix::fs::symlink;
 
         let base = std::env::temp_dir().join(format!("lsearch-roots-{}", std::process::id()));
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn personal_symlink_policy_derives_windows_user_dirs_only() {
+    fn symlink_policy_takes_windows_user_dirs() {
         use std::os::unix::fs::symlink;
 
         let base = std::env::temp_dir().join(format!("lsearch-winlink-{}", std::process::id()));
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn personal_symlink_policy_derives_linux_home_dirs_only() {
+    fn symlink_policy_takes_linux_home_dirs() {
         use std::os::unix::fs::symlink;
 
         let base = std::env::temp_dir().join(format!("lsearch-linuxlink-{}", std::process::id()));
@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn personal_symlink_policy_accepts_plain_local_data_dir() {
+    fn symlink_policy_accepts_local_data_dir() {
         use std::os::unix::fs::symlink;
 
         let base = std::env::temp_dir().join(format!("lsearch-datalink-{}", std::process::id()));
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_classification_rejects_network_and_virtual_mounts() {
+    fn network_and_virtual_mounts_are_rejected() {
         assert_eq!(classify_fstype("ext4"), MountKind::Local);
         assert_eq!(classify_fstype("ntfs3"), MountKind::Local);
         assert_eq!(classify_fstype("cifs"), MountKind::Network);

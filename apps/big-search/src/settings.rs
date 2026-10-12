@@ -43,7 +43,7 @@ const GIB: u64 = 1 << 30;
 pub const LOW_MEMORY_THRESHOLD_BYTES: u64 = 6 * GIB;
 
 /// A resolved indexing source: a directory, its extraction policy, and the
-/// device identity used to recognise it across (un)mounts.
+/// device identity that recognises it across (un)mounts.
 #[derive(Debug, Clone)]
 pub struct Source {
     pub path: PathBuf,
@@ -300,7 +300,7 @@ fn cgroup_limit_bytes(text: &str) -> Option<u64> {
     text.trim().parse().ok()
 }
 
-/// Adaptive per-file extracted text cap. This replaced the old fixed 1 MiB cap.
+/// Adaptive per-file extracted text cap.
 pub fn extract_max_bytes() -> usize {
     let configured_mb = env_u64("BIG_SEARCH_EXTRACT_MAX_MB")
         .unwrap_or_else(|| read_config().defaults.extract_max_mb);
@@ -391,7 +391,7 @@ fn env_u64(name: &str) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
-/// Display name of the source owning `path` (empty if none) — stored on the doc
+/// Display name of the source owning `path` (empty if none). Stored on the doc
 /// so a hit can report which device it lives on, even while offline.
 pub fn source_name(path: &Path) -> String {
     sources()
@@ -621,7 +621,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cgroup_capacity_controls_extraction_and_low_memory_defaults() {
+    fn cgroup_capacity_sets_low_memory_defaults() {
         // A large host running a 768 MiB indexer must use the small policy.
         let capacity = [64 * GIB, 768 * MIB, GIB].into_iter().min();
         assert!(low_memory_capacity(capacity));
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_readings_reject_what_they_cannot_trust() {
+    fn untrusted_memory_readings_are_rejected() {
         assert_eq!(
             mem_total_bytes("MemTotal: 1024 kB\nMemFree: 4 kB\n"),
             Some(1_048_576)
@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn config_parses_defaults_and_per_source_overrides() {
+    fn config_parses_per_source_overrides() {
         let parsed_config_file: ConfigFile = big_search_config::parse(
             r#"
             [defaults]
@@ -679,7 +679,7 @@ mod tests {
         )
         .unwrap();
         assert!(!parsed_config_file.defaults.content); // overridden
-        assert!(!parsed_config_file.defaults.metadata); // default-off; the unit no longer forces it
+        assert!(!parsed_config_file.defaults.metadata); // default-off; the unit leaves it unset
         assert!(parsed_config_file.defaults.follow_symlinks);
         assert!(matches!(
             parsed_config_file.defaults.symlink_policy,
@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_booleans_accept_explicit_on_and_off() {
+    fn environment_booleans_accept_on_off() {
         // A name nothing else reads, so a content test running alongside never
         // sees extraction turned off.
         const NAME: &str = "BIG_SEARCH_TEST_BOOL";

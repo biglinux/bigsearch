@@ -22,7 +22,7 @@ fn main() {
         }
     }
 
-    // First page only — virtual scroll would request the rest via `next_offset`.
+    // First page only; virtual scroll would request the rest via `next_offset`.
     let page = match client.query(
         &query,
         "both",

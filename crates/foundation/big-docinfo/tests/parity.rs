@@ -3,10 +3,9 @@
 
 //! Every field of every fixture document, against a recorded answer.
 //!
-//! `fixtures/expected.jsonl` started as the answers of the Python reference that
-//! was measured on the evaluation corpus; the crate matched it field for field.
-//! Behaviour now changes here first, measured on that corpus, and the answers are
-//! re-recorded on purpose: `BIG_DOCINFO_BLESS=1 cargo test -p big-docinfo`.
+//! `fixtures/expected.jsonl` holds the recorded answers. A behaviour change is
+//! measured on the evaluation corpus, and the answers are re-recorded with
+//! `BIG_DOCINFO_BLESS=1 cargo test -p big-docinfo`.
 //! The public documents of the corpus carry real names and stay out of this
 //! repository; point `BIG_DOCINFO_CORPUS` at the corpus `docs/` directory and
 //! `BIG_DOCINFO_EXPECTED` at a recorded file to check them (`cargo test -- --ignored`).

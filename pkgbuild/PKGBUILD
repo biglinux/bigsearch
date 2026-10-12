@@ -1,10 +1,9 @@
 # Maintainer: Bruno Gonçalves <bigbruno@gmail.com>
 # shellcheck shell=bash disable=SC2034,SC2154
 #
-# ─── Offline-first build ──────────────────────────────────────────────────
-# When this PKGBUILD lives inside a checkout, the working tree beside
-# pkgbuild/ is mirrored into ${srcdir} instead of cloning from GitHub.
-# CI/AUR builds fall back to git+url. Force network: `BIGSEARCH_FORCE_GIT=1`.
+# Inside a checkout, the working tree beside pkgbuild/ is mirrored into
+# ${srcdir} instead of cloned, so local edits build without a push. Anywhere
+# else, or with BIGSEARCH_FORCE_GIT=1, the source is cloned from ${url}.
 
 pkgbase=bigsearch
 pkgname=(big-search big-docinfo)
@@ -15,7 +14,6 @@ url="https://github.com/biglinux/bigsearch"
 license=('MIT')
 makedepends=('cargo' 'git' 'pkgconf' 'python' 'rsync')
 
-# ─── Local-source detection ───────────────────────────────────────────────
 _local_root=""
 if [ "${BIGSEARCH_FORCE_GIT:-0}" != "1" ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
     _candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"
@@ -72,8 +70,8 @@ check() {
     # Doctests run binaries from TMPDIR, which may be mounted noexec.
     export TMPDIR="${srcdir}/test-tmp"
     mkdir -p "${TMPDIR}"
-    # The daemon IPC integration tests start real daemons on Unix sockets;
-    # they run in CI, not in makepkg.
+    # The integration tests that start real daemons on Unix sockets run in CI,
+    # not in makepkg.
     cargo test --frozen --release -p big-search --lib --bins --test cli
     cargo test --frozen --release -p big-search --doc
     cargo test --frozen --release -p big-docinfo-cli -p big-docinfo

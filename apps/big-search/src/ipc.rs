@@ -1,6 +1,6 @@
 //! Server side of the big-indexd protocol: accept connections, admit same-UID
 //! peers, parse newline-delimited versioned requests, and reply. The wire types
-//! and the client live in the shared `big-indexd-client` crate — this module
+//! and the client live in the shared `big-indexd-client` crate; this module
 //! only serves.
 use crate::watch::{WatchControlCommand, WatchMessage};
 use crate::{config, index, origin, query, settings};
@@ -30,7 +30,7 @@ pub struct Control {
 }
 
 /// Upper bound on a single request line. A query is a few bytes; this only refuses a
-/// client that streams an endless line (local DoS — the socket is 0600, same-user).
+/// client that streams an endless line (local DoS; the socket is 0600, same-user).
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 
 /// Connections served at once. Each costs a thread; the clients are a CLI and a
@@ -44,7 +44,7 @@ const MAX_LIVE_CONNECTIONS: usize = 16;
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// How long a reply may take to drain. Bounds a client that connects, asks, then
-/// stops reading — without it that client owns its thread forever.
+/// stops reading: without it that client owns its thread forever.
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Decrements the live-connection count however the thread ends, including a panic.
@@ -112,12 +112,10 @@ pub fn serve(
         sock.display()
     );
 
-    // One thread per connection. Serving inline used to mean a single client that
-    // held its connection open — which the client crate explicitly supports —
-    // blocked every other client, so one idle desktop integration made `status`
-    // and every search hang until it disconnected. It also put each handler on
-    // the main thread, where a panic took the whole daemon down with it; a
-    // connection thread only takes itself.
+    // One thread per connection. Served inline, a client holding its connection
+    // open (which the client crate supports) would block every other client, and
+    // a handler panic would take the whole daemon down; a connection thread only
+    // takes itself.
     let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for stream in listener.incoming() {
         let s = match stream {
@@ -191,7 +189,7 @@ pub fn serve(
             });
         if let Err(e) = spawned {
             // The closure (and with it the slot guard) is dropped on failure, so
-            // the count is already corrected — decrementing here would underflow.
+            // the count is already corrected; decrementing here would underflow.
             log::warn!("could not spawn connection thread: {e}");
         }
     }
@@ -225,10 +223,8 @@ fn handle(
 ) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     // Buffered on purpose: `serde_json::to_writer` emits every brace, key, comma
-    // and value as its own `write`, so an unbuffered socket turned one reply into
-    // thousands of syscalls. Measured at 1328 hits: 38 ms to write ~190 KB, and
-    // unlike the search and the stat loop it never got cheaper on repeat — it was
-    // the largest and most stubborn part of every query, in all three modes.
+    // and value as its own `write`, so an unbuffered socket would turn one reply
+    // into thousands of syscalls.
     let mut out = std::io::BufWriter::new(stream);
     let mut line = Vec::new();
     loop {

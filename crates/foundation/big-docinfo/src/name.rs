@@ -4,8 +4,8 @@
 //! The suggested file name: `[date] [kind] title.ext`, built from fields, never
 //! guessed.
 //!
-//! The title reads as the document writes it — capitals, spaces, accents and
-//! all — so the name is the one a person would type. Parts with no evidence are
+//! The title reads as the document writes it (capitals, spaces, accents and
+//! all), so the name is the one a person would type. Parts with no evidence are
 //! left out; the extension is the one the file already has. The characters that
 //! break a path or a FAT/exFAT pen drive (`/ \ : * ? " < > |`) are replaced, a
 //! title in capitals is set in sentence case (acronyms kept), and a long title
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn long_titles_are_cut_between_words_within_name_max() {
+    fn long_titles_cut_between_words() {
         let long = "Development and validation of a clinical prediction model for ninety day venous thromboembolism risk after hospital discharge in adults";
         let name = suggested_name(None, Some(long), Some("2023-06-12"), "pdf");
         let stem = name.trim_end_matches(".pdf");

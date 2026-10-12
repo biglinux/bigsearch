@@ -1,6 +1,6 @@
-//! Client and wire types for the **big-indexd** (big-search) Unix-socket protocol.
+//! Client and wire types for the big-indexd (big-search) Unix-socket protocol.
 //!
-//! This crate is deliberately tiny — `serde` + `std` only, no Tantivy — so GUI
+//! This crate is tiny (`serde` and `std` only, no Tantivy), so GUI
 //! consumers (big-shell, big-filemanager) link a few KB and never pull the index
 //! engine. The daemon (`big-search`) depends on these same types, so the wire
 //! format cannot drift between server and client.
@@ -42,7 +42,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// How many candidates the daemon considers before filtering and paging.
 ///
 /// Part of the wire contract rather than an implementation detail of the daemon,
-/// because [`QueryOutcome::total`] is **capped at it** — so a caller cannot tell
+/// because [`QueryOutcome::total`] is capped at it, so a caller cannot tell
 /// an exact count from a floor without knowing this number. A total below it is
 /// how many matched, within what [`QueryOutcome::total`] says about paged
 /// counts; a total equal to it means "this many, and possibly far more", and a
@@ -92,19 +92,18 @@ impl From<OriginProvenance> for OriginSummary {
 /// Which index a hit was found through, so a GUI can explain a result whose
 /// filename does not contain the query at all.
 ///
-/// The daemon knows this while it merges the two searches in `search_both` and
-/// used to throw it away before the client saw it. Preserving it costs no larger
-/// index, no token positions, no stored bodies and no extra query — it is a
-/// single tag on a hit that already exists.
+/// The daemon learns this while it merges the two searches in `search_both`.
+/// Carrying it costs a single tag on a hit that already exists: no larger
+/// index, no token positions, no stored bodies and no extra query.
 ///
-/// `Body` is deliberately not called "found in the document text": the content
-/// index also holds extracted metadata and tags, so the honest claim is that the
-/// match came from inside the file rather than from its name.
+/// `Body` does not mean "found in the document text": the content index also
+/// holds extracted metadata and tags, so the claim is that the match came from
+/// inside the file rather than from its name.
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchKind {
     /// The file name contains the query. The default, so a hit written by an
-    /// older daemon — and every `name`-mode hit — reads as what it is.
+    /// older daemon, and every `name`-mode hit, reads as what it is.
     #[default]
     Name,
     /// Only the content/metadata index matched.
@@ -205,7 +204,7 @@ pub struct QueryOutcome {
     pub next_offset: Option<usize>,
     /// Approximate number of recently-changed files whose content is not yet
     /// (re-)extracted. `> 0` on a content/both query means results may be
-    /// incomplete — the daemon has already been nudged to extract them, so a
+    /// incomplete; the daemon has already been nudged to extract them, so a
     /// retry shortly will see them ("loading" hint for UIs).
     #[serde(default)]
     pub content_pending: u64,
@@ -277,7 +276,7 @@ pub struct FileVersion {
 }
 
 /// Index one path again although nothing about its size or modification time
-/// changed — the shape of a tag write, which lives in an extended attribute.
+/// changed: the shape of a tag write, which lives in an extended attribute.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ReindexRequest {
     pub path: String,
@@ -410,14 +409,14 @@ pub enum Unavailable {
     /// The filesystem cannot share blocks: ext4, FAT, a network folder.
     NoReflink,
     /// The kernel refuses to share blocks across mount points, which is exactly
-    /// what the service has to do — it sees the home folder and its own data
+    /// what the service has to do: it sees the home folder and its own data
     /// directory as two mounts. Linux allows it from 5.18.
     OldKernel,
     /// A live session: nothing here survives the reboot anyway.
     LiveSession,
     /// A reason this build has never heard of, from a newer daemon. Not a
-    /// catch-all for the screens to hide behind: it is the honest answer when an
-    /// old program is talking to a new service.
+    /// catch-all for the screens to hide behind: it is the answer when an old
+    /// program is talking to a new service.
     Unknown,
 }
 
@@ -461,7 +460,7 @@ pub struct VersionsAnswer {
 /// to hear it.
 ///
 /// This exists so a file manager can tell "the index has nothing matching here"
-/// apart from "the index has never looked here" — two states that produce the
+/// apart from "the index has never looked here": two states that produce the
 /// same empty reply and mean opposite things to the person standing in the
 /// folder. Without it a search surface either stays silent about which search it
 /// ran, or guesses.
@@ -547,16 +546,17 @@ impl From<serde_json::Error> for ClientError {
 /// How long a request may take before the caller gets an error instead of a
 /// thread that never returns.
 ///
-/// There was no deadline at all: a daemon that accepted the connection and then
-/// stopped answering — a wedged commit, a stopped process still holding the
-/// socket — blocked the calling thread forever, and `PersistentClient`'s single
-/// retry only fires on an I/O error, which a silent hang never produces.
+/// Without a deadline, a daemon that accepted the connection and then stopped
+/// answering (a wedged commit, a stopped process still holding the socket)
+/// blocks the calling thread forever, and `PersistentClient`'s single retry
+/// only fires on an I/O error, which a silent hang never produces.
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The largest reply this client will assemble.
 ///
-/// `read_line` grew a `String` with no ceiling, so a socket that streams bytes
-/// and never sends a newline could take the process out on memory alone. The
+/// `read_line` grows its `String` without limit, so without this ceiling a
+/// socket that streams bytes and never sends a newline could take the process
+/// out on memory alone. The
 /// daemon's own pages are far below this.
 const MAX_REPLY_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -587,17 +587,17 @@ fn apply_deadlines(stream: &UnixStream) -> Result<(), ClientError> {
 
 /// The default socket path: `$XDG_RUNTIME_DIR/biglinux/indexd.sock`.
 ///
-/// `None` when there is no `XDG_RUNTIME_DIR` — a session started by cron, over
-/// ssh, or by a misconfigured display manager. There used to be a `/tmp`
-/// fallback, and `/tmp` is world-writable: the first local account to create
+/// `None` when there is no `XDG_RUNTIME_DIR` (a session started by cron, over
+/// ssh, or by a misconfigured display manager). There is no `/tmp` fallback:
+/// `/tmp` is world-writable, so the first local account to create
 /// `/tmp/biglinux` owns it and can bind its own socket there. This client does
 /// not check who owns the socket it connects to, so the search window would
-/// have rendered another account's replies as trusted results — including the
-/// paths the person then clicks and opens.
+/// render another account's replies as trusted results, including the paths
+/// the person then clicks and opens.
 ///
 /// Refusing costs a session with no runtime directory its search. That session
 /// has no private directory to put a socket in either, so there is nothing to
-/// refuse it *for*.
+/// refuse it for.
 #[must_use]
 pub fn default_socket() -> Option<PathBuf> {
     // An empty or relative value is unset (XDG Base Directory spec), as the
@@ -608,7 +608,7 @@ pub fn default_socket() -> Option<PathBuf> {
         .map(|runtime| runtime.join("biglinux").join("indexd.sock"))
 }
 
-/// A thin handle to the index daemon. Each call is one short-lived connection — the
+/// A thin handle to the index daemon. Each call is one short-lived connection: the
 /// client holds no result state, so a GUI can't leak the index through it.
 pub struct Client {
     sock: PathBuf,
@@ -1201,11 +1201,11 @@ mod tests {
     /// The `sources` command and its reply keep the spelling both ends use.
     ///
     /// A root written by a daemon that only knows the path still reads, and it
-    /// reads as "not content-indexed, not available" — the cautious pair. The
+    /// reads as "not content-indexed, not available", the cautious pair. The
     /// opposite defaults would have a file manager promise a search it cannot
     /// run and offer files it cannot open.
     #[test]
-    fn sources_request_and_reply_keep_their_wire_spelling() {
+    fn sources_wire_spelling_round_trips() {
         let request = Request {
             v: PROTOCOL_VERSION,
             body: RequestBody::Sources,
@@ -1244,10 +1244,10 @@ mod tests {
     /// name match rather than as an unexplained one.
     ///
     /// This is what makes the field free to add: the GUI shows an explanatory
-    /// marker only for `Body`, so an old daemon's hits carry no marker at all —
-    /// which is exactly right, because a `name`-mode query is all they can be.
+    /// marker only for `Body`, so an old daemon's hits carry no marker at all,
+    /// which is right because a `name`-mode query is all they can be.
     #[test]
-    fn match_kind_is_additive_and_defaults_to_name() {
+    fn match_kind_defaults_to_name() {
         let old_hit =
             r#"{"path":"/a/b.txt","name":"b.txt","score":1.0,"size":5,"mtime":100,"ext":"txt"}"#;
         assert_eq!(
@@ -1329,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_client_reuses_one_connection_for_two_requests() {
+    fn persistent_client_reuses_its_connection() {
         use std::os::unix::net::UnixListener;
         use std::thread;
         use std::time::{SystemTime, UNIX_EPOCH};

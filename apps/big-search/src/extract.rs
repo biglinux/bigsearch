@@ -1,14 +1,13 @@
 //! Content extraction. Plain text in-process; PDF via a `pdftotext` subprocess
-//! (argv array, hard wall-clock timeout, capped output) — chosen over in-process
-//! Rust PDF libraries after benchmarking both on a real home directory: 4× faster
-//! and 12× less memory (DESIGN.md, "Extraction"). Word 97-2003 `.doc` the same
-//! way through `antiword`.
+//! (argv array, hard wall-clock timeout, capped output), which is faster and
+//! lighter than in-process Rust PDF libraries (DESIGN.md, "Extraction").
+//! Word 97-2003 `.doc` the same way through `antiword`.
 pub(crate) use crate::extract_pdf::read_pdf;
 use std::io::Read;
 use std::path::Path;
 
-/// Adaptive cap on extracted text per file — bounds index + memory cost without
-/// the old fixed 1 MiB ceiling. `BIG_SEARCH_EXTRACT_MAX_MB` or config
+/// Adaptive cap on extracted text per file, sized by the machine's memory to
+/// bound index and memory cost. `BIG_SEARCH_EXTRACT_MAX_MB` or config
 /// `[defaults].extract_max_mb` can override the automatic value.
 pub fn max_extract_bytes() -> usize {
     crate::settings::extract_max_bytes()
@@ -500,12 +499,12 @@ fn looks_binary(buf: &[u8]) -> bool {
 
 /// Decode a text blob: reject empty or binary (NUL in the first chunk), else
 /// UTF-8, lossily where it has to be. Split out from `read_text` so the decode
-/// path is fuzzable — and it is the path `read_text` really takes, so what the
+/// path is fuzzable; it is the path `read_text` really takes, so what the
 /// fuzzer drives is what runs.
 ///
 /// The bytes are consumed: almost every file read is already valid UTF-8, and
 /// then they simply become the string. `from_utf8_lossy(&buf).into_owned()`
-/// copied the whole file a second time even when nothing was replaced.
+/// would copy the whole file a second time even when nothing is replaced.
 pub fn text_from_bytes(buf: Vec<u8>) -> Option<String> {
     if looks_binary(&buf) {
         return None;
@@ -562,7 +561,7 @@ const MAX_PPTX_SLIDES: usize = 512;
 
 /// Reader-based core of `read_office`: extract concatenated body text from an
 /// OOXML/ODF zip. Public so fuzz targets can drive it with arbitrary bytes
-/// (`Cursor<&[u8]>`) — the untrusted-document parsing surface.
+/// (`Cursor<&[u8]>`): this is the untrusted-document parsing surface.
 pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
     reader: R,
     ext: &str,
@@ -582,7 +581,7 @@ fn office_text_with<R: std::io::Read + std::io::Seek>(
     // Per-part decompressed size is capped below, but the central directory is
     // read whole by `ZipArchive::new` before any of that: at the default 256 MiB
     // input cap an archive can declare millions of entries and cost hundreds of
-    // megabytes in directory alone — inside a 768 MiB cgroup that is an OOM kill,
+    // megabytes in directory alone. Inside a 768 MiB cgroup that is an OOM kill,
     // and since the content-state row is only written after the batch completes,
     // the same file is retried on every restart. A real document has tens.
     if zip.len() > MAX_ZIP_ENTRIES {
@@ -648,7 +647,7 @@ pub fn fold_lower(s: &str) -> String {
     out
 }
 
-/// The same, into a buffer the caller reuses — page after page, that is one
+/// The same, into a buffer the caller reuses: page after page, that is one
 /// allocation instead of one per page.
 pub fn fold_lower_into(s: &str, out: &mut String) {
     if s.is_ascii() {
@@ -733,11 +732,9 @@ thread_local! {
 /// 1-based page (PDF) / slide (PPTX) numbers whose text contains *all* `terms`.
 /// Empty for formats without fixed pages (docx/odt flow, txt, …).
 ///
-/// One page at a time, and only the number is kept. Holding every page of a
-/// 3000-page document in memory to answer with a handful of integers is the kind
-/// of work this service cannot afford: the text of a big PDF is tens of
-/// megabytes, and it used to exist three times over — the bytes, a copy of them,
-/// and a `String` per page.
+/// One page at a time, and only the number is kept. The text of a big PDF is
+/// tens of megabytes; holding every page in memory to answer with a handful of
+/// integers is work this service cannot afford.
 pub fn pages_with(path: &Path, terms: &[String]) -> Vec<usize> {
     let Some(ext) = ext_of(path) else {
         return Vec::new();
@@ -954,7 +951,7 @@ pub fn xml_text(xml: &[u8], out: &mut String) {
 
 /// Text of an OOXML/ODF part as the document lays it out: a line per paragraph or
 /// heading, line breaks and tabs kept, and the runs of a paragraph joined as
-/// written — Word splits words across runs, so a space between runs would break
+/// written: Word splits words across runs, so a space between runs would break
 /// them. Character and predefined entity references are decoded. Field codes,
 /// text deleted under change tracking and comments are not the document's text.
 pub fn xml_text_lines(xml: &[u8], out: &mut String) {
@@ -1040,7 +1037,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn saved_pages_and_markdown_name_their_titles() {
+    fn pages_and_markdown_name_titles() {
         assert_eq!(
             decode_entities("A &amp; B &#8212; C &#x2014; D &nbsp;&bogus; &"),
             "A & B — C — D  &bogus; &"
@@ -1092,7 +1089,7 @@ mod tests {
     /// Paragraphs become lines, a word Word split across runs stays whole, and
     /// entity references come back as characters.
     #[test]
-    fn office_lines_keep_paragraphs_and_whole_words() {
+    fn office_lines_keep_whole_words() {
         let docx = br#"<w:document><w:body><w:p><w:r><w:instrText> XE "index" </w:instrText></w:r><w:r><w:t>Re</w:t></w:r><w:r><w:delText>xx</w:delText></w:r><w:r><w:t>lat&#243;rio</w:t></w:r></w:p><w:p><w:r><w:t xml:space="preserve">Lopes &amp; Filhos</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>Curitiba</w:t></w:r></w:p></w:body></w:document>"#;
         let mut out = String::new();
         xml_text_lines(docx, &mut out);
@@ -1160,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn office_extractors_skip_files_above_input_cap() {
+    fn office_skips_oversized_input() {
         let _lock = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1175,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn text_extraction_skips_files_above_text_input_cap() {
+    fn text_skips_oversized_input() {
         let _lock = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1216,7 +1213,7 @@ mod tests {
     /// An EPUB reads in its spine's order, from the package `container.xml`
     /// names, with the title its metadata declares.
     #[test]
-    fn epub_reads_its_spine_in_order_with_its_title() {
+    fn epub_reads_spine_in_order() {
         let dir = temporary_extract_dir("epub");
         let path = dir.join("livro.epub");
         {

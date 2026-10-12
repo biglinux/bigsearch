@@ -69,10 +69,11 @@ const FALLBACK_TITLE_LINES: usize = 8;
 const OPENING_LINES: usize = 30;
 /// How much of the text must bear out a declared title: its first page or so.
 const DECLARED_TITLE_CHARS: usize = 8_000;
-/// "CPF:179…", "Local de pagamento: …" — up to three words and a colon open a
-/// field, not a title ("Compressão zstd em Btrfs: impacto…" is a title).
-/// "…ao todo. Alguém lembrou…", "…disseram na época." — a sentence ends inside or
-/// at the end of the line: running text ("S.A." at the end is still a name).
+/// Up to three words and a colon open a field rather than a title ("CPF:179…",
+/// "Local de pagamento: …"; "Compressão zstd em Btrfs: impacto…" is a title).
+/// A sentence that ends inside or at the end of the line is running text
+/// ("…ao todo. Alguém lembrou…", "…disseram na época."); "S.A." at the end is
+/// still a name.
 static TWO_SENTENCES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[.!?] [A-ZÀ-Ý]|[a-zà-ÿ]\.$").expect("valid"));
 /// A reference to a journal issue: "2021; 66:e025", "2018 mar;39(2):134",
@@ -100,7 +101,7 @@ static AFFILIATION: LazyLock<Regex> = LazyLock::new(|| {
 });
 /// A filing or billing code ("6730–02–P", "1–13–25"): number, dash, number, dash.
 static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+[-–]\d+[-–]\w").expect("valid"));
-/// "Nome: Maria", "Médico :JOANA" — a label of up to three words and its value.
+/// A label of up to three words and its value: "Nome: Maria", "Médico :JOANA".
 static FIELD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\S+\s+){0,2}\S+\s*:\s*\S").expect("valid"));
 /// The opening of a letterhead, normalized: "GOVERNO DO DISTRITO FEDERAL",
@@ -274,7 +275,7 @@ pub fn title(text: &str, prominent: &[String]) -> Option<String> {
     if let Some(at) = kind_line.filter(|&at| !in_passing(lines, at)) {
         return Some(lines[at].to_owned());
     }
-    // The largest words on the page are the title a reader sees — when they
+    // The largest words on the page are the title a reader sees, when they
     // read as one. Past a decorative initial ("C") or a journal's label, name or
     // banner set larger, the next size; past anything else, smaller type is
     // section headings and authors.
@@ -473,7 +474,7 @@ fn heading(lines: &[&str]) -> Option<usize> {
 /// `line` without a section label it opens with: "Relatório especial Avançando
 /// em direção…" → "Avançando em direção…".
 fn without_article_type(line: &str) -> &str {
-    // A label set in spaced letters first: "Edi t or i a l Advanced therapy…" —
+    // A label set in spaced letters first ("Edi t or i a l Advanced therapy…"):
     // fragments of a few letters, three or more of them single letters.
     let (mut end, mut fragments, mut single) = (0, 0, 0);
     for word in line.split_whitespace() {
@@ -502,10 +503,9 @@ fn without_article_type(line: &str) -> &str {
         .map_or(line, |(at, _)| line[at..].trim_start())
 }
 
-/// What a journal prints above a title — its section, its name — a lone
+/// What a journal prints above a title (its section, its name), a lone
 /// capitalized word ("TRANSPLANTATION"), and a poster's section headings set
-/// side by side ("Introduction Results").
-/// Section headings side by side: "Introduction Results", "Population and Methods".
+/// side by side ("Introduction Results", "Population and Methods").
 fn is_section_heading(line: &str) -> bool {
     line.split_whitespace().all(|word| {
         SECTION_WORDS
@@ -650,7 +650,7 @@ mod tests {
     const ARTICLE: &str = "Special Report\nMoving toward disease modification in polycythemia vera\nJ. P. Bewersdorf, J. How\nPolycythemia vera belongs to the myeloproliferative neoplasms.";
 
     #[test]
-    fn a_declared_title_the_text_bears_out_is_kept() {
+    fn supported_declared_title_is_kept() {
         let declared = "Moving toward disease modification in polycythemia vera";
         assert_eq!(declared_title(declared, ARTICLE).as_deref(), Some(declared));
         let web = "Moving toward disease modification in polycythemia vera | NBDF";
@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn what_tools_write_in_the_title_field_is_not_a_title() {
+    fn tool_written_titles_are_ignored() {
         let translated =
             "Relatório especial\nAvançando em direção à modificação da doença na policitemia vera";
         let original = "Moving toward disease modification in polycythemia vera";

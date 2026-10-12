@@ -1,10 +1,11 @@
 //! Incremental index updates via inotify (notify crate), scoped to visible dirs.
 //!
-//! One non-recursive watch per visible directory (~28k on a typical home, well under
-//! the kernel `max_user_watches`) — unprivileged, and the hidden/gitignored churn
-//! (the 90 %) is never watched, so it never wakes us. New visible dirs get a watch +
-//! a scoped rescan. Events are coalesced over a short window, then reconciled by
-//! existence: present → upsert, gone → delete.
+//! One non-recursive watch per visible directory (tens of thousands on a
+//! typical home, well under the kernel `max_user_watches`): unprivileged, and
+//! the hidden/gitignored churn (most changes) is never watched, so it never
+//! wakes us. New visible dirs get a watch + a scoped rescan. Events are
+//! coalesced over a short window, then reconciled by existence: present →
+//! upsert, gone → delete.
 use crate::content;
 use crate::index::{ContentFields, Fields, content_fields, fields};
 use crate::origin;
@@ -287,7 +288,7 @@ impl ContentBackfill {
         self.bypass_cooldown = false;
         if self.rescan_requested {
             self.rescan_requested = false;
-            return; // fresh work exists — next idle tick runs at normal cadence
+            return; // fresh work exists; the next idle tick runs at normal cadence
         }
         self.snooze_until = Some(Instant::now() + retry_in.max(self.idle_delay));
     }
@@ -351,8 +352,8 @@ impl WatchBatch {
             return;
         }
         // A close after writing is the strongest signal a save finished. Create
-        // and rename-to cover the file that arrives already written — from a
-        // download, from another folder — and never sees a close at all.
+        // and rename-to cover the file that arrives already written (from a
+        // download, from another folder) and never sees a close at all.
         let worth_a_version = matches!(
             kind,
             EventKind::Access(notify::event::AccessKind::Close(
@@ -575,9 +576,9 @@ pub fn run(
             }
         } else {
             // The pass over the catalogue also runs when there is no indexing
-            // left to do — which is most of the time, and was where it never got
-            // a turn: the loop simply blocked on the channel and the first
-            // version of anything waited for the next file to change.
+            // left to do, which is most of the time: blocking on the channel
+            // would make the first version of anything wait for the next file
+            // to change.
             match rx.recv_timeout(HISTORY_PASS_TICK) {
                 Ok(message) => message,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -608,7 +609,7 @@ pub fn run(
                 state.remove(&path);
                 // The content index keeps its own record of the same path, and
                 // the only reason to ask for a forced reindex is a change the
-                // file's size and modification time do not show — a tag. Left
+                // file's size and modification time do not show, such as a tag. Left
                 // in place, that record makes the content pass skip the file and
                 // the tag never becomes searchable.
                 content::forget_content_state(&path).context("forget content state")?;
@@ -779,9 +780,8 @@ fn run_content_backfill_batch(
     let started = Instant::now();
     crate::throttle::begin_cpu_window();
     // Only when something was actually deleted. Proving "no orphans" still costs
-    // a full scan of the content namespace — 19 865 page reads on this corpus —
-    // and running that at the start of every pass meant paying it after every
-    // burst of file changes, which is most of them.
+    // a full scan of the content namespace, and at the start of every pass it
+    // would be paid after every burst of file changes.
     if content_backfill.cursor.is_none() && content_backfill.take_deletion_seen() {
         close_index_writer(writer).context("close content writer before prune")?;
         match content::prune_orphaned_content(content_index, content::ORPHAN_PRUNE_STEADY_LIMIT) {
@@ -879,9 +879,8 @@ fn run_content_backfill_batch(
 /// Merge every segment of `index` into one when enough has changed (see
 /// [`crate::index::worth_compacting`]); short of that, merge the small segments
 /// that piled up beside the largest into one. Each segment costs a cold query
-/// its own disk reads: on a 5400 rpm disk 5 segments answered in 360-682 ms, 2
-/// in 153-435 ms, 1 in 55-213 ms — and joining the small ones cost 1.8 s and
-/// 5 MB against 12.2 s and 37 MB for everything.
+/// its own disk reads, and joining the small ones costs a fraction of a full
+/// merge.
 ///
 /// The writer's merge thread does the work, at the indexer's idle priority, and
 /// publishes the result itself; nothing waits for it here, and whoever closes
@@ -1172,10 +1171,10 @@ fn send_history_page(
 mod tests {
     use super::*;
 
-    /// Searches typed faster than the idle delay once kept restarting it, and
-    /// the bodies they asked for were never extracted.
+    /// Searches typed faster than the idle delay must not keep restarting it,
+    /// or the bodies they ask for are never extracted.
     #[test]
-    fn content_searches_do_not_push_the_warm_pass_back() {
+    fn repeated_warm_keeps_the_deadline() {
         let mut backfill = ContentBackfill::new(Arc::new(AtomicU64::new(0)));
         backfill.warm();
         let first = backfill.wait_before_batch();
@@ -1187,7 +1186,7 @@ mod tests {
     /// The merge is left running on the writer's merge thread; it must still
     /// land, and an index with nothing to tidy must be left alone.
     #[test]
-    fn compaction_merges_a_changed_index_into_one_segment() {
+    fn compaction_merges_into_one_segment() {
         let dir = std::env::temp_dir().join(format!("bs-compact-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let index = crate::index::open_or_create(&dir).unwrap();

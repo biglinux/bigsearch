@@ -17,8 +17,9 @@ the bookkeeping around it is SQLite.
 
 - **Names:** case-insensitive substring search over the full path, filtered by
   folder and extension from the CLI, and by media type through the socket.
-- **Content:** plain text, Markdown, source code, PDF (through `pdftotext`) and
-  OpenDocument / Office Open XML documents. Chinese, Japanese, Korean and
+- **Content:** plain text, Markdown, source code, HTML, PDF (through
+  `pdftotext`), OpenDocument and Office Open XML documents, EPUB, saved e-mail,
+  RTF and Word 97-2003 (through `antiword`). Chinese, Japanese, Korean and
   South-East Asian scripts are indexed as overlapping bigrams, so they are
   searchable without a dictionary.
 - **Live index:** inotify on every visible folder, so a saved file is
@@ -26,7 +27,7 @@ the bookkeeping around it is SQLite.
   service was down is read again.
 - **Earlier versions:** on filesystems with reflinks (Btrfs, XFS) a copy of a
   document is kept before each save, within a disk budget.
-- **Origin:** where a file came from — a browser download, a copy, a move —
+- **Origin:** where a file came from (a browser download, a copy, a move),
   when that is known.
 - **Light on the machine:** extraction runs at idle priority and paces itself
   by CPU load, I/O and memory pressure and whether the laptop is on battery.
@@ -36,7 +37,8 @@ the bookkeeping around it is SQLite.
 
 - Linux with inotify, and systemd for the user service.
 - Rust 1.98.1; with rustup, `rust-toolchain.toml` selects it.
-- SQLite 3, and poppler (`pdftotext`) for PDF content.
+- SQLite 3; poppler (`pdftotext`) for PDF content and `antiword` for Word
+  97-2003 documents.
 - For the settings page only: GTK 4.22 and libadwaita 1.9.
 
 ## Build and install
