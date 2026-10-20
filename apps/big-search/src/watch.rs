@@ -5,7 +5,7 @@
 //! the hidden/gitignored churn (most changes) is never watched, so it never
 //! wakes us. New visible dirs get a watch + a scoped rescan. Events are
 //! coalesced over a short window, then reconciled by existence: present →
-//! upsert, gone → delete.
+//! upsert, gone → delete it and everything under it.
 mod content_backfill;
 mod event_batch;
 

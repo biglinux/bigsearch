@@ -298,7 +298,11 @@ hidden and gitignored churn never wakes the daemon.
 - A new visible folder gets a watch and a scoped rescan, which closes the race
   between its creation and the watch.
 - Events are coalesced over 250 ms (`DEBOUNCE`), then reconciled by existence:
-  a present path is upserted, a missing one deleted.
+  a present path is upserted, a missing one deleted with its whole tree. A
+  folder moved away, to the trash included, is one event naming the folder and
+  none for what it held, so the tree goes as one `dir` term in the name index
+  and one key range in the catalogue, never read into memory; its content
+  documents follow through the orphan prune of the next backfill passes.
 - At most 16,384 events wait for the watcher (`MAX_QUEUED_EVENTS`), so a backup
   or a recursive copy cannot queue its whole tree in memory. Past that, or when
   the kernel's own queue overflows, the events are dropped and the watcher
