@@ -1,5 +1,6 @@
 //! Query engine: name, content and combined searches, then the filters,
 //! paging and metadata a client sees.
+use crate::catalogue::ListOrder;
 use crate::index::fields;
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -38,7 +39,7 @@ pub struct QueryIndexes<'a> {
     pub name: &'a IndexReader,
     pub content: Option<&'a IndexReader>,
     /// The recorded `(mtime, size)` of every catalogued path, which orders and
-    /// counts the `list` mode.
+    /// counts the `list` and `largest` modes.
     pub catalogue: &'a crate::catalogue::CatalogueReader,
 }
 
@@ -46,8 +47,9 @@ pub struct QueryIndexes<'a> {
 /// filters → page → metadata enrichment. Everything the GUI would otherwise do
 /// (and leak over) happens here, server-side and bounded.
 ///
-/// The `list` mode instead reads the catalogue, newest first, with an exact
-/// `total`; see [`crate::catalogue::CatalogueReader::newest`].
+/// The `list` and `largest` modes instead read the catalogue, newest or
+/// largest first, with an exact `total`; see
+/// [`crate::catalogue::CatalogueReader::list`].
 pub fn run_query(
     indexes: QueryIndexes<'_>,
     q: &str,
@@ -66,15 +68,22 @@ pub fn run_query(
     let name_fields = fields(names.index())?;
 
     // "Every picture under my home folder" wants the newest ones and how many
-    // there are, which only the catalogue's recorded mtimes can answer without a
-    // `stat` per file. A type filter needs the name index, which knows the type
-    // of a file whose name does not tell it, so that case keeps the unordered,
-    // ceiling-capped index listing.
-    let (mut hits, total, limit) = if mode == "list" && filter.mime.is_empty() {
+    // there are, and "large and old" the largest: only the catalogue's recorded
+    // mtimes and sizes answer that without a `stat` per file. A type filter
+    // needs the name index, which knows the type of a file whose name does not
+    // tell it, so that case keeps the unordered, ceiling-capped index listing.
+    let order = match mode {
+        "list" => Some(ListOrder::Newest),
+        "largest" => Some(ListOrder::Largest),
+        _ => None,
+    };
+    let (mut hits, total, limit) = if let Some(order) = order
+        && filter.mime.is_empty()
+    {
         // The page is what gets `stat`ed, so it stays under the same ceiling as
         // the candidates of the other modes; the client pages past it.
         let limit = page.limit.min(CANDIDATE_CEILING);
-        let (total, paths) = indexes.catalogue.newest(filter, page.offset, limit)?;
+        let (total, paths) = indexes.catalogue.list(filter, order, page.offset, limit)?;
         let hits: Vec<Hit> = paths
             .into_iter()
             .map(|path| Hit {
@@ -156,7 +165,7 @@ fn search_by_mode(
         // filter rather than by words: "every PDF under my home folder" has
         // no text to search for, and the name search refuses a query shorter
         // than two letters because the ngram index cannot narrow one.
-        "list" => list_matching(indexes.name, filter, CANDIDATE_CEILING)?,
+        "list" | "largest" => list_matching(indexes.name, filter, CANDIDATE_CEILING)?,
         _ => search(indexes.name, q, filter, fetch)?,
     };
     // The count of a paged query comes from the postings, up to the ceiling,
@@ -190,8 +199,9 @@ fn search_by_mode(
 fn candidates_to_read(mode: &str, filter: &Filter, page: &Page) -> (bool, usize) {
     let stat_filters = filter.mtime.is_some() || filter.size.is_some();
     let path_filters = filter.under.is_some() || !filter.ext.is_empty() || !filter.mime.is_empty();
-    let paged =
-        !matches!(mode, "list" | "both") && !stat_filters && !(mode == "content" && path_filters);
+    let paged = !matches!(mode, "list" | "largest" | "both")
+        && !stat_filters
+        && !(mode == "content" && path_filters);
     let fetch = if paged {
         // Room for names the post-filter turns away and files gone since.
         page.offset

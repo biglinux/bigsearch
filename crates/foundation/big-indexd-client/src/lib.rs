@@ -43,13 +43,13 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// How many candidates the daemon considers before filtering and paging.
 ///
 /// Part of the wire contract rather than an implementation detail of the daemon,
-/// because in every mode but `list` [`QueryOutcome::total`] is capped at it, so
-/// a caller cannot tell an exact count from a floor without knowing this
-/// number. A total below it is how many matched, within what
+/// because in every mode but `list` and `largest` [`QueryOutcome::total`] is
+/// capped at it, so a caller cannot tell an exact count from a floor without
+/// knowing this number. A total below it is how many matched, within what
 /// [`QueryOutcome::total`] says about paged counts; a total equal to it means
 /// "this many, and possibly far more", and a surface that prints it as an exact
-/// figure is stating something nobody established. A `list` page is also at
-/// most this long.
+/// figure is stating something nobody established. A `list` or `largest` page
+/// is also at most this long.
 pub const CANDIDATE_CEILING: usize = 5_000;
 
 /// Short origin/provenance summary attached to visible hits only when requested.
@@ -205,11 +205,12 @@ pub struct QueryOutcome {
     /// what paging reaches: the last `next_offset` may return fewer hits than
     /// asked for, or none.
     ///
-    /// In the `list` mode without a `mime` filter it is the exact number of
-    /// catalogued files matching the filter, and may exceed the ceiling; hits
-    /// come newest modification first and every match is reachable by paging
-    /// with `next_offset`. A client that reads a total at or above the ceiling
-    /// as "at least this many" is still right. With a `mime` filter, `list` is
+    /// In the `list` and `largest` modes without a `mime` filter it is the
+    /// exact number of catalogued files matching the filter, and may exceed
+    /// the ceiling; hits come newest modification (`list`) or largest size
+    /// (`largest`) first, and every match is reachable by paging with
+    /// `next_offset`. A client that reads a total at or above the ceiling as
+    /// "at least this many" is still right. With a `mime` filter, both are
     /// unordered and capped like the other modes.
     ///
     /// Files deleted since they were indexed are counted in every mode, so a
@@ -296,6 +297,11 @@ pub struct ReindexRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryRequest {
     pub q: String,
+    /// `name` (the default), `content` or `both` search for the words in `q`;
+    /// `list` and `largest` ignore `q` and list what matches `filter`, newest
+    /// or largest first (daemons with the `list-largest` capability know
+    /// `largest`). A folder is catalogued with its own size, so a `size`
+    /// floor keeps folders out of `largest`.
     #[serde(default = "default_mode")]
     pub mode: String,
     #[serde(default)]

@@ -56,13 +56,13 @@ fn no_catalogue() -> CatalogueReader {
     CatalogueReader::new(Path::new("/nonexistent/big-search/state.sqlite"))
 }
 
-/// A catalogue recording `files` with the given modification times, in a
-/// fresh directory under `dir`.
-fn catalogue_with(dir: &Path, files: &[(&Path, i64)]) -> CatalogueReader {
+/// A catalogue recording `files` with the given modification times and
+/// sizes, in a fresh directory under `dir`.
+fn catalogue_with(dir: &Path, files: &[(&Path, i64, u64)]) -> CatalogueReader {
     let db = dir.join("state/state.sqlite");
     let mut names = State::empty(&db, NAME_NAMESPACE);
-    for (path, mtime) in files {
-        names.set(path, *mtime, 1);
+    for (path, mtime, size) in files {
+        names.set(path, *mtime, *size);
     }
     names.persist().unwrap();
     CatalogueReader::new(&db)
@@ -124,7 +124,7 @@ fn list_mode_answers_wordless_queries() {
         &root,
         &paths
             .iter()
-            .map(|path| (path.as_path(), 1))
+            .map(|path| (path.as_path(), 1, 1))
             .collect::<Vec<_>>(),
     );
     let filter = Filter {
@@ -161,6 +161,80 @@ fn list_mode_answers_wordless_queries() {
     // The same filter through the name search finds nothing, which is the
     // whole reason the mode exists.
     assert!(run("name").hits.is_empty());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The `largest` mode is the `list` mode ordered by recorded size.
+#[test]
+fn largest_pages_by_size() {
+    let root = std::env::temp_dir().join(format!("lsearch-largest-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(&root).unwrap();
+    // Recorded (mtime, size), in neither name nor time order.
+    let recorded = [
+        ("small.iso", 100, 10),
+        ("huge.iso", 300, 900),
+        ("tie-b.iso", 200, 500),
+        ("tie-a.iso", 400, 500),
+        ("recent.iso", 9_000, 2_000),
+    ];
+    let paths: Vec<PathBuf> = recorded
+        .iter()
+        .map(|(name, _, _)| {
+            let path = root.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            path
+        })
+        .collect();
+    let catalogue = catalogue_with(
+        &root,
+        &paths
+            .iter()
+            .zip(recorded)
+            .map(|(path, (_, mtime, size))| (path.as_path(), mtime, size))
+            .collect::<Vec<_>>(),
+    );
+    let owned: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let index = index_with(
+        "largest",
+        &owned.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    // "Large and old": everything not changed since 1000.
+    let filter = Filter {
+        under: Some(root.to_string_lossy().into_owned()),
+        mtime: Some([i64::MIN, 1_000]),
+        ..Default::default()
+    };
+    let page = |offset, limit| {
+        run_query(
+            QueryIndexes {
+                name: &index,
+                content: None,
+                catalogue: &catalogue,
+            },
+            "",
+            "largest",
+            &filter,
+            &Page { offset, limit },
+            false,
+            None,
+        )
+        .unwrap()
+    };
+    let names = |outcome: &QueryOutcome| -> Vec<String> {
+        outcome.hits.iter().map(|hit| hit.name.clone()).collect()
+    };
+
+    let first = page(0, 3);
+    // Same size: the path breaks the tie.
+    assert_eq!(names(&first), ["huge.iso", "tie-a.iso", "tie-b.iso"]);
+    assert_eq!((first.total, first.next_offset), (4, Some(3)));
+    let last = page(3, 3);
+    assert_eq!(names(&last), ["small.iso"]);
+    assert_eq!((last.total, last.next_offset), (4, None));
     std::fs::remove_dir_all(&root).ok();
 }
 
@@ -283,7 +357,7 @@ fn list_pages_newest_first() {
         &root,
         &files
             .iter()
-            .map(|(path, mtime)| (path.as_path(), *mtime))
+            .map(|(path, mtime)| (path.as_path(), *mtime, 1))
             .collect::<Vec<_>>(),
     );
     let owned: Vec<String> = files

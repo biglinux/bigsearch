@@ -332,7 +332,7 @@ fn catalogue_of(label: &str, rows: &[(&str, i64, u64)]) -> (PathBuf, CatalogueRe
 }
 
 fn newest_paths(reader: &CatalogueReader, filter: &Filter) -> Vec<String> {
-    let (total, paths) = reader.newest(filter, 0, 100).unwrap();
+    let (total, paths) = reader.list(filter, ListOrder::Newest, 0, 100).unwrap();
     assert_eq!(total, paths.len(), "{paths:?}");
     paths
 }
@@ -364,7 +364,11 @@ fn newest_first_with_exact_total() {
             "/p/old.jpg",
         ]
     );
-    let page = |offset, limit| reader.newest(&Filter::default(), offset, limit).unwrap();
+    let page = |offset, limit| {
+        reader
+            .list(&Filter::default(), ListOrder::Newest, offset, limit)
+            .unwrap()
+    };
     assert_eq!(
         page(0, 2),
         (
@@ -488,13 +492,17 @@ fn ranges_compare_recorded_values() {
 fn missing_catalogue_lists_nothing() {
     let (dir, reader) = catalogue_of("empty", &[]);
     assert_eq!(
-        reader.newest(&Filter::default(), 0, 10).unwrap(),
+        reader
+            .list(&Filter::default(), ListOrder::Newest, 0, 10)
+            .unwrap(),
         (0, Vec::new())
     );
     std::fs::remove_dir_all(&dir).ok();
     let missing = CatalogueReader::new(&dir.join("state.sqlite"));
     assert_eq!(
-        missing.newest(&Filter::default(), 0, 10).unwrap(),
+        missing
+            .list(&Filter::default(), ListOrder::Newest, 0, 10)
+            .unwrap(),
         (0, Vec::new())
     );
     assert!(!dir.exists(), "a reader must not create the database");

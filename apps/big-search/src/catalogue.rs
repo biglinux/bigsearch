@@ -708,13 +708,22 @@ fn write_pending(
     Ok(())
 }
 
-/// Read side of the name catalogue, for the `list` query mode: the paths the
-/// daemon catalogues with the mtime and size it last recorded, so a listing is
-/// ordered and counted without a `stat` per file.
+/// The order of a catalogue listing.
+#[derive(Clone, Copy)]
+pub enum ListOrder {
+    /// Newest recorded modification first.
+    Newest,
+    /// Largest recorded size first.
+    Largest,
+}
+
+/// Read side of the name catalogue, for the `list` and `largest` query modes:
+/// the paths the daemon catalogues with the mtime and size it last recorded,
+/// so a listing is ordered and counted without a `stat` per file.
 ///
 /// One per IPC connection, like [`crate::origin::OriginReader`]: it holds a
 /// `RefCell<Connection>`, so it is not shareable, and it opens nothing until
-/// the first `list` query. The connection is read-only.
+/// the first listing. The connection is read-only.
 pub struct CatalogueReader {
     db_path: PathBuf,
     conn: RefCell<Option<Connection>>,
@@ -729,8 +738,8 @@ impl CatalogueReader {
         }
     }
 
-    /// The catalogued paths matching `filter`, newest modification first (ties
-    /// by path), `limit` of them from `offset`, and how many match in all.
+    /// The catalogued paths matching `filter` in `order` (ties by path),
+    /// `limit` of them from `offset`, and how many match in all.
     ///
     /// `under` excludes the folder itself and respects the directory boundary
     /// (`/home/a` does not hold `/home/ab`); an empty or root `under` holds
@@ -741,9 +750,10 @@ impl CatalogueReader {
     /// # Errors
     ///
     /// The database exists but cannot be opened or read.
-    pub fn newest(
+    pub fn list(
         &self,
         filter: &Filter,
+        order: ListOrder,
         offset: usize,
         limit: usize,
     ) -> Result<(usize, Vec<String>)> {
@@ -768,11 +778,17 @@ impl CatalogueReader {
         if limit == 0 || offset >= total {
             return Ok((total, Vec::new()));
         }
-        // The page reads the mtime index from the newest end and stops once the
-        // page is full. `+path` keeps SQLite from preferring a primary-key range
-        // for `under` instead, which would sort every file in the folder: for a
-        // home folder that is the whole catalogue.
-        let Some((page_where, mut page_args)) = catalogue_where(filter, true) else {
+        // Newest first reads the mtime index from the newest end and stops once
+        // the page is full. `+path` keeps SQLite from preferring a primary-key
+        // range for `under` instead, which would sort every file in the folder:
+        // for a home folder that is the whole catalogue. Largest first has no
+        // index to read, so the primary-key range narrows the rows and SQLite
+        // sorts them keeping only the top `offset + limit`.
+        let (hide_path_range, column) = match order {
+            ListOrder::Newest => (true, "mtime"),
+            ListOrder::Largest => (false, "size"),
+        };
+        let Some((page_where, mut page_args)) = catalogue_where(filter, hide_path_range) else {
             return Ok((total, Vec::new()));
         };
         page_args.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
@@ -780,7 +796,7 @@ impl CatalogueReader {
         let mut stmt = conn
             .prepare_cached(&format!(
                 "SELECT path FROM file_state WHERE {page_where}
-                 ORDER BY mtime DESC, path LIMIT ? OFFSET ?"
+                 ORDER BY {column} DESC, path LIMIT ? OFFSET ?"
             ))
             .context("prepare catalogue page")?;
         let paths = stmt

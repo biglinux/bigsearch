@@ -601,6 +601,8 @@ fn daemon_capabilities() -> Vec<String> {
     capabilities.push("sources".to_string());
     // `list` mode filters by `under` and `ext`.
     capabilities.push("list-filtered".to_string());
+    // The `largest` mode: the `list` mode by recorded size.
+    capabilities.push("list-largest".to_string());
     // `filter.mime` (a type or `major/*`) is answered, and hits carry `mime`.
     capabilities.push("mime-filter".to_string());
     capabilities

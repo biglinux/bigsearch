@@ -511,8 +511,11 @@ partial `(namespace, mtime)` index, so neither the order nor the count needs a
 path range, the extensions a suffix match. The rows and the name index are
 written in the same step, so they hold the same paths; a file deleted since its
 row was written is counted until the watcher removes it, and is dropped from
-its page. A `mime` filter still goes to the name index, which alone knows
-types, unordered and capped.
+its page. The `largest` query ("large and old files") reads the same rows
+largest first. It has no index of its own: SQLite sorts the matches keeping
+only the rows up to the requested page, where a size index would cost every
+catalogue write. A `mime` filter still goes to the name index, which alone
+knows types, unordered and capped.
 
 ## 10. Dependencies
 
