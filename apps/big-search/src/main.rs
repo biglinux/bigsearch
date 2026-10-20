@@ -694,10 +694,12 @@ fn query_without_daemon(
         .as_ref()
         .map(index::query_reader)
         .transpose()?;
+    let catalogue = catalogue::CatalogueReader::new(&config::state_db_path());
     query::run_query(
         query::QueryIndexes {
             name: &name_reader,
             content: content_reader.as_ref(),
+            catalogue: &catalogue,
         },
         &s.query,
         mode,

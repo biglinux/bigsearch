@@ -1,5 +1,5 @@
 //! Name search: ngram recall via Tantivy, then exact substring post-filter.
-use super::{Filter, Hit, count_capped};
+use super::{Filter, Hit, count_capped, file_name};
 use crate::index::fields;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -41,10 +41,7 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
         if seen_paths.contains(path) {
             continue;
         }
-        let name = Path::new(path)
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = file_name(path);
         // The grams only say the letters are there; this says how.
         let Some(quality) = name_match(&name, &words) else {
             continue;

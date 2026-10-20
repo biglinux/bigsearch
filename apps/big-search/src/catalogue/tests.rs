@@ -316,3 +316,216 @@ fn on_disk_state_uses_wal_journal() {
     assert_eq!(state.journal_mode(), "wal");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A catalogue database holding `rows` in the name namespace, and a reader of it.
+fn catalogue_of(label: &str, rows: &[(&str, i64, u64)]) -> (PathBuf, CatalogueReader) {
+    let dir = std::env::temp_dir().join(format!("bs-catalogue-{label}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("state.sqlite");
+    let mut names = State::empty(&db, NAME_NAMESPACE);
+    for (path, mtime, size) in rows {
+        names.set(Path::new(path), *mtime, *size);
+    }
+    names.persist().unwrap();
+    (dir, CatalogueReader::new(&db))
+}
+
+fn newest_paths(reader: &CatalogueReader, filter: &Filter) -> Vec<String> {
+    let (total, paths) = reader.newest(filter, 0, 100).unwrap();
+    assert_eq!(total, paths.len(), "{paths:?}");
+    paths
+}
+
+#[test]
+fn newest_first_with_exact_total() {
+    let (dir, reader) = catalogue_of(
+        "order",
+        &[
+            ("/p/old.jpg", 100, 1),
+            ("/p/new.jpg", 300, 1),
+            ("/p/mid-b.jpg", 200, 1),
+            ("/p/mid-a.jpg", 200, 1),
+            ("/p/newest.jpg", 400, 1),
+        ],
+    );
+    // The content namespace shares the table and must not leak in.
+    let mut content = State::empty(&dir.join("state.sqlite"), CONTENT_NAMESPACE);
+    content.set(Path::new("/p/content-only.jpg"), 999, 1);
+    content.persist().unwrap();
+
+    assert_eq!(
+        newest_paths(&reader, &Filter::default()),
+        [
+            "/p/newest.jpg",
+            "/p/new.jpg",
+            "/p/mid-a.jpg", // same second: the path breaks the tie
+            "/p/mid-b.jpg",
+            "/p/old.jpg",
+        ]
+    );
+    let page = |offset, limit| reader.newest(&Filter::default(), offset, limit).unwrap();
+    assert_eq!(
+        page(0, 2),
+        (
+            5,
+            vec!["/p/newest.jpg".to_string(), "/p/new.jpg".to_string()]
+        )
+    );
+    assert_eq!(
+        page(2, 2),
+        (
+            5,
+            vec!["/p/mid-a.jpg".to_string(), "/p/mid-b.jpg".to_string()]
+        )
+    );
+    assert_eq!(page(4, 2), (5, vec!["/p/old.jpg".to_string()]));
+    assert_eq!(page(9, 2), (5, Vec::new()), "past the end");
+    assert_eq!(page(0, 0), (5, Vec::new()), "a count alone");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn under_stops_at_the_folder_boundary() {
+    let (dir, reader) = catalogue_of(
+        "under",
+        &[
+            ("/home/a", 1, 0),
+            ("/home/a/x.jpg", 2, 1),
+            ("/home/a/sub/y.jpg", 3, 1),
+            ("/home/ab/z.jpg", 4, 1),
+            ("/home/a-old/w.jpg", 5, 1),
+            ("/home/a0/v.jpg", 6, 1),
+            ("/other/u.jpg", 7, 1),
+        ],
+    );
+    let under = |dir: &str| Filter {
+        under: Some(dir.to_string()),
+        ..Default::default()
+    };
+    for folder in ["/home/a", "/home/a/", "/home/a//"] {
+        assert_eq!(
+            newest_paths(&reader, &under(folder)),
+            ["/home/a/sub/y.jpg", "/home/a/x.jpg"],
+            "under {folder}"
+        );
+    }
+    // The root, written either way, holds everything.
+    for root in ["/", ""] {
+        assert_eq!(
+            newest_paths(&reader, &under(root)).len(),
+            7,
+            "under {root:?}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn ext_matches_ending_in_any_case() {
+    let (dir, reader) = catalogue_of(
+        "ext",
+        &[
+            ("/p/a.JPG", 1, 1),
+            ("/p/b.jpeg", 2, 1),
+            ("/p/c.png", 3, 1),
+            ("/p/d.jpg.part", 4, 1),
+            ("/p/jpg", 5, 1),
+            ("/p/e.Jpg", 6, 1),
+            ("/p/archive.tar.gz", 7, 1),
+        ],
+    );
+    let ext = |wanted: &[&str]| Filter {
+        ext: wanted.iter().map(|ext| ext.to_string()).collect(),
+        ..Default::default()
+    };
+    assert_eq!(
+        newest_paths(&reader, &ext(&["jpg", ".JPEG"])),
+        ["/p/e.Jpg", "/p/b.jpeg", "/p/a.JPG"]
+    );
+    assert_eq!(newest_paths(&reader, &ext(&["gz"])), ["/p/archive.tar.gz"]);
+    // No file's extension holds a dot, so these match nothing, as in the
+    // name index; a valid one beside them still counts.
+    assert!(newest_paths(&reader, &ext(&["tar.gz", "", "."])).is_empty());
+    assert_eq!(
+        newest_paths(&reader, &ext(&["tar.gz", "png"])),
+        ["/p/c.png"]
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn ranges_compare_recorded_values() {
+    let (dir, reader) = catalogue_of(
+        "range",
+        &[
+            ("/p/a", 100, 10),
+            ("/p/b", 200, 20),
+            ("/p/c", 300, 30),
+            ("/p/huge", 400, u64::MAX),
+        ],
+    );
+    let mtime = Filter {
+        mtime: Some([200, 300]),
+        ..Default::default()
+    };
+    assert_eq!(newest_paths(&reader, &mtime), ["/p/c", "/p/b"]);
+    let size = Filter {
+        size: Some([0, 20]),
+        ..Default::default()
+    };
+    assert_eq!(newest_paths(&reader, &size), ["/p/b", "/p/a"]);
+    let both = Filter {
+        mtime: Some([150, 500]),
+        size: Some([25, u64::MAX]),
+        ..Default::default()
+    };
+    assert_eq!(newest_paths(&reader, &both), ["/p/huge", "/p/c"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn missing_catalogue_lists_nothing() {
+    let (dir, reader) = catalogue_of("empty", &[]);
+    assert_eq!(
+        reader.newest(&Filter::default(), 0, 10).unwrap(),
+        (0, Vec::new())
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    let missing = CatalogueReader::new(&dir.join("state.sqlite"));
+    assert_eq!(
+        missing.newest(&Filter::default(), 0, 10).unwrap(),
+        (0, Vec::new())
+    );
+    assert!(!dir.exists(), "a reader must not create the database");
+}
+
+#[test]
+fn newest_page_uses_mtime_index() {
+    let (dir, _) = catalogue_of("plan", &[("/p/a.jpg", 1, 1)]);
+    let filter = Filter {
+        under: Some("/p".into()),
+        ext: vec!["jpg".into()],
+        ..Default::default()
+    };
+    let (clause, args) = catalogue_where(&filter, true).unwrap();
+    let conn = open_catalogue_reader(&dir.join("state.sqlite")).unwrap();
+    let mut plan = conn
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN SELECT path FROM file_state WHERE {clause}
+             ORDER BY mtime DESC, path LIMIT 10"
+        ))
+        .unwrap();
+    let steps: Vec<String> = plan
+        .query_map(params_from_iter(args), |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|step| step.contains("file_state_name_by_mtime")),
+        "{steps:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

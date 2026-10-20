@@ -3,8 +3,11 @@
 //! Stored in SQLite so each persist writes only changed rows instead of a full
 //! JSON catalog rewrite.
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
-use std::collections::HashMap;
+use big_indexd_client::Filter;
+use rusqlite::types::Value;
+use rusqlite::{Connection, OpenFlags, params, params_from_iter};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -705,6 +708,168 @@ fn write_pending(
     Ok(())
 }
 
+/// Read side of the name catalogue, for the `list` query mode: the paths the
+/// daemon catalogues with the mtime and size it last recorded, so a listing is
+/// ordered and counted without a `stat` per file.
+///
+/// One per IPC connection, like [`crate::origin::OriginReader`]: it holds a
+/// `RefCell<Connection>`, so it is not shareable, and it opens nothing until
+/// the first `list` query. The connection is read-only.
+pub struct CatalogueReader {
+    db_path: PathBuf,
+    conn: RefCell<Option<Connection>>,
+}
+
+impl CatalogueReader {
+    /// A reader of the state database at `db_path`.
+    pub fn new(db_path: &Path) -> Self {
+        Self {
+            db_path: db_path.to_path_buf(),
+            conn: RefCell::new(None),
+        }
+    }
+
+    /// The catalogued paths matching `filter`, newest modification first (ties
+    /// by path), `limit` of them from `offset`, and how many match in all.
+    ///
+    /// `under` excludes the folder itself and respects the directory boundary
+    /// (`/home/a` does not hold `/home/ab`); an empty or root `under` holds
+    /// everything. `ext` matches the end of the path, ASCII case-insensitively.
+    /// `mtime` and `size` compare the recorded values. `mime` is not recorded
+    /// here and is ignored. A missing database is an empty catalogue.
+    ///
+    /// # Errors
+    ///
+    /// The database exists but cannot be opened or read.
+    pub fn newest(
+        &self,
+        filter: &Filter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(usize, Vec<String>)> {
+        if !self.db_path.exists() {
+            return Ok((0, Vec::new()));
+        }
+        let Some((count_where, count_args)) = catalogue_where(filter, false) else {
+            return Ok((0, Vec::new()));
+        };
+        let mut slot = self.conn.borrow_mut();
+        let conn = match &mut *slot {
+            Some(conn) => conn,
+            empty => empty.insert(open_catalogue_reader(&self.db_path)?),
+        };
+        let total: i64 = conn
+            .prepare_cached(&format!(
+                "SELECT COUNT(*) FROM file_state WHERE {count_where}"
+            ))
+            .and_then(|mut stmt| stmt.query_row(params_from_iter(count_args), |row| row.get(0)))
+            .context("count catalogue matches")?;
+        let total = usize::try_from(total).unwrap_or(0);
+        if limit == 0 || offset >= total {
+            return Ok((total, Vec::new()));
+        }
+        // The page reads the mtime index from the newest end and stops once the
+        // page is full. `+path` keeps SQLite from preferring a primary-key range
+        // for `under` instead, which would sort every file in the folder: for a
+        // home folder that is the whole catalogue.
+        let Some((page_where, mut page_args)) = catalogue_where(filter, true) else {
+            return Ok((total, Vec::new()));
+        };
+        page_args.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
+        page_args.push(Value::Integer(i64::try_from(offset).unwrap_or(i64::MAX)));
+        let mut stmt = conn
+            .prepare_cached(&format!(
+                "SELECT path FROM file_state WHERE {page_where}
+                 ORDER BY mtime DESC, path LIMIT ? OFFSET ?"
+            ))
+            .context("prepare catalogue page")?;
+        let paths = stmt
+            .query_map(params_from_iter(page_args), |row| row.get::<_, String>(0))
+            .context("read catalogue page")?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((total, paths))
+    }
+}
+
+/// The `WHERE` clause and its arguments selecting `filter` from the name
+/// namespace, or `None` when no path can match (every `ext` is one no file
+/// name ends in). `hide_path_range` writes the `under` range so that SQLite
+/// cannot answer it from the primary key.
+fn catalogue_where(filter: &Filter, hide_path_range: bool) -> Option<(String, Vec<Value>)> {
+    // A literal namespace, not a parameter: the partial mtime index is only
+    // usable when SQLite can see the query asks for the namespace it covers.
+    let mut clause = format!("namespace = '{NAME_NAMESPACE}'");
+    let mut args = Vec::new();
+    if let Some(dir) = filter
+        .under
+        .as_deref()
+        .map(|dir| dir.trim_end_matches('/'))
+        .filter(|dir| !dir.is_empty())
+    {
+        let column = if hide_path_range { "+path" } else { "path" };
+        clause.push_str(&format!(" AND {column} >= ? AND {column} < ?"));
+        let (low, high) = subtree_range(dir);
+        args.push(Value::Text(low));
+        args.push(Value::Text(high));
+    }
+    if !filter.ext.is_empty() {
+        // Grouped by length, so each row costs one `substr` per length instead
+        // of one per extension.
+        let mut by_length: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for ext in &filter.ext {
+            let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+            // An extension is never empty and never holds a dot or a slash, so
+            // the name index matches nothing for these either.
+            if ext.is_empty() || ext.contains(['.', '/']) {
+                continue;
+            }
+            let suffix = format!(".{ext}");
+            by_length
+                .entry(suffix.chars().count())
+                .or_default()
+                .push(suffix);
+        }
+        if by_length.is_empty() {
+            return None;
+        }
+        let mut any = Vec::new();
+        for (length, suffixes) in by_length {
+            any.push(format!(
+                "lower(substr(path, -{length})) IN ({})",
+                vec!["?"; suffixes.len()].join(", ")
+            ));
+            args.extend(suffixes.into_iter().map(Value::Text));
+        }
+        clause.push_str(&format!(" AND ({})", any.join(" OR ")));
+    }
+    if let Some([low, high]) = filter.mtime {
+        clause.push_str(" AND mtime BETWEEN ? AND ?");
+        args.extend([Value::Integer(low), Value::Integer(high)]);
+    }
+    if let Some([low, high]) = filter.size {
+        clause.push_str(" AND size BETWEEN ? AND ?");
+        args.extend([
+            Value::Integer(u64_to_db_size(low)),
+            Value::Integer(u64_to_db_size(high)),
+        ]);
+    }
+    Some((clause, args))
+}
+
+fn open_catalogue_reader(db_path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("open {} read-only", db_path.display()))?;
+    // Readers never wait on a WAL writer; this only covers its rare exclusive
+    // moments (recovery, a WAL restart).
+    conn.busy_timeout(std::time::Duration::from_millis(250))?;
+    conn.execute_batch("PRAGMA query_only = ON;")?;
+    limit_memory(&conn);
+    Ok(conn)
+}
+
 fn key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -729,24 +894,36 @@ fn open_state_db(db_path: &Path) -> Result<Connection> {
 }
 
 fn tune_connection_for_low_memory(conn: &Connection) {
-    // Keep SQLite's page cache small and let large scans spill temp
-    // B-trees to disk instead of anonymous process memory. mmap is capped: it uses
-    // virtual address space and the kernel page cache, not a preallocated heap.
     let _ = conn.execute_batch(
         "
         PRAGMA foreign_keys = ON;
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
+        PRAGMA journal_size_limit = 1048576;
+        ",
+    );
+    limit_memory(conn);
+}
+
+fn limit_memory(conn: &Connection) {
+    // Keep SQLite's page cache small and let large scans spill temp
+    // B-trees to disk instead of anonymous process memory. mmap is capped: it uses
+    // virtual address space and the kernel page cache, not a preallocated heap.
+    let _ = conn.execute_batch(
+        "
         PRAGMA temp_store = FILE;
         PRAGMA cache_size = -2048;
         PRAGMA mmap_size = 67108864;
-        PRAGMA journal_size_limit = 1048576;
         ",
     );
 }
 
 fn init_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+    // The mtime index serves the `list` query (`CatalogueReader`), which reads
+    // the name catalogue newest first. Partial, so the content namespace's
+    // writes do not pay for it; it must name the namespace the way the query
+    // does, or SQLite cannot use it.
+    conn.execute_batch(&format!(
         "
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS meta (
@@ -761,8 +938,10 @@ fn init_schema(conn: &Connection) -> Result<()> {
             size INTEGER NOT NULL,
             PRIMARY KEY(namespace, path)
         ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS file_state_name_by_mtime
+            ON file_state(namespace, mtime) WHERE namespace = '{NAME_NAMESPACE}';
         ",
-    )
+    ))
     .context("initialize state schema")
 }
 

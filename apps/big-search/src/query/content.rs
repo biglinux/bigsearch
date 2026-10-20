@@ -1,5 +1,5 @@
 //! Content search: words of the query matched against the `body` field.
-use super::{Hit, MatchKind, count_capped};
+use super::{Hit, MatchKind, count_capped, file_name};
 use crate::index::{BODY_QUERY, content_fields};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -32,10 +32,7 @@ pub fn search_content(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec
             if !seen_paths.insert(path.to_string()) {
                 continue;
             }
-            let name = Path::new(path)
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let name = file_name(path);
             hits.push(Hit {
                 path: path.to_string(),
                 name,

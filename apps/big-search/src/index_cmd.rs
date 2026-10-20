@@ -295,6 +295,7 @@ pub(super) fn cmd_daemon() -> Result<()> {
         &socket_path,
         control,
         config::origin_db_path(),
+        config::state_db_path(),
         history,
     )
 }

@@ -43,12 +43,13 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// How many candidates the daemon considers before filtering and paging.
 ///
 /// Part of the wire contract rather than an implementation detail of the daemon,
-/// because [`QueryOutcome::total`] is capped at it, so a caller cannot tell
-/// an exact count from a floor without knowing this number. A total below it is
-/// how many matched, within what [`QueryOutcome::total`] says about paged
-/// counts; a total equal to it means "this many, and possibly far more", and a
-/// surface that prints it as an exact figure is stating something nobody
-/// established.
+/// because in every mode but `list` [`QueryOutcome::total`] is capped at it, so
+/// a caller cannot tell an exact count from a floor without knowing this
+/// number. A total below it is how many matched, within what
+/// [`QueryOutcome::total`] says about paged counts; a total equal to it means
+/// "this many, and possibly far more", and a surface that prints it as an exact
+/// figure is stating something nobody established. A `list` page is also at
+/// most this long.
 pub const CANDIDATE_CEILING: usize = 5_000;
 
 /// Short origin/provenance summary attached to visible hits only when requested.
@@ -154,6 +155,8 @@ pub struct Hit {
 /// `mtime`/`size` are inclusive `[min, max]` ranges.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Filter {
+    /// Only paths inside this folder, at any depth; the folder itself is not
+    /// inside it. `/` holds everything.
     #[serde(default)]
     pub under: Option<String>,
     #[serde(default)]
@@ -192,14 +195,26 @@ impl Default for Page {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct QueryOutcome {
     pub hits: Vec<Hit>,
-    /// Matches after filtering, capped at [`CANDIDATE_CEILING`]. Equal to that
-    /// ceiling means the real number is unknown and at least this large.
+    /// Matches after filtering.
     ///
-    /// In the `name` and `content` modes without date or size filters the
-    /// daemon reads only the candidates a page needs and counts the rest from
-    /// the index, so a total can run over what paging reaches: the last
-    /// `next_offset` may return fewer hits than asked for, or none. Files
-    /// deleted since they were indexed have the same effect in every mode.
+    /// In the `name`, `content` and `both` modes it is capped at
+    /// [`CANDIDATE_CEILING`]: equal to that ceiling means the real number is
+    /// unknown and at least this large. In the `name` and `content` modes
+    /// without date or size filters the daemon reads only the candidates a
+    /// page needs and counts the rest from the index, so a total can run over
+    /// what paging reaches: the last `next_offset` may return fewer hits than
+    /// asked for, or none.
+    ///
+    /// In the `list` mode without a `mime` filter it is the exact number of
+    /// catalogued files matching the filter, and may exceed the ceiling; hits
+    /// come newest modification first and every match is reachable by paging
+    /// with `next_offset`. A client that reads a total at or above the ceiling
+    /// as "at least this many" is still right. With a `mime` filter, `list` is
+    /// unordered and capped like the other modes.
+    ///
+    /// Files deleted since they were indexed are counted in every mode, so a
+    /// page can hold fewer hits than asked for while `next_offset` still
+    /// advances by the full page.
     pub total: usize,
     /// Offset to request next, or `None` at the end.
     pub next_offset: Option<usize>,

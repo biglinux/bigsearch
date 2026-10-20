@@ -499,6 +499,17 @@ over 64 KiB is refused. Other BigLinux programs speak it, so its description
 lives in the `big-indexd-client` rustdoc. The `big-search` CLI uses that client,
 and with no daemon running it searches the indexes in-process, read-only.
 
+The `list` query ("every picture under my home folder") is answered from the
+name rows of the catalogue, not from the name index: a read-only connection per
+client counts the matches exactly and reads one page newest first through a
+partial `(namespace, mtime)` index, so neither the order nor the count needs a
+`stat` per file; only the returned page is `stat`ed and typed. The folder is a
+path range, the extensions a suffix match. The rows and the name index are
+written in the same step, so they hold the same paths; a file deleted since its
+row was written is counted until the watcher removes it, and is dropped from
+its page. A `mime` filter still goes to the name index, which alone knows
+types, unordered and capped.
+
 ## 10. Dependencies
 
 `apps/big-search/Cargo.toml` is the list: tantivy, `rusqlite` for the state,

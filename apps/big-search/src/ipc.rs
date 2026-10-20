@@ -3,7 +3,7 @@
 //! and the client live in the shared `big-indexd-client` crate; this module
 //! only serves.
 use crate::watch::{WatchControlCommand, WatchMessage};
-use crate::{config, index, origin, query, settings};
+use crate::{catalogue, config, index, origin, query, settings};
 use anyhow::{Context, Result};
 use big_indexd_client::{PROTOCOL_VERSION, Reply, Request, RequestBody};
 use std::io::{self, BufRead, BufReader, Write};
@@ -72,6 +72,7 @@ pub fn serve(
     sock: &Path,
     control: Control,
     origin_db: std::path::PathBuf,
+    state_db: std::path::PathBuf,
     history: crate::history::SharedHistory,
 ) -> Result<()> {
     let listener = bind_private_socket(sock)?;
@@ -118,6 +119,7 @@ pub fn serve(
             &content_index,
             &control,
             &origin_db,
+            &state_db,
             &history,
         );
     }
@@ -186,6 +188,7 @@ fn spawn_connection(
     content_index: &IndexReader,
     control: &Control,
     origin_db: &Path,
+    state_db: &Path,
     history: &crate::history::SharedHistory,
 ) {
     let index = index.clone();
@@ -200,6 +203,7 @@ fn spawn_connection(
     // One reader per connection: it holds a `RefCell<Connection>`, so it is
     // not shareable, and it opens nothing until first use.
     let origin_reader = origin::OriginReader::new(origin_db.to_path_buf());
+    let catalogue = catalogue::CatalogueReader::new(state_db);
     // Shared with the versions writer: only it knows whether reflinks work
     // and whether space ran out.
     let history = std::sync::Arc::clone(history);
@@ -213,6 +217,7 @@ fn spawn_connection(
                 s,
                 &control,
                 &origin_reader,
+                &catalogue,
                 &history,
             ) {
                 log::warn!("connection error: {e:#}");
@@ -249,6 +254,7 @@ fn handle(
     stream: UnixStream,
     control: &Control,
     origin_reader: &origin::OriginReader,
+    catalogue: &catalogue::CatalogueReader,
     history: &crate::history::SharedHistory,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -278,6 +284,7 @@ fn handle(
                 request.body,
                 control,
                 origin_reader,
+                catalogue,
                 history,
             ),
             Err(e) => err(format!("bad request: {e}")),
@@ -328,12 +335,18 @@ fn dispatch(
     body: RequestBody,
     control: &Control,
     origin_reader: &origin::OriginReader,
+    catalogue: &catalogue::CatalogueReader,
     history: &crate::history::SharedHistory,
 ) -> Reply {
     match body {
-        RequestBody::Query(query_request) => {
-            query_reply(index, content_index, query_request, control, origin_reader)
-        }
+        RequestBody::Query(query_request) => query_reply(
+            index,
+            content_index,
+            query_request,
+            control,
+            origin_reader,
+            catalogue,
+        ),
         RequestBody::Origin(origin_request) => Reply::Origin {
             v: PROTOCOL_VERSION,
             origin: origin_reader.origin(Path::new(&origin_request.path)),
@@ -375,6 +388,7 @@ fn query_reply(
     query_request: big_indexd_client::QueryRequest,
     control: &Control,
     origin_reader: &origin::OriginReader,
+    catalogue: &catalogue::CatalogueReader,
 ) -> Reply {
     let wants_content = matches!(query_request.mode.as_str(), "content" | "both");
     if wants_content {
@@ -388,6 +402,7 @@ fn query_reply(
         query::QueryIndexes {
             name: index,
             content: Some(content_index),
+            catalogue,
         },
         &query_request.q,
         &query_request.mode,
@@ -584,7 +599,7 @@ fn daemon_capabilities() -> Vec<String> {
     }
     // Advertised so clients can detect support without a round trip.
     capabilities.push("sources".to_string());
-    // `list` mode filters by `under` and `ext` in the index.
+    // `list` mode filters by `under` and `ext`.
     capabilities.push("list-filtered".to_string());
     // `filter.mime` (a type or `major/*`) is answered, and hits carry `mime`.
     capabilities.push("mime-filter".to_string());

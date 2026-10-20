@@ -1,32 +1,25 @@
 //! Listing the name index without words to search for.
 use super::names::{filter_clauses, stored_mime};
-use super::{Filter, Hit, is_under};
+use super::{Filter, Hit, file_name, is_under};
 use crate::index::fields;
 use anyhow::Result;
 use std::collections::HashSet;
-use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, Query};
 use tantivy::schema::Value;
 use tantivy::{IndexReader, TantivyDocument};
 
-/// The `list` mode: what the name index holds under `filter.under` with one
-/// of `filter.ext`, up to `limit`. Both are answered by the index itself, so
-/// the ceiling counts matches rather than a sample of the whole index: cut
-/// first and filtered after, "every video in ~/Videos" would come back empty
-/// whenever the first files of the index held none.
-///
+/// The `list` mode with a type filter: what the name index holds matching
+/// `filter`, up to `limit`, in no particular order. The index answers the
+/// filter itself, so the ceiling counts matches rather than a sample of the
+/// whole index: cut first and filtered after, "every video in ~/Videos" would
+/// come back empty whenever the first files of the index held none.
 pub fn list_matching(reader: &IndexReader, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
     let clauses = filter_clauses(&fields(reader.searcher().index())?, filter);
     if clauses.is_empty() {
-        return list_all(reader, limit);
+        return collect_paths(reader, &AllQuery, limit);
     }
     collect_paths(reader, &BooleanQuery::new(clauses), limit)
-}
-
-/// Everything the name index holds, up to `limit`, in no particular order.
-pub fn list_all(reader: &IndexReader, limit: usize) -> Result<Vec<Hit>> {
-    collect_paths(reader, &AllQuery, limit)
 }
 
 /// The paths `query` matches, up to `limit`, as unranked hits.
@@ -46,10 +39,7 @@ fn collect_paths(reader: &IndexReader, query: &dyn Query, limit: usize) -> Resul
         }
         hits.push(Hit {
             path: path.to_string(),
-            name: Path::new(path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            name: file_name(path),
             source: doc
                 .get_first(f.source)
                 .and_then(|v| v.as_str())
@@ -84,7 +74,7 @@ pub fn list_paths(reader: &IndexReader, limit: usize, under: Option<&str>) -> Re
             let Some(path) = doc.get_first(f.path).and_then(|v| v.as_str()) else {
                 continue;
             };
-            if under.is_some_and(|dir| !is_under(path, dir)) {
+            if under.is_some_and(|dir| path != dir && !is_under(path, dir)) {
                 continue;
             }
             paths.push(path.to_string());
