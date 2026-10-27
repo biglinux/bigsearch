@@ -7,6 +7,7 @@
 [Unit]
 Description=big-search file index daemon
 Documentation=https://github.com/biglinux/bigsearch
+ConditionUser=!@system
 
 [Service]
 Type=simple
