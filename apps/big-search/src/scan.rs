@@ -244,6 +244,15 @@ pub fn add_name_only(
     metadata: Option<&std::fs::Metadata>,
 ) -> Result<()> {
     if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+        // One `stat` serves the day of the last change and the type.
+        let stat;
+        let metadata = match metadata {
+            Some(metadata) => Some(metadata),
+            None => {
+                stat = std::fs::symlink_metadata(path).ok();
+                stat.as_ref()
+            }
+        };
         let mut document = TantivyDocument::default();
         document.add_text(f.path, path.to_string_lossy());
         document.add_text(f.name, crate::index::name_text(name));
@@ -260,14 +269,7 @@ pub fn add_name_only(
         if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
             document.add_text(f.ext, ext.to_lowercase());
         }
-        let modified = metadata
-            .map(catalogue::meta_pair)
-            .or_else(|| {
-                std::fs::symlink_metadata(path)
-                    .ok()
-                    .map(|m| catalogue::meta_pair(&m))
-            })
-            .map_or(0, |(mtime, _)| mtime);
+        let modified = metadata.map_or(0, |m| catalogue::meta_pair(m).0);
         document.add_u64(f.mtime_day, mtime_day(modified));
         if let Some(mime) = crate::mime::of(path, metadata) {
             // The exact type first: it is the stored value a hit reads.

@@ -147,14 +147,19 @@ impl Database {
     }
 
     fn of(&self, path: &Path, known: Option<&std::fs::Metadata>) -> Option<String> {
-        // A link is typed as what it points to.
+        // A link is typed as what it points to. Without metadata the path is
+        // read, or a directory named `conf.d` would be typed by its name.
         let followed;
         let known = match known {
             Some(metadata) if metadata.is_symlink() => {
-                followed = std::fs::metadata(path).ok()?;
-                Some(&followed)
+                followed = Some(std::fs::metadata(path).ok()?);
+                followed.as_ref()
             }
-            known => known,
+            Some(metadata) => Some(metadata),
+            None => {
+                followed = std::fs::metadata(path).ok();
+                followed.as_ref()
+            }
         };
         // `conf.d` is a directory, not D source, and an empty `.mp4` no video.
         if known.is_some_and(std::fs::Metadata::is_dir) {
@@ -175,22 +180,8 @@ impl Database {
         {
             return Some(first.mime.clone());
         }
-        let stat;
-        let metadata = match known {
-            Some(metadata) => metadata,
-            None => {
-                stat = std::fs::metadata(path).ok()?;
-                &stat
-            }
-        };
-        if metadata.is_dir() {
-            return Some("inode/directory".to_string());
-        }
-        if !metadata.is_file() {
+        if !known?.is_file() {
             return None;
-        }
-        if metadata.len() == 0 {
-            return Some("application/x-zerosize".to_string());
         }
         self.settle_by_content(path, candidates)
     }
@@ -276,8 +267,7 @@ fn database() -> &'static Database {
 
 /// The media type of `path`, or `None` when it has none to tell (a FIFO, a
 /// device, a path that is gone). `metadata`, when the caller has it (the
-/// scan's walk does), saves a `stat` and tells a directory with a dotted name
-/// from a file.
+/// scan's walk does), saves a `stat`.
 #[must_use]
 pub fn of(path: &Path, metadata: Option<&std::fs::Metadata>) -> Option<String> {
     database().of(path, metadata)
@@ -474,17 +464,15 @@ mod tests {
         assert_eq!(db.of(&dir, None).as_deref(), Some("inode/directory"));
         let dotted = dir.join("conf.d");
         std::fs::create_dir_all(&dotted).unwrap();
-        let metadata = std::fs::symlink_metadata(&dotted).unwrap();
-        assert_eq!(
-            db.of(&dotted, Some(&metadata)).as_deref(),
-            Some("inode/directory")
-        );
         let hollow = write("hollow.mp4", b"");
-        let metadata = std::fs::metadata(&hollow).unwrap();
-        assert_eq!(
-            db.of(&hollow, Some(&metadata)).as_deref(),
-            Some("application/x-zerosize")
-        );
+        for (path, inode) in [
+            (&dotted, "inode/directory"),
+            (&hollow, "application/x-zerosize"),
+        ] {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            assert_eq!(db.of(path, Some(&metadata)).as_deref(), Some(inode));
+            assert_eq!(db.of(path, None).as_deref(), Some(inode));
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
