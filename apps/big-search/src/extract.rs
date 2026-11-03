@@ -440,7 +440,7 @@ fn office_text_with<R: std::io::Read + std::io::Seek>(
     let cap = max_extract_bytes();
     let mut out = String::new();
     for part in parts {
-        let Ok(mut entry) = zip.by_name(&part) else {
+        let Ok(mut entry) = zip_entry(&mut zip, &part) else {
             continue;
         };
         let mut xml = Vec::new();
@@ -656,7 +656,7 @@ fn for_each_pptx_slide(path: &Path, on_page: &mut dyn FnMut(&str)) {
         // calls to number the pages, and skipping one would move every slide
         // after it up by one.
         text.clear();
-        if let Ok(mut entry) = zip.by_name(&name) {
+        if let Ok(mut entry) = zip_entry(&mut zip, &name) {
             xml.clear();
             if entry
                 .by_ref()
@@ -718,8 +718,10 @@ fn for_each_office_page(
 pub(crate) fn slide_names<R: std::io::Read + std::io::Seek>(
     zip: &zip::ZipArchive<R>,
 ) -> Vec<String> {
+    // A name the archive cannot decode is no slide of ours: they are ASCII.
     let mut names: Vec<String> = zip
         .file_names()
+        .filter_map(Result::ok)
         .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
         .map(String::from)
         .collect();
@@ -734,6 +736,20 @@ pub(crate) fn slide_names<R: std::io::Read + std::io::Seek>(
     names
 }
 
+/// Entry `name` of `zip`, matched on the bytes it is stored under, so that a
+/// missing name costs one hash lookup: on a miss, `ZipArchive::by_name`
+/// decodes every entry's name, which a crafted archive would repeat for each
+/// name its manifest asks for.
+fn zip_entry<'a, R: std::io::Read + std::io::Seek>(
+    zip: &'a mut zip::ZipArchive<R>,
+    name: &str,
+) -> zip::result::ZipResult<zip::read::ZipFile<'a, R>> {
+    let index = zip
+        .index_for_name_raw(name.as_bytes())
+        .ok_or(zip::result::ZipError::FileNotFound)?;
+    zip.by_index(index)
+}
+
 /// Bytes of a zip entry (capped), or `None`.
 pub(crate) fn zip_entry_bytes(path: &Path, name: &str) -> Option<Vec<u8>> {
     let cap = max_extract_bytes();
@@ -742,7 +758,7 @@ pub(crate) fn zip_entry_bytes(path: &Path, name: &str) -> Option<Vec<u8>> {
     if zip.len() > MAX_ZIP_ENTRIES {
         return None;
     }
-    let mut entry = zip.by_name(name).ok()?;
+    let mut entry = zip_entry(&mut zip, name).ok()?;
     let mut xml = Vec::new();
     entry.by_ref().take(cap as u64).read_to_end(&mut xml).ok()?;
     Some(xml)

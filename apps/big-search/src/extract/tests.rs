@@ -266,3 +266,45 @@ fn docx_without_breaks_reports_no_page() {
     assert!(pages_with(&path, &["soloword".to_string()]).is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn pptx_slides_sort_by_number() {
+    let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for name in [
+        "ppt/slides/slide10.xml",
+        "ppt/slides/slide2.xml",
+        "ppt/slides/_rels/slide1.xml.rels",
+        "ppt/notesSlides/notesSlide1.xml",
+        "ppt/slides/slide1.xml",
+    ] {
+        zw.start_file(name, stored_zip_options()).unwrap();
+    }
+    let zip = zip::ZipArchive::new(zw.finish().unwrap()).unwrap();
+    assert_eq!(
+        slide_names(&zip),
+        [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide2.xml",
+            "ppt/slides/slide10.xml"
+        ]
+    );
+}
+
+#[test]
+fn zip_entries_match_stored_bytes() {
+    let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for name in ["plain.xml", "QQ.xml"] {
+        zw.start_file(name, stored_zip_options()).unwrap();
+    }
+    // Store the second name as CP437 bytes, which `by_name` decodes to "Çü".
+    let mut bytes = zw.finish().unwrap().into_inner();
+    for at in 0..bytes.len() - 1 {
+        if bytes[at..].starts_with(b"QQ.xml") {
+            bytes[at..at + 2].copy_from_slice(&[0x80, 0x81]);
+        }
+    }
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    assert!(zip.by_name("Çü.xml").is_ok());
+    assert!(zip_entry(&mut zip, "Çü.xml").is_err());
+    assert!(zip_entry(&mut zip, "plain.xml").is_ok());
+}
