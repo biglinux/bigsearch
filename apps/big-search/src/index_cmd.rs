@@ -169,10 +169,9 @@ fn ensure_content_state_matches_index(content_index: &tantivy::Index) -> Result<
     if cached_content_paths == 0 {
         return Ok(());
     }
-    // Only an empty index proves the rows lie. Fewer documents than rows is the
-    // normal state: policy-skipped files and files with no extractable body
-    // keep a row without a document. Treating that as divergence wiped every
-    // extraction done so far at each restart before the first pass completed.
+    // Only an empty index proves the rows lie: policy-skipped files and files
+    // with no extractable body keep a row without a document, so fewer documents
+    // than rows is normal and must not wipe the extraction done so far.
     let indexed_content_documents = index::document_count(&content_index.reader()?)?;
     if indexed_content_documents == 0 {
         log::warn!(
@@ -276,9 +275,7 @@ pub(super) fn cmd_daemon() -> Result<()> {
         pending_content: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         unwatched_dirs: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
-    // One versions store for the whole daemon: the thread that writes versions
-    // and the connections that answer questions about them are looking at the
-    // same thing, so what one learns the other can say.
+    // One versions store shared by the watcher (writes) and IPC (answers).
     let history: big_search::history::SharedHistory = std::sync::Arc::new(std::sync::Mutex::new(
         big_search::history::History::open(&big_search_config::read().history),
     ));
@@ -517,9 +514,8 @@ fn backfill_first_batch(
 }
 
 fn open_query_readers() -> Result<(tantivy::IndexReader, tantivy::IndexReader)> {
-    // Main thread serves queries + lifecycle commands; the reader reloads on commit.
-    // Built once and held for the daemon's life; `ReloadPolicy::OnCommitWithDelay`
-    // (tantivy's default) refreshes them from the meta.json watch after a commit.
+    // Main thread serves queries and lifecycle commands. The readers live for the
+    // daemon's life; tantivy's default `OnCommitWithDelay` reloads them on commit.
     // Their own instances of the indexes, mapped for random reads: the watcher's
     // keep read-ahead for merges and scans (see `index::open_for_queries`).
     let name_reader = index::open_for_queries(&config::index_dir())

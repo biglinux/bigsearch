@@ -130,9 +130,7 @@ fn list_mode_answers_wordless_queries() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// The folder and the extensions narrow the index before the ceiling: a
-/// sample cut first (the first `limit` documents of all) held none of
-/// the videos, and the listing came back empty.
+/// A type filter finds videos by what they are, extension or not.
 #[test]
 fn type_filter_finds_videos_by_content() {
     let dir = std::env::temp_dir().join(format!("lsearch-mime-query-{}", std::process::id()));

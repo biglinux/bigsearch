@@ -31,10 +31,8 @@ fn pending_batch_reports_more_work() {
     std::fs::remove_dir_all(&base).ok();
 }
 
-/// A tag write changes an extended attribute and nothing else, so the file
-/// looks unchanged and the pass skips it. Forgetting the row is the only
-/// thing that gets the work done, and a tag nobody can search for is a tag
-/// that does not work at all.
+/// A tag write changes an extended attribute and nothing else, so only
+/// forgetting the row makes the pass read the file again.
 #[test]
 fn forgotten_row_is_read_again() {
     let base = std::env::temp_dir().join(format!("lsearch-content-forget-{}", std::process::id()));
@@ -162,8 +160,7 @@ fn catalog_batch_defers_recent_edits() {
     std::fs::remove_dir_all(&base).ok();
 }
 
-/// The 55.9 %-ghost defect: a deleted file kept answering content searches
-/// because nothing removed its content document.
+/// A deleted file must stop answering content searches.
 #[test]
 fn deleted_files_stop_answering_content_searches() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -265,10 +262,7 @@ fn skipped_entries_become_tombstones() {
     // extraction worker skips it silently and never records a content row,
     // so only the tombstone keeps it from staying pending forever.
     let vanished = base.join("apagado.md");
-    // A directory: extensionless, so the metadata sniffer claims it, but it
-    // has nothing to extract and its mtime moves whenever its contents do.
-    // Left as a candidate it sits inside the edit cooldown forever and the
-    // "still being indexed" hint never clears.
+    // Extension-less, so a sniff candidate, but nothing to extract.
     let folder = base.join("uma-pasta");
     std::fs::write(&movie, b"binario").unwrap();
     std::fs::write(&note, b"texto").unwrap();
@@ -339,9 +333,7 @@ fn symlinks_skip_content_extraction() {
     std::fs::write(&target, b"same target").unwrap();
     symlink(&target, &link).unwrap();
 
-    // The contract is about the pipeline, not a helper: a symlink must not
-    // be extracted, so only the real file ends up with a body. Indexing the
-    // link's own text would duplicate the target under a second path.
+    // Through the pipeline: a link must not duplicate its target's body.
     let index = crate::index::open_content_or_create(&base.join("idx")).unwrap();
     index_content_limited(&index, vec![target.clone(), link.clone()], None).unwrap();
     let hits = crate::query::search_content(&index.reader().unwrap(), "target", 10).unwrap();

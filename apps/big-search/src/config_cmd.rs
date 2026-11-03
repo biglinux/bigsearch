@@ -1,8 +1,5 @@
 //! The `config` subcommand: inspect and edit config.toml from the CLI.
-//! Split out of `main.rs`; a child module of the crate root, so
-//! `use super::*` supplies the shared imports, color helpers, and the
-//! library `config`/`settings` modules. The dispatcher glob-imports the
-//! entry point (`cmd_config`) back.
+//! A child module of `main.rs`; `use super::*` supplies its imports and helpers.
 
 use super::*;
 
@@ -208,11 +205,8 @@ pub(super) fn set_default_config_value(key: &str, literal: String) -> Result<()>
     set_default_config_literals(&[(key, literal)])
 }
 
-/// Apply one of the named profiles.
-///
-/// The profiles themselves are data in `big-search-config`, so the command line
-/// and the desktop's settings window offer the same four and write the same
-/// values.
+/// Apply one of the named profiles, defined in `big-search-config` and shared
+/// with the settings window.
 pub(super) fn apply_config_preset(name: &str) -> Result<()> {
     let Some(preset) = big_search_config::Preset::parse(name) else {
         anyhow::bail!("unknown preset: {name}");

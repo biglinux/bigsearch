@@ -49,7 +49,6 @@ fn count_and_list_subcommands_report_catalog() {
 
     run(&home, &xdg_storage_home, &["reindex", home_str]);
 
-    // count: total cataloged entries.
     assert_eq!(run(&home, &xdg_storage_home, &["count"]), "3");
     // count --under DIR: scoped tally (sub/ + sub/b.md).
     assert_eq!(
@@ -57,7 +56,6 @@ fn count_and_list_subcommands_report_catalog() {
         "2"
     );
 
-    // list: every path, sorted, one per line.
     let listed: Vec<String> = run(&home, &xdg_storage_home, &["list"])
         .lines()
         .map(String::from)

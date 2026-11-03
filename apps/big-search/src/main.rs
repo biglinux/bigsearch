@@ -234,9 +234,7 @@ fn main() -> Result<()> {
     }
 }
 
-/// Parse flags out of the tokens: `-n N`/`--limit N`, `-a`/`--all`,
-/// `-p`/`--pages` (show PDF/PPTX page numbers), `--ext EXT` (repeatable; restrict
-/// to those extensions, server-side). The rest is the query.
+/// Search flags parsed by [`parse_query`]; the remaining tokens form the query.
 struct Search {
     limit: usize,
     pages: bool,
@@ -636,8 +634,7 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
         print_usage();
         return Ok(());
     }
-    // Server-side filter + single page; the daemon resolves everything (the CLI is
-    // just another thin client of the shared crate). `--under` is a server filter.
+    // Filters and paging are resolved server-side.
     let filter = query::Filter {
         under: s.under.clone(),
         ext: s.ext.clone(),
@@ -648,8 +645,7 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
         limit: s.limit,
     };
 
-    // Prefer the warm daemon (via the shared client); fall back to opening the index
-    // read-only when no daemon is listening.
+    // Prefer the warm daemon; open the index read-only when none is listening.
     let client = daemon_client()?;
     let daemon_query = if s.include_origin {
         client.query_with_origin(&s.query, mode, filter.clone(), page.clone())

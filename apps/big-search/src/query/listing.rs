@@ -25,10 +25,6 @@ pub fn list_matching(reader: &IndexReader, filter: &Filter, limit: usize) -> Res
 }
 
 /// Everything the name index holds, up to `limit`, in no particular order.
-///
-/// The order is the caller's business: `run_query` sorts what survives the
-/// filters, and asking tantivy to rank documents against a query that is not
-/// a query would only spend time producing a ranking nobody reads.
 pub fn list_all(reader: &IndexReader, limit: usize) -> Result<Vec<Hit>> {
     collect_paths(reader, &AllQuery, limit)
 }

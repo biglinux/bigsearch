@@ -235,18 +235,13 @@ pub enum RequestBody {
     Reindex(ReindexRequest),
     /// Which directories this daemon catalogues. See [`IndexedRoot`].
     Sources,
-    /// Forget every recorded file origin.
-    ///
-    /// Done by the daemon rather than by deleting the file: the daemon holds an
-    /// open write-ahead connection to that database, and a client that unlinked
-    /// the file would leave it writing into an inode nobody can read.
+    /// Forget every recorded file origin. Done by the daemon because it holds
+    /// the database open; unlinking the file would orphan its writes.
     ClearOrigin,
     /// The earlier versions kept for one document.
     Versions(PathRequest),
-    /// Keep the state a document is in right now.
-    ///
-    /// What a file manager asks for just before putting an older version back,
-    /// so changing one's mind about that is possible too.
+    /// Keep the state a document is in right now, e.g. before restoring an
+    /// older version, so the restore can be undone.
     SaveVersion(PathRequest),
     /// Forget the versions of one document.
     ForgetVersions(PathRequest),
@@ -395,12 +390,8 @@ pub enum Reply {
 
 /// Why a machine keeps no earlier versions of documents, when it keeps none.
 ///
-/// The type lives here, in the crate both sides already depend on, because each
-/// value is a different sentence on three screens: the file manager's history
-/// tab, the search settings, and the command line. As a bare string those three
-/// all ended in a catch-all arm, so a reason added later showed up as "not kept
-/// on this computer" everywhere and nobody noticed. A variant added here is a
-/// compile error in all three.
+/// An enum shared by daemon and clients so a new reason is a compile error in
+/// every screen that explains it, not a silent catch-all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unavailable {
     /// The person turned it off.
@@ -455,8 +446,7 @@ pub struct VersionsAnswer {
     pub paused_for_space: bool,
 }
 
-/// One directory the daemon catalogues, as a caller standing in a folder needs
-/// to hear it.
+/// One directory the daemon catalogues.
 ///
 /// This exists so a file manager can tell "the index has nothing matching here"
 /// apart from "the index has never looked here": two states that produce the
@@ -682,8 +672,6 @@ mod tests {
             );
         }
 
-        // And it goes back out in the same words, so the daemon and the GUI
-        // cannot disagree about the spelling.
         let hit = Hit {
             match_kind: MatchKind::Both,
             ..Hit::default()

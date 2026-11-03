@@ -235,9 +235,8 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
         return Ok(0);
     }
     let f = content_fields(index)?;
-    // One writer for the whole pass. A writer per batch, dropped without
-    // waiting, leaves its merges running: a cold pass over 220 000 files had
-    // 23 writers merging at once, 466 segments and nearly 1 GB resident.
+    // One writer for the whole pass: a writer per batch, dropped without
+    // waiting, leaves its merges running, and they pile up across batches.
     let mut writer = crate::index::content_writer(index).context("content writer")?;
     let mut indexed_total = 0u64;
     let mut cursor: CatalogCursor = None;

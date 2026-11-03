@@ -14,17 +14,13 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-/// Extract PDF text: `timeout <N> pdftotext -q -- <path> -` → stdout. No shell.
-/// PDFs are not skipped by file size by default. Stdout is read with a hard cap;
-/// `Command::output()` would buffer the whole PDF text layer before truncation,
-/// which can spike RSS on pathological documents. Set `BIG_SEARCH_PDF_MAX_MB` if
-/// a deployment explicitly wants to skip very large PDF inputs.
+/// Extract PDF text with `pdftotext -q -- <path> -`, no shell. Stdout is read
+/// with a hard cap, never buffered whole, so a pathological text layer cannot
+/// spike memory. `BIG_SEARCH_PDF_MAX_MB` optionally skips large inputs.
 pub(crate) fn read_pdf(path: &Path) -> Option<String> {
     let cap = crate::extract::max_extract_bytes();
     let bytes = pdftotext_capped(path, cap, &[])?;
-    // The bytes become the string when they are valid UTF-8, which they are for
-    // every ordinary PDF: `from_utf8_lossy(&bytes).into_owned()` copied the whole
-    // text layer a second time.
+    // Valid UTF-8 (every ordinary PDF) becomes the string without a second copy.
     let text = match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(invalid) => String::from_utf8_lossy(invalid.as_bytes()).into_owned(),

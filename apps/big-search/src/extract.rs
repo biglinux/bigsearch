@@ -318,8 +318,7 @@ pub fn content_for_mime(path: &Path, mime: &str) -> Option<String> {
 fn read_text(path: &Path) -> Option<String> {
     let size = text_input_size(path)?;
     let cap = max_extract_bytes();
-    // The buffer is the right size from the start. Growing it costs a copy of
-    // everything read so far at each step, and a text file is read whole.
+    // Sized up front: a text file is read whole, and growth copies it.
     let mut buf = Vec::with_capacity(size.min(cap as u64) as usize);
     std::fs::File::open(path)
         .ok()?
@@ -333,9 +332,6 @@ fn read_text(path: &Path) -> Option<String> {
 }
 
 /// The size of a text file, or `None` when it is over the input cap.
-///
-/// One `stat`, answering both questions: whether to read the file at all, and
-/// how big a buffer it needs.
 fn text_input_size(path: &Path) -> Option<u64> {
     let size = std::fs::metadata(path).ok()?.len();
     let cap = crate::settings::text_max_input_bytes();
@@ -739,10 +735,6 @@ pub(crate) fn slide_names<R: std::io::Read + std::io::Seek>(
 }
 
 /// Bytes of a zip entry (capped), or `None`.
-///
-/// Bytes, not text: the XML parser reads bytes, so turning the part into a
-/// `String` first only buys a second copy of a part that can be tens of
-/// megabytes.
 pub(crate) fn zip_entry_bytes(path: &Path, name: &str) -> Option<Vec<u8>> {
     let cap = max_extract_bytes();
     let file = std::fs::File::open(path).ok()?;
@@ -772,9 +764,6 @@ fn is_page_break(e: &quick_xml::events::BytesStart, break_tag: &str) -> bool {
 }
 
 /// Append all XML character data from `xml` to `out`, a space between elements.
-///
-/// Bytes, not text: every caller has an office part it just read, and turning
-/// that into a `String` first is a copy of the whole part for nothing.
 pub fn xml_text(xml: &[u8], out: &mut String) {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_reader(xml);

@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 pub use big_search_config::{ContentIndexMode, SymlinkPolicy};
-/// The configuration file's own shape lives in `big-search-config`, which the
-/// desktop's settings window writes and this service reads. Named here the way
-/// this file has always named them, so the code below reads unchanged.
+// The file's shape is owned by `big-search-config`, shared with the settings window.
 use big_search_config::{Defaults, SearchConfig as ConfigFile, SourceEntry as SourceConfiguration};
 
 impl From<SymlinkPolicy> for crate::scan_roots::SymlinkPolicy {
@@ -51,9 +49,7 @@ pub struct Source {
     pub id: String,
     /// Display / device name (config `name` › fs label › path basename).
     pub name: String,
-    /// Four source booleans packed into a single byte. This keeps cloned source
-    /// descriptors smaller and makes policy checks a bit-mask read instead of four
-    /// separately-addressed bool fields.
+    /// Content, metadata, removable and network, packed into one byte.
     pub flags: SourceFlags,
 }
 
@@ -400,11 +396,8 @@ fn read_config() -> ConfigFile {
     CONFIG.get_or_init(read_config_uncached).clone()
 }
 
-/// Read the file through the crate that owns its shape.
-///
-/// Not a second parser here: the settings window writes this file through
-/// `big_search_config`, and a service resolving the path its own way is how the
-/// two ended up disagreeing about where the file even is.
+/// Read the file through `big_search_config`, the same path and parser the
+/// settings window uses.
 ///
 /// A malformed or unreadable file keeps the tables that still parse and turns
 /// origin and history off (`big_search_config::read_text`).

@@ -10,11 +10,9 @@
 //!
 //! ## The service never writes it
 //!
-//! `big-search.service` runs with `ProtectHome=read-only`. The daemon reads this
-//! file and nothing else; every write here comes from a tool the person
-//! started. That is also why writing is careful: the file belongs to them, it
-//! has their comments in it, and it is read by a service that may be running at
-//! the same moment.
+//! `big-search.service` runs with `ProtectHome=read-only`; every write comes
+//! from a tool the person started. The file is theirs and a running service
+//! may read it at any moment, so:
 //!
 //! * Comments and layout survive a change. A setting is rewritten in place, and
 //!   only a setting that was not there yet is appended.
@@ -54,9 +52,8 @@ pub struct SearchConfig {
 /// Settings that apply to every catalogued folder unless the folder says
 /// otherwise.
 ///
-/// The field names are the keys in the file, and they are what the service has
-/// always read; renaming one here silently changes what a person's existing file
-/// means.
+/// Field names are the file's keys: renaming one changes what existing files
+/// mean.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Defaults {
@@ -106,19 +103,14 @@ impl Default for Defaults {
 }
 
 /// Whether the service remembers where files came from, and from which
-/// evidence.
-///
-/// Its own block rather than two more `[defaults]` keys: this is the one part of
-/// the configuration that is about privacy rather than about how much of the
-/// disk to read, and the settings window shows it as its own section.
+/// evidence. Its own `[origin]` block because it is a privacy setting.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Origin {
     /// Remember where files came from at all.
     pub enabled: bool,
-    /// Also read the download list the web browsers keep. Off unless the person
-    /// turns it on: that list is the browser's, and nobody expects a file
-    /// manager to have read it.
+    /// Also read the download list the web browsers keep. Off by default: that
+    /// list is the browser's.
     pub browser_history: bool,
 }
 
@@ -141,8 +133,7 @@ impl Default for Origin {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct FileHistory {
-    /// Keep earlier versions at all. On where the disk can do it; the service
-    /// finds out for itself and stays quiet where it cannot.
+    /// Keep earlier versions at all, where the filesystem supports it.
     pub enabled: bool,
     /// Most versions kept per document. A ceiling, not a target: the thinning
     /// by age below usually keeps fewer.
@@ -348,11 +339,10 @@ fn salvage(text: &str) -> SearchConfig {
     config
 }
 
-/// The same, but saying what is wrong with the file.
+/// Parse the file's text, reporting what is wrong with it.
 ///
-/// A hand-edited `config.toml` with a typo silently becomes the defaults
-/// everywhere else; the service is the one place that can tell somebody, so it
-/// needs the error rather than the fallback.
+/// For the service, the one place that can tell somebody their hand-edited
+/// file has a typo; everything else uses [`read`] and its defaults.
 ///
 /// # Errors
 ///
@@ -361,11 +351,8 @@ pub fn parse(text: &str) -> Result<SearchConfig, toml::de::Error> {
     toml::from_str(text)
 }
 
-/// The named amounts of work the settings window offers.
-///
-/// Each is a whole set of values rather than one knob, because the knobs only
-/// make sense together: an index that keeps word frequencies and a four-megabyte
-/// extraction cap is a contradiction nobody would choose on purpose.
+/// The named amounts of work the settings window offers. Each sets several
+/// keys together, because they only make sense as a set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
     /// Names of files and folders only.
@@ -485,10 +472,7 @@ fn distinguishing(defaults: &Defaults) -> (bool, ContentIndexMode, u64, u64, u64
 }
 
 /// Apply a preset to a settings value in memory, the same way writing it to the
-/// file would.
-///
-/// This is how a settings window offers the presets without keeping a second
-/// copy of their values: it applies one here and writes out the fields.
+/// file would, so a settings window needs no second copy of the values.
 pub fn apply_preset_in_memory(defaults: &mut Defaults, preset: Preset) {
     for (key, literal) in preset.values() {
         match key {

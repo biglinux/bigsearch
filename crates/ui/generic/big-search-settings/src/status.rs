@@ -1,13 +1,9 @@
 // SPDX-FileCopyrightText: 2026 BigLinux contributors
 // SPDX-License-Identifier: MIT
 
-//! How the search is doing, in the words of somebody who is not going to read
-//! the word "index".
-//!
-//! Everything here comes from asking the service, every couple of seconds, and
-//! nothing is assumed: a service that is not answering is reported as switched
-//! off with a button to switch it on, never as "0 files", which reads as an
-//! empty disk.
+//! How the search is doing, polled from the service every couple of seconds.
+//! A service that does not answer is shown as switched off, with a button to
+//! start it, never as "0 files".
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -69,8 +65,7 @@ impl StatusCard {
         words.set_margin_top(6);
         words.set_margin_bottom(6);
 
-        // No title: the window is already called "System search", and a heading
-        // repeating the title above it is furniture.
+        // No title: it would repeat the window's.
         let group = adw::PreferencesGroup::new();
         group.add(&words);
 
@@ -125,8 +120,7 @@ impl StatusCard {
 
     /// Ask the service how it is doing, now and every couple of seconds.
     pub(crate) fn start_polling(&self) {
-        // Never two timers: the page starts this every time it comes back on
-        // screen, and a second one would ask twice as often for ever.
+        // The page calls this every time it is mapped; never keep two timers.
         self.stop_polling();
         self.refresh();
         let card = self.clone();
@@ -137,8 +131,7 @@ impl StatusCard {
         *self.poll.borrow_mut() = Some(source);
     }
 
-    /// Stop asking. Called when the window closes: a timer left running keeps
-    /// waking the process up to ask about a window nobody is looking at.
+    /// Stop asking, so a closed window does not keep waking the process.
     pub(crate) fn stop_polling(&self) {
         if let Some(source) = self.poll.borrow_mut().take() {
             source.remove();
@@ -181,8 +174,7 @@ impl StatusCard {
         }
     }
 
-    /// Building the list again is the one action here that costs real time, so
-    /// it is the one that asks first.
+    /// Rebuilding costs real time, so it asks first.
     fn confirm_rebuild(&self, anchor: &gtk::Button) {
         let dialog = adw::AlertDialog::new(
             Some(&tr("Build the list of files again?")),
@@ -271,10 +263,8 @@ impl StatusCard {
     }
 }
 
-/// Ask the service something on a worker thread and answer on the main loop.
-///
-/// The socket blocks; a round trip on the main loop is a frozen window for as
-/// long as the service takes.
+/// Ask the service something on a worker thread (the socket blocks) and
+/// answer on the main loop.
 fn ask<T: Send + 'static>(
     question: impl FnOnce(&big_indexd_client::Client) -> Result<T, big_indexd_client::ClientError>
     + Send
@@ -301,8 +291,7 @@ fn ask<T: Send + 'static>(
     });
 }
 
-/// A count with its thousands separated, because six digits in a row is not a
-/// number anybody reads.
+/// A count with its thousands separated.
 fn grouped(count: u64) -> String {
     let digits = count.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);

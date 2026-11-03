@@ -147,8 +147,6 @@ impl Effort {
                 if effort.syncing.get() || !choice.is_active() {
                     return;
                 }
-                // Written as the whole set, the same values the command line
-                // writes for the same name.
                 for (key, literal) in preset_values(preset) {
                     settings.set_default(key, &literal);
                 }

@@ -113,11 +113,9 @@ pub struct Version {
 
 /// The one versions store, as everything that touches it holds it.
 ///
-/// One store and one lock, not one store per user of it: whether this disk can
-/// share blocks at all, and whether space has run out, are learned by *trying*
-/// to write a version. A second store opened beside this one would answer both
-/// questions with "not tested yet" for ever, and the screens that exist to say
-/// "this computer does not keep earlier versions" would never say it.
+/// One store and one lock: whether this disk can share blocks, and whether
+/// space has run out, are learned by *trying* to write a version, so a second
+/// store would report "not tested yet" forever.
 pub type SharedHistory = std::sync::Arc<std::sync::Mutex<History>>;
 
 /// A version [`History::prepare_version`] decided to keep, before its copy.
@@ -150,8 +148,7 @@ pub struct History {
     paused_for_space: bool,
     /// A version was written since the budget was last enforced. Enforcing it
     /// sums the whole `versions` table, so it runs once per housekeeping turn
-    /// rather than per version: per version, a folder of new documents cost a
-    /// full-table pass each, quadratic in the size of the store.
+    /// rather than per version.
     budget_unchecked: bool,
     skip_git_repositories: bool,
     respect_gitignore: bool,
@@ -317,12 +314,8 @@ impl History {
 
     /// The earlier versions of one document, newest first.
     ///
-    /// The state the document is in right now is left out, and that is the
-    /// difference between a useful list and a confusing one: the newest version
-    /// is normally a clone taken seconds after the last save, so it is the
-    /// document itself. Offering "go back to this version" for the state you are
-    /// already in is an action that does nothing, sitting at the top of the list
-    /// where the eye lands first.
+    /// The state the document is in right now is left out: the newest version
+    /// is normally a clone of it, and "go back" to it would do nothing.
     pub fn versions(&self, path: &Path) -> Result<Vec<Version>> {
         let Some(conn) = &self.conn else {
             return Ok(Vec::new());
@@ -406,9 +399,7 @@ impl History {
             return not_kept("this disk cannot share blocks");
         }
         // The baseline is allowed even when space is short: it shares the live
-        // file's blocks and costs no data, and it is what leaves somebody with
-        // at least one version on a disk that was already full when they
-        // started.
+        // file's blocks and costs no data.
         if reason != Reason::Baseline && self.paused_for_space {
             return not_kept("the disk is short of space");
         }

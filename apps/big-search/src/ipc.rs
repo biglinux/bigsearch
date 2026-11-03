@@ -200,10 +200,8 @@ fn spawn_connection(
     // One reader per connection: it holds a `RefCell<Connection>`, so it is
     // not shareable, and it opens nothing until first use.
     let origin_reader = origin::OriginReader::new(origin_db.to_path_buf());
-    // The one versions store, shared with the thread that writes versions.
-    // A second store opened here would answer from a fresh state: whether
-    // this disk can share blocks at all, and whether space ran out, are
-    // things only the thread that has tried to write a version knows.
+    // Shared with the versions writer: only it knows whether reflinks work
+    // and whether space ran out.
     let history = std::sync::Arc::clone(history);
     let spawned = std::thread::Builder::new()
         .name("ipc-conn".into())
@@ -538,11 +536,8 @@ fn save_version_reply(
     })
 }
 
-/// The catalogued directories, as a caller standing in a folder needs them.
-///
-/// `content` is per source rather than global: `names_only` turns extraction off
-/// everywhere, and a source may also have it off on its own, and either way a
-/// search for words inside a document cannot be answered from here.
+/// The catalogued directories. `content` is per source: off when `names_only`
+/// is set globally or the source disables extraction.
 fn indexed_roots() -> Vec<big_indexd_client::IndexedRoot> {
     let names_only = settings::names_only();
     settings::sources()
@@ -587,12 +582,9 @@ fn daemon_capabilities() -> Vec<String> {
     } else {
         capabilities.push("names-only".to_string());
     }
-    // Named so a client can tell a daemon that will answer `sources` from one
-    // that refuses it, without spending a round trip to find out.
+    // Advertised so clients can detect support without a round trip.
     capabilities.push("sources".to_string());
-    // The `list` mode narrows by `under` and `ext` inside the index, so it
-    // lists every match rather than filtering a sample of the index. An older
-    // daemon answers the same request with an empty page.
+    // `list` mode filters by `under` and `ext` in the index.
     capabilities.push("list-filtered".to_string());
     // `filter.mime` (a type or `major/*`) is answered, and hits carry `mime`.
     capabilities.push("mime-filter".to_string());

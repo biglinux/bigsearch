@@ -115,11 +115,9 @@ fn tokenize(text: &str) -> Vec<Token> {
 /// Memory stays constant in the body's size: no vector of every character in
 /// the document, and no `String` per token.
 ///
-/// The cursor is a byte offset rather than a character iterator because most
-/// bodies are mostly ASCII: a separator or a letter below 0x80 is decided from
-/// its byte, and a word is copied into the token as one slice. Decoding and
-/// pushing every character one by one made this the hottest function of a
-/// content pass.
+/// The cursor is a byte offset because most bodies are mostly ASCII: an ASCII
+/// separator or letter is decided from its byte, and a word is copied into the
+/// token as one slice.
 pub struct CjkTokenStream<'a> {
     /// The text composed as [`crate::extract::compose`] says: a decomposed
     /// Hangul syllable or halfwidth kana must be one character before it can

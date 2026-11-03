@@ -26,10 +26,8 @@ pub use big_indexd_client::{Filter, Hit, MatchKind, Page, QueryOutcome};
 
 /// Ceiling on candidates pulled from the index before filtering/paging. Bounds the
 /// daemon's work (and `stat` count) per request regardless of how broad the query is.
-///
-/// From the shared crate rather than written here: it caps `QueryOutcome::total`,
-/// so a client has to know it to tell an exact count from a floor, and one fact
-/// in two files is a fact that can drift.
+/// Shared with clients: it caps `QueryOutcome::total`, so they can tell an exact
+/// count from a floor.
 use big_indexd_client::CANDIDATE_CEILING;
 
 /// Longest query read, in characters; the rest is ignored. The query comes
@@ -171,9 +169,8 @@ fn keep_path_matches(base: Vec<Hit>, filter: &Filter) -> Vec<Hit> {
         .collect();
     base.into_iter()
         .filter(|h| under.is_none_or(|d| is_under(&h.path, d)))
-        // The extension is read once per candidate, not once per wanted
-        // extension: `ext_of` builds a lowercase `String`, and inside `any` that
-        // happened again for every extension in the filter.
+        // Borrow the extension once per candidate instead of building a
+        // lowercase `String` per wanted extension.
         .filter(|h| {
             exts.is_empty() || {
                 let ext = Path::new(&h.path)

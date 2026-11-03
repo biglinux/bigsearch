@@ -11,7 +11,6 @@ export HOME="$T/home" XDG_DATA_HOME="$T/data" XDG_CONFIG_HOME="$T/cfg" \
        XDG_RUNTIME_DIR="$T/run" RUST_LOG=off
 mkdir -p "$HOME/churn" "$HOME/docs" "$XDG_RUNTIME_DIR"
 
-# Seed some indexable content.
 for i in $(seq 1 50); do printf 'alpha beta gamma report %s\n' "$i" > "$HOME/docs/seed_$i.txt"; done
 "$BIN" reindex "$HOME" >/dev/null 2>&1
 

@@ -43,9 +43,8 @@ pub fn eligible_metadata(path: &Path) -> Option<std::fs::Metadata> {
 
 /// Whether a path is even the kind of file that earns versions.
 ///
-/// The name alone, no disk: callers use it to drop the great majority of what
-/// the watcher reports before it costs a channel send and a place in the
-/// worker's queue.
+/// The name alone, no disk: callers use it to drop most of what the watcher
+/// reports before it costs a channel send and a place in the worker's queue.
 #[must_use]
 pub fn may_be_a_document(path: &Path) -> bool {
     // The extension first, without building a string: it rejects almost every
@@ -190,7 +189,7 @@ mod tests {
         assert!(!of("Password.md"));
         assert!(!of("cofre.kdbx"));
         assert!(!of("id_rsa.pem"));
-        // Source code is out of this first version on purpose.
+        // Source code is left to git.
         assert!(!of("main.rs"));
     }
 }

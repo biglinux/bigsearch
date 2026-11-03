@@ -10,13 +10,11 @@ pub(super) struct WatchBatch {
     pub(super) paths: HashSet<PathBuf>,
     origin_paths: Vec<PathBuf>,
     origin_overflow: bool,
-    /// Files that may have just been saved, for the versions worker. Bounded,
-    /// because an unpacked archive must not grow a list the size of itself on a
-    /// machine with little memory.
+    /// Files that may have just been saved, for the versions worker. Bounded by
+    /// [`Self::HISTORY_LIMIT`].
     pub(super) history_paths: HashSet<PathBuf>,
-    /// Renames, kept as the pair the kernel reported. The destination alone is
-    /// not enough: the save that usually follows replaces the inode, and then
-    /// nothing connects the document to its own past.
+    /// Renames as reported pairs: the save that usually follows replaces the
+    /// inode, so the destination alone would lose the document's past.
     pub(super) history_renames: Vec<(PathBuf, PathBuf)>,
 }
 
@@ -45,11 +43,8 @@ impl WatchBatch {
         }
     }
 
-    /// Most files one batch offers the versions worker.
-    ///
-    /// Unpacking an archive of ten thousand documents is one batch; the worker
-    /// would get to them through the catalogue pass anyway, and a list that size
-    /// is memory a small machine does not have to spare.
+    /// Most files one batch offers the versions worker; the catalogue pass
+    /// covers the rest of a large burst (e.g. an unpacked archive).
     const HISTORY_LIMIT: usize = 512;
 
     /// Note what may have been saved, and the renames as pairs.
@@ -80,9 +75,8 @@ impl WatchBatch {
     }
 
     fn remember_history_path(&mut self, path: PathBuf) {
-        // Asked here rather than in the worker: on an ordinary home folder most
-        // of what changes is not a document, and each one that is not costs a
-        // clone, a channel send and a place in the worker's queue to find out.
+        // Filtered here: most changes are not documents, and each would cost a
+        // clone and a channel send to reject in the worker.
         if self.history_paths.len() < Self::HISTORY_LIMIT
             && crate::history::may_be_a_document(&path)
         {

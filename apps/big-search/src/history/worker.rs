@@ -418,8 +418,6 @@ fn save_due_versions(history: &SharedHistory, pending: &mut Pending) -> bool {
     let mut due = pending.due();
     while std::time::Instant::now() < until {
         let Some(path) = due.next() else { break };
-        // Check the deadline before consuming the next path. Unvisited
-        // entries remain queued even when this batch runs out of time.
         match save_version_unlocked(history, &path) {
             Ok(true) => {
                 log::debug!("kept a version of {}", path.display());

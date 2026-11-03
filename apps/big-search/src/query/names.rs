@@ -12,10 +12,8 @@ use tantivy::{IndexReader, TantivyDocument, Term};
 /// Substring filename search. Returns up to `limit` paths whose file name contains
 /// `q` (case-insensitive). Queries shorter than 2 chars yield nothing (ngram floor).
 pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
-    // One searcher, taken once: building an `IndexReader` per query re-opens and
-    // mmaps every segment and rebuilds the term dictionaries. Tantivy's own docs
-    // say a project should create at most one reader per index; the daemon now
-    // holds them for its whole life and this only takes a snapshot.
+    // A snapshot of the long-lived reader: a reader per query would re-open and
+    // mmap every segment.
     let searcher = reader.searcher();
     let index = searcher.index();
     let f = fields(index)?;

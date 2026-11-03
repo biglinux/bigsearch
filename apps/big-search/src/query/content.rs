@@ -41,10 +41,8 @@ pub fn search_content(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec
                 name,
                 score,
                 source: crate::settings::source_name(Path::new(path)),
-                // Found inside the file, not by its name. Said here rather than
-                // only in `search_both`, so a plain `content` query carries it
-                // too and the GUI can explain a result whose filename has
-                // nothing to do with what was typed.
+                // Found inside the file, not by its name; a plain `content`
+                // query carries it too, so the GUI can explain the result.
                 match_kind: MatchKind::Body,
                 ..Default::default()
             });

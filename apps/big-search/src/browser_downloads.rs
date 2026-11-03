@@ -1,4 +1,5 @@
-//! The download list the web browsers keep, read once at start.
+//! Browsers' download lists, read once at start to learn which site a file came
+//! from.
 //!
 //! On a real machine this is where the answer to "where did this file come
 //! from?" actually lives. The freedesktop way, a `user.xdg.origin.url`
@@ -43,10 +44,8 @@ use crate::origin::{OriginWriter, domain_from_url};
 /// downloads are the least likely to still be on the disk.
 const MAX_ROWS: i64 = 5_000;
 
-/// Chromium-family browsers, by the folder each keeps its profiles in.
-///
-/// All six share one history schema, so the only difference between them is
-/// this path. Firefox keeps a different one and is not read here.
+/// Chromium-family browsers (one shared history schema), by profile folder.
+/// Firefox uses another schema and is not read.
 const CHROMIUM_BROWSERS: [&str; 6] = [
     "google-chrome",
     "chromium",
@@ -58,9 +57,7 @@ const CHROMIUM_BROWSERS: [&str; 6] = [
 
 /// Read every browser's download list into the origin store.
 ///
-/// Returns how many files were recorded. Never fails outward: a browser with a
-/// history this cannot read is a browser that contributes nothing, not a reason
-/// for the service to stop.
+/// Returns how many files were recorded. An unreadable history is skipped.
 pub fn import(writer: &OriginWriter) -> usize {
     if !crate::origin::settings().enabled || !crate::origin::settings().browser_history {
         return 0;
@@ -84,9 +81,8 @@ pub fn import(writer: &OriginWriter) -> usize {
 
 /// Every `History` file belonging to a Chromium-family profile.
 ///
-/// Named exactly: the profile folder also holds `Cookies`, `Login Data` and
-/// `Web Data`, and this must never be a directory walk that could open one of
-/// them by accident.
+/// Named exactly, never a walk: profile folders also hold `Cookies` and
+/// `Login Data`.
 fn history_files() -> Vec<PathBuf> {
     let config = home().join(".config");
     let mut found = Vec::new();

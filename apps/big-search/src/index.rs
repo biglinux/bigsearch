@@ -59,10 +59,8 @@ fn build_name_schema() -> Schema {
     // Source/device display name (stored, untokenised) so a hit can report which
     // device it lives on, kept even when that device is offline.
     sb.add_text_field("source", TextOptions::default().set_stored());
-    // Every folder above the file, one exact term each, and its lowercase
-    // extension: "under ~/Videos" and "videos only" are then one posting list
-    // each, where a range over the paths walked every file below the folder
-    // and the name grams of `.mp4` also matched `x.mp4.part`.
+    // Every folder above the file and its lowercase extension, one exact term
+    // each, so "under DIR" and "ext only" filters are single posting lists.
     sb.add_text_field("dir", raw_identifier_options(false));
     sb.add_text_field("ext", raw_identifier_options(false));
     // The media type (see `mime`), then its `major/*` group: "every video" is
@@ -483,10 +481,9 @@ fn open_or_create_with_schema(dir: &Path, build_schema: fn() -> Schema) -> Resul
 /// Open the index and prove it is actually readable.
 ///
 /// Writes skip `fsync` (see [`crate::nosync_dir`]), so a power cut can leave
-/// `meta.json` naming segments whose bytes never landed. That index parses but
-/// explodes on the first query, which is the one failure the caller cannot
-/// recover from. Building a searcher here opens every segment, so the damage
-/// surfaces as an open error and the caller recreates the index instead.
+/// `meta.json` naming segments whose bytes never landed. Building a searcher
+/// opens every segment, turning that into an open error the caller recovers
+/// from by recreating the index, instead of a failure on the first query.
 fn open_existing(dir: &Path) -> Result<Index> {
     open_existing_with(dir, crate::nosync_dir::NoFsyncDirectory::open)
 }
@@ -549,8 +546,7 @@ fn content_state_sync_marker(dir: &Path) -> std::path::PathBuf {
 }
 
 /// Whether the index has already been swept for documents no state row
-/// references. The sweep walks every live document, so repeating it on a
-/// catalogue that is already clean is pure cost.
+/// references (the sweep walks every live document).
 ///
 /// The marker is only trustworthy because exactly one thing creates such
 /// documents ([`crate::content::clear_content_state`], which drops every row

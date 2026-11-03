@@ -104,7 +104,6 @@ fn kind_from_ext(ext: &str) -> Option<Kind> {
         "avif", "bmp", "dib", "exr", "gif", "heic", "heif", "ico", "jpe", "jpeg", "jpg", "pam",
         "pbm", "pgm", "png", "pnm", "ppm", "qoi", "svg", "tga", "tif", "tiff", "webp",
     ];
-    // `alac` is not a container, so it never reached this arm.
     Some(if AUDIO_EXTENSIONS.contains(&ext) {
         Kind::Audio
     } else if VIDEO_EXTENSIONS.contains(&ext) {
@@ -152,7 +151,7 @@ pub fn is_meta_candidate(path: &Path) -> bool {
     }
 }
 
-/// The extended attribute KDE, and now this desktop, store user tags in.
+/// The extended attribute KDE and this desktop store user tags in.
 const TAGS_XATTR: &str = "user.xdg.tags";
 /// Longest tag list this will read. A tag list is a handful of words; anything
 /// larger is not one.
@@ -283,10 +282,8 @@ pub fn metadata_text(path: &Path, with_content: bool) -> Option<String> {
     if parts.len() == 1 && kind == Kind::Other {
         return None;
     }
-    // Every path through `extract::content` caps its output; this one did not.
-    // Only the *input* was bounded (64 MiB), and container tag values are pushed
-    // verbatim, so one crafted file with a huge comment frame put tens of
-    // megabytes into a single tantivy document.
+    // Container tag values are pushed verbatim, so a crafted comment frame can
+    // be megabytes: cap the output like every `extract::content` path does.
     let mut text = parts.join(" ");
     let cap = crate::extract::max_extract_bytes();
     if text.len() > cap {
@@ -409,8 +406,6 @@ mod tag_tests {
         assert_eq!(tag_text(&file), None);
 
         // Written the way the desktop writes it: comma separated, with spaces.
-        // Through the syscall rather than a helper program, because the read
-        // under test is the same syscall's counterpart.
         if write_xattr(&file, TAGS_XATTR, "Férias, Imposto 2026,, ".as_bytes()) {
             assert_eq!(read_tags(&file), ["Férias", "Imposto 2026"]);
             assert_eq!(

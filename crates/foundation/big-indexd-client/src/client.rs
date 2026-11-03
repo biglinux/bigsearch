@@ -445,9 +445,8 @@ impl PersistentClient {
 
     /// Forget the versions kept for one document.
     ///
-    /// Here as well as on [`Client`] because forgetting comes in runs: emptying
-    /// the Trash asks about every item in it, and a fresh connection per item is
-    /// a connection, a thread in the daemon and a teardown for each.
+    /// Also here because forgetting comes in runs (emptying the Trash), where a
+    /// connection per item costs a daemon thread each.
     ///
     /// # Errors
     ///
