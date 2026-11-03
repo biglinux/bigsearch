@@ -48,30 +48,35 @@ pub fn eligible_metadata(path: &Path) -> Option<std::fs::Metadata> {
 /// worker's queue.
 #[must_use]
 pub fn may_be_a_document(path: &Path) -> bool {
-    path.extension()
+    // The extension first, without building a string: it rejects almost every
+    // path, and the name check allocates.
+    let document = path
+        .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
             DOCUMENT_EXTENSIONS
                 .iter()
                 .any(|allowed| extension.eq_ignore_ascii_case(allowed))
-        })
+        });
+    document
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                let name = name.to_ascii_lowercase();
+                !NEVER_KEPT.iter().any(|marker| name.contains(marker))
+            })
 }
 
 /// The half of eligibility that is about the name alone, with nothing read from
 /// disk, so it can also answer about a path that has disappeared.
 pub(super) fn eligible_name(path: &Path) -> Option<()> {
-    // The extension first, and without building a string: it rejects almost
-    // every path the watcher reports, and the checks below allocate.
     if !may_be_a_document(path) {
         return None;
     }
     // Rows are keyed by UTF-8 text: a lossy key for a path in a non-UTF-8
     // folder never exists on disk, so its versions would expire under it.
     path.to_str()?;
-    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-    if NEVER_KEPT.iter().any(|marker| name.contains(marker)) {
-        return None;
-    }
     if scope().excluded(path, false) {
         return None;
     }
@@ -174,23 +179,7 @@ mod tests {
     /// Only documents, and never the files somebody keeps their passwords in.
     #[test]
     fn only_documents_earn_a_version() {
-        let of = |name: &str| {
-            let path = std::path::PathBuf::from("/home/p/Documentos").join(name);
-            let named = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_ascii_lowercase)
-                .unwrap_or_default();
-            let blocked = NEVER_KEPT.iter().any(|marker| named.contains(marker));
-            let allowed = path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .map(|extension| {
-                    DOCUMENT_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
-                })
-                .unwrap_or(false);
-            allowed && !blocked
-        };
+        let of = |name: &str| may_be_a_document(&Path::new("/home/p/Documentos").join(name));
         assert!(of("contrato.odt"));
         assert!(of("Notas.MD"));
         assert!(of("planilha.xlsx"));
@@ -198,6 +187,7 @@ mod tests {
         assert!(!of("disco.qcow2"));
         assert!(!of("sem-extensao"));
         assert!(!of("senhas.txt"));
+        assert!(!of("Password.md"));
         assert!(!of("cofre.kdbx"));
         assert!(!of("id_rsa.pem"));
         // Source code is out of this first version on purpose.
