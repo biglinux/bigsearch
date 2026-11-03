@@ -33,7 +33,7 @@ pub(crate) const TITLE: &str = msgid("Where to look");
 pub(crate) struct Folders {
     group: adw::PreferencesGroup,
     rows: RefCell<Vec<adw::ActionRow>>,
-    settings: RefCell<Option<std::rc::Weak<SearchSettings>>>,
+    settings: std::rc::Weak<SearchSettings>,
     /// Which folders the service says it is actually catalogueing right now, so
     /// a disk that is unplugged can be shown as unplugged.
     available: RefCell<Vec<PathBuf>>,
@@ -64,7 +64,7 @@ impl Folders {
         let folders = Rc::new(Self {
             group,
             rows: RefCell::new(Vec::new()),
-            settings: RefCell::new(Some(Rc::downgrade(settings))),
+            settings: Rc::downgrade(settings),
             available: RefCell::new(Vec::new()),
         });
 
@@ -87,10 +87,7 @@ impl Folders {
     }
 
     fn settings(&self) -> Option<Rc<SearchSettings>> {
-        self.settings
-            .borrow()
-            .as_ref()
-            .and_then(std::rc::Weak::upgrade)
+        self.settings.upgrade()
     }
 
     /// Build the rows from what the file says.

@@ -157,7 +157,10 @@ pub(super) fn set_config_key(key: &str, value: &str) -> Result<()> {
             let Some(mode) = settings::ContentIndexMode::parse(value) else {
                 anyhow::bail!("content-index-mode must be auto, basic, or freqs");
             };
-            set_default_config_value("content_index_mode", string_literal(mode.as_str()))
+            set_default_config_value(
+                "content_index_mode",
+                big_search_config::string_literal(mode.as_str()),
+            )
         }
         "extract-max-mb" => set_default_config_value("extract_max_mb", parse_integer_value(value)?),
         "text-max-mb" => set_default_config_value("text_max_mb", parse_integer_value(value)?),
@@ -173,7 +176,7 @@ pub(super) fn set_config_key(key: &str, value: &str) -> Result<()> {
         }
         "symlink-policy" => match value {
             "personal-local" | "local-exact" => {
-                set_default_config_value("symlink_policy", string_literal(value))
+                set_default_config_value("symlink_policy", big_search_config::string_literal(value))
             }
             _ => anyhow::bail!("symlink-policy must be personal-local or local-exact"),
         },
@@ -217,10 +220,6 @@ pub(super) fn apply_config_preset(name: &str) -> Result<()> {
     settings::seed_config_template();
     big_search_config::apply_preset(preset)
         .with_context(|| format!("write {}", config::config_file().display()))
-}
-
-pub(super) fn string_literal(value: &str) -> String {
-    big_search_config::string_literal(value)
 }
 
 /// Write settings into `[defaults]`, keeping the person's comments and layout.

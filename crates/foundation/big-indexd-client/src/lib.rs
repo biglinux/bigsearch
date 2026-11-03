@@ -334,8 +334,6 @@ pub struct RegisterDerivedRequest {
     pub dst: String,
     #[serde(default)]
     pub app_id: Option<String>,
-    #[serde(default)]
-    pub action: Option<String>,
 }
 
 /// A versioned reply; `kind` discriminates.

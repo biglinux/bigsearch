@@ -14,7 +14,7 @@ fn untouched_machine_is_balanced() {
 fn every_preset_recognises_its_own_values() {
     for preset in Preset::all() {
         let mut defaults = Defaults::default();
-        apply_to(&mut defaults, preset);
+        apply_preset_in_memory(&mut defaults, preset);
         assert_eq!(preset_of(&defaults), Some(preset), "{}", preset.as_str());
     }
 }

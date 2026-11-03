@@ -231,7 +231,7 @@ pub enum SymlinkPolicy {
 }
 
 /// One `[[source]]` block: a folder to catalogue, and what to read in it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SourceEntry {
     pub path: PathBuf,
@@ -244,21 +244,6 @@ pub struct SourceEntry {
     pub removable: bool,
     /// A folder on another machine. Same keeping, different reason.
     pub network: bool,
-}
-
-impl Default for SourceEntry {
-    fn default() -> Self {
-        Self {
-            path: PathBuf::new(),
-            name: None,
-            content: None,
-            metadata: None,
-            follow_symlinks: None,
-            symlink_policy: None,
-            removable: false,
-            network: false,
-        }
-    }
 }
 
 impl SourceEntry {
@@ -483,7 +468,7 @@ impl Preset {
 pub fn preset_of(defaults: &Defaults) -> Option<Preset> {
     Preset::all().into_iter().find(|preset| {
         let mut candidate = defaults.clone();
-        apply_to(&mut candidate, *preset);
+        apply_preset_in_memory(&mut candidate, *preset);
         distinguishing(&candidate) == distinguishing(defaults)
     })
 }
@@ -505,10 +490,6 @@ fn distinguishing(defaults: &Defaults) -> (bool, ContentIndexMode, u64, u64, u64
 /// This is how a settings window offers the presets without keeping a second
 /// copy of their values: it applies one here and writes out the fields.
 pub fn apply_preset_in_memory(defaults: &mut Defaults, preset: Preset) {
-    apply_to(defaults, preset);
-}
-
-fn apply_to(defaults: &mut Defaults, preset: Preset) {
     for (key, literal) in preset.values() {
         match key {
             "names_only" => defaults.names_only = literal == "true",

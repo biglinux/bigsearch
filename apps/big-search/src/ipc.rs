@@ -450,7 +450,6 @@ fn register_derived_reply(
             Path::new(&register_derived_request.src),
             Path::new(&register_derived_request.dst),
             register_derived_request.app_id.as_deref(),
-            register_derived_request.action.as_deref(),
         )
     })
 }

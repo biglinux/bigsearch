@@ -1,6 +1,6 @@
 //! Listing the name index without words to search for.
 use super::names::{filter_clauses, stored_mime};
-use super::{Filter, Hit};
+use super::{Filter, Hit, is_under};
 use crate::index::fields;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -88,12 +88,8 @@ pub fn list_paths(reader: &IndexReader, limit: usize, under: Option<&str>) -> Re
             let Some(path) = doc.get_first(f.path).and_then(|v| v.as_str()) else {
                 continue;
             };
-            if let Some(dir) = under {
-                let inside =
-                    path == dir || path.strip_prefix(dir).is_some_and(|r| r.starts_with('/'));
-                if !inside {
-                    continue;
-                }
+            if under.is_some_and(|dir| !is_under(path, dir)) {
+                continue;
             }
             paths.push(path.to_string());
         }

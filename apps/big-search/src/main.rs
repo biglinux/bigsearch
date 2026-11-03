@@ -507,13 +507,9 @@ fn cmd_register_move(tokens: &[String]) -> Result<()> {
 }
 
 fn cmd_register_derived(tokens: &[String]) -> Result<()> {
-    if !(2..=4).contains(&tokens.len()) {
-        print_usage();
-        anyhow::bail!("usage: register-derived SRC DST [APP_ID] [ACTION]");
-    }
-    let app_id = tokens.get(2).map(String::as_str);
-    let action = tokens.get(3).map(String::as_str);
-    register_with_daemon(|client| client.register_derived(&tokens[0], &tokens[1], app_id, action))
+    let (src, dst, app_id) =
+        two_paths_and_optional_app(tokens, "register-derived SRC DST [APP_ID]")?;
+    register_with_daemon(|client| client.register_derived(src, dst, app_id))
 }
 
 fn register_with_daemon(

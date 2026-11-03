@@ -279,13 +279,7 @@ impl OriginWriter {
         upsert_record(conn, &record)
     }
 
-    pub fn register_derived(
-        &self,
-        src: &Path,
-        dst: &Path,
-        app_id: Option<&str>,
-        action: Option<&str>,
-    ) -> Result<()> {
+    pub fn register_derived(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
@@ -296,10 +290,7 @@ impl OriginWriter {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path_key(src));
-        let label = match action {
-            Some("video-conversion") => format!("Gerado a partir de {source_name}"),
-            Some(_) | None => format!("Gerado a partir de {source_name}"),
-        };
+        let label = format!("Gerado a partir de {source_name}");
         let record = OriginRecord {
             path: path_key(dst),
             dev,
@@ -402,13 +393,6 @@ impl OriginWriter {
                 path.display()
             );
         }
-    }
-
-    pub fn origin(&self, path: &Path) -> Result<Option<OriginProvenance>> {
-        let Some(conn) = &self.conn else {
-            return Ok(None);
-        };
-        Ok(select_record(conn, &path_key(path))?.map(OriginRecord::into_provenance))
     }
 }
 
@@ -860,9 +844,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(300));
             holder.execute_batch("COMMIT").unwrap();
         });
-        let writer = OriginWriter::open(db.clone()).unwrap();
+        let _writer = OriginWriter::open(db.clone()).unwrap();
         release.join().unwrap();
-        assert!(writer.origin(Path::new("/missing")).unwrap().is_none());
+        assert!(
+            OriginReader::new(db.clone())
+                .origin(Path::new("/missing"))
+                .is_none()
+        );
         std::fs::remove_dir_all(db.parent().unwrap()).ok();
     }
 
@@ -887,8 +875,12 @@ mod tests {
     #[test]
     fn fresh_store_has_no_origin() {
         let db = temporary_origin_path("schema");
-        let writer = OriginWriter::open(db.clone()).unwrap();
-        assert!(writer.origin(Path::new("/missing")).unwrap().is_none());
+        let _writer = OriginWriter::open(db.clone()).unwrap();
+        assert!(
+            OriginReader::new(db.clone())
+                .origin(Path::new("/missing"))
+                .is_none()
+        );
         assert!(db.exists());
         std::fs::remove_dir_all(db.parent().unwrap()).ok();
     }

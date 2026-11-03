@@ -420,19 +420,11 @@ fn kill_child_tree(child: &mut Child) {
 }
 
 fn exceeds_pdf_input_cap(path: &Path) -> bool {
-    let cap = pdf_max_input_bytes();
+    let cap = crate::settings::pdf_max_input_bytes();
     cap > 0
         && std::fs::metadata(path)
             .map(|m| m.len() > cap)
             .unwrap_or(false)
-}
-
-fn pdf_max_input_bytes() -> u64 {
-    crate::settings::pdf_max_input_bytes()
-}
-
-fn pdf_timeout_secs() -> u64 {
-    crate::settings::pdf_timeout_secs()
 }
 
 /// CPU time an extractor may use: the configured seconds of work, scaled by
@@ -443,7 +435,8 @@ fn pdf_timeout_secs() -> u64 {
 /// indexer runs at idle priority: on a busy machine a PDF waits its turn, and a
 /// wall-clock limit would kill it there and record the file as having no text.
 fn cpu_limit_secs() -> u64 {
-    pdf_timeout_secs().saturating_mul(1024) / u64::from(crate::throttle::INDEXER_UTIL_MAX)
+    crate::settings::pdf_timeout_secs().saturating_mul(1024)
+        / u64::from(crate::throttle::INDEXER_UTIL_MAX)
 }
 
 /// Wall-clock time an extractor may take, against one that hangs without

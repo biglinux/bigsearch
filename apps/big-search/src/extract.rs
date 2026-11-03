@@ -338,7 +338,7 @@ fn read_text(path: &Path) -> Option<String> {
 /// how big a buffer it needs.
 fn text_input_size(path: &Path) -> Option<u64> {
     let size = std::fs::metadata(path).ok()?.len();
-    let cap = text_max_input_bytes();
+    let cap = crate::settings::text_max_input_bytes();
     (cap == 0 || size <= cap).then_some(size)
 }
 
@@ -387,19 +387,11 @@ fn read_office(path: &Path, ext: &str) -> Option<String> {
 }
 
 fn exceeds_input_cap(path: &Path) -> bool {
-    let cap = max_input_bytes();
+    let cap = crate::settings::office_max_input_bytes();
     cap > 0
         && std::fs::metadata(path)
             .map(|m| m.len() > cap)
             .unwrap_or(false)
-}
-
-fn max_input_bytes() -> u64 {
-    crate::settings::office_max_input_bytes()
-}
-
-fn text_max_input_bytes() -> u64 {
-    crate::settings::text_max_input_bytes()
 }
 
 /// Entries an office archive may declare before we refuse it. Generous against

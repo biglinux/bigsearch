@@ -158,11 +158,6 @@ impl Sources {
         Self { list }
     }
 
-    /// One scan root per source.
-    pub fn paths(&self) -> Vec<PathBuf> {
-        self.list.iter().map(|s| s.path.clone()).collect()
-    }
-
     pub fn all(&self) -> &[Source] {
         &self.list
     }

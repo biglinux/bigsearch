@@ -17,11 +17,16 @@ fn pending_batch_reports_more_work() {
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
     );
-    let batch = pending_batch(vec![first.clone(), second.clone()], &content_state, 1);
+    let batch = pending_batch_with_byte_limit(
+        vec![first.clone(), second.clone()],
+        &content_state,
+        1,
+        u64::MAX,
+    );
     assert_eq!(batch.files, vec![first]);
     assert!(batch.has_more);
 
-    let batch = pending_batch(vec![second.clone()], &content_state, 2);
+    let batch = pending_batch_with_byte_limit(vec![second.clone()], &content_state, 2, u64::MAX);
     assert_eq!(batch.files, vec![second]);
     assert!(!batch.has_more);
 
@@ -47,7 +52,7 @@ fn forgotten_row_is_read_again() {
     );
     content_state.set(&note, mtime, size);
     assert!(
-        pending_batch(vec![note.clone()], &content_state, 10)
+        pending_batch_with_byte_limit(vec![note.clone()], &content_state, 10, u64::MAX)
             .files
             .is_empty(),
         "the file is unchanged, so the pass has nothing to do"
@@ -55,7 +60,7 @@ fn forgotten_row_is_read_again() {
 
     content_state.remove(&note);
     assert_eq!(
-        pending_batch(vec![note.clone()], &content_state, 10).files,
+        pending_batch_with_byte_limit(vec![note.clone()], &content_state, 10, u64::MAX).files,
         vec![note],
         "forgetting the row is what makes the same bytes worth reading again"
     );

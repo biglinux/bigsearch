@@ -299,7 +299,9 @@ pub fn index_content_limited_with_writer(
         &crate::config::state_db_path(),
         crate::catalogue::CONTENT_NAMESPACE,
     );
-    let files = pending_files(files, &content_state, limit);
+    let files =
+        pending_batch_with_byte_limit(files, &content_state, limit.unwrap_or(usize::MAX), u64::MAX)
+            .files;
     if files.is_empty() {
         return Ok(0);
     }
@@ -522,7 +524,7 @@ fn catalog_content_batch_limit() -> usize {
 ///
 /// This is the whole shape of a tag write. A tag lives in the `user.xdg.tags`
 /// extended attribute, and writing an extended attribute leaves size and
-/// modification time exactly as they were, so [`pending_batch`] calls the file
+/// modification time exactly as they were, so [`pending_batch_with_byte_limit`] calls the file
 /// unchanged and skips it. Forgetting the catalogue row alone does not help:
 /// the content index keeps its own record, and the tag token lives there.
 /// Without this, the forced reindex commits a name-index document with nothing
@@ -727,22 +729,6 @@ impl CatalogSelection {
             self.after,
         )
     }
-}
-
-fn pending_files(
-    files: Vec<PathBuf>,
-    content_state: &catalogue::State,
-    limit: Option<usize>,
-) -> Vec<PathBuf> {
-    pending_batch(files, content_state, limit.unwrap_or(usize::MAX)).files
-}
-
-fn pending_batch(
-    files: Vec<PathBuf>,
-    content_state: &catalogue::State,
-    limit: usize,
-) -> PendingContentBatch {
-    pending_batch_with_byte_limit(files, content_state, limit, u64::MAX)
 }
 
 fn pending_batch_with_byte_limit(
