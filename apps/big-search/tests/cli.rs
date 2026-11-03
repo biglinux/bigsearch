@@ -85,40 +85,30 @@ fn count_and_list_subcommands_report_catalog() {
     fs::remove_dir_all(&base).ok();
 }
 
+/// A reindex after an index directory was deleted must re-extract content even
+/// though the content state still records every file as done.
 #[test]
-fn reindex_rebuilds_missing_index() {
-    let base = scratch::scratch_dir("bs-cli-stale-content");
-    let home = base.join("home");
-    let xdg_storage_home = base.join("data");
-    fs::create_dir_all(home.join("docs")).unwrap();
-    fs::create_dir_all(&xdg_storage_home).unwrap();
-    fs::write(home.join("docs/release-runbook.md"), "cassia nutricao").unwrap();
+fn reindex_rebuilds_either_missing_index() {
+    for lost in ["index", "content-index"] {
+        let base = scratch::scratch_dir(&format!("bs-cli-lost-{lost}"));
+        let home = base.join("home");
+        let xdg_storage_home = base.join("data");
+        fs::create_dir_all(home.join("docs")).unwrap();
+        fs::create_dir_all(&xdg_storage_home).unwrap();
+        fs::write(home.join("docs/release-runbook.md"), "cassia nutricao").unwrap();
 
-    run(&home, &xdg_storage_home, &["reindex"]);
-    assert!(run(&home, &xdg_storage_home, &["content", "cassia"]).contains("release-runbook.md"));
+        run(&home, &xdg_storage_home, &["reindex"]);
+        assert!(
+            run(&home, &xdg_storage_home, &["content", "cassia"]).contains("release-runbook.md")
+        );
 
-    fs::remove_dir_all(xdg_storage_home.join("big-search/index")).unwrap();
-    run(&home, &xdg_storage_home, &["reindex"]);
-    assert!(run(&home, &xdg_storage_home, &["content", "cassia"]).contains("release-runbook.md"));
+        fs::remove_dir_all(xdg_storage_home.join("big-search").join(lost)).unwrap();
+        run(&home, &xdg_storage_home, &["reindex"]);
+        assert!(
+            run(&home, &xdg_storage_home, &["content", "cassia"]).contains("release-runbook.md"),
+            "content lost after deleting {lost}"
+        );
 
-    fs::remove_dir_all(&base).ok();
-}
-
-#[test]
-fn reindex_rebuilds_missing_content_index() {
-    let base = scratch::scratch_dir("bs-cli-stale-content-index");
-    let home = base.join("home");
-    let xdg_storage_home = base.join("data");
-    fs::create_dir_all(home.join("docs")).unwrap();
-    fs::create_dir_all(&xdg_storage_home).unwrap();
-    fs::write(home.join("docs/release-runbook.md"), "cassia nutricao").unwrap();
-
-    run(&home, &xdg_storage_home, &["reindex"]);
-    assert!(run(&home, &xdg_storage_home, &["content", "cassia"]).contains("release-runbook.md"));
-
-    fs::remove_dir_all(xdg_storage_home.join("big-search/content-index")).unwrap();
-    run(&home, &xdg_storage_home, &["reindex"]);
-    assert!(run(&home, &xdg_storage_home, &["content", "cassia"]).contains("release-runbook.md"));
-
-    fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&base).ok();
+    }
 }

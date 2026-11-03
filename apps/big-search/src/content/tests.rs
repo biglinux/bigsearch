@@ -1,6 +1,4 @@
 use super::*;
-use crate::index::{fields, open_or_create};
-
 use crate::test_env::{ENV_LOCK, EnvVarGuard};
 
 #[test]
@@ -570,34 +568,26 @@ fn body_upsert_keeps_one_document() {
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
     let path = base.join("note.txt");
-    std::fs::write(&path, b"old text").unwrap();
 
-    let index = open_or_create(&base.join("idx")).unwrap();
     let content_index = crate::index::open_content_or_create(&base.join("content-idx")).unwrap();
-    let f = fields(&index).unwrap();
-    let mut writer = crate::index::bulk_writer(&index).unwrap();
-    crate::scan::add_name_only(&writer, &f, &path, None).unwrap();
-    writer.commit().unwrap();
-    drop(writer);
-    assert_eq!(crate::query::count(&index.reader().unwrap()).unwrap(), 1);
-
     let content_fields = crate::index::content_fields(&content_index).unwrap();
-    let mut writer = crate::index::content_writer(&content_index).unwrap();
-    upsert_with_body(&writer, &content_fields, &path, "old text").unwrap();
-    writer.commit().unwrap();
-    drop(writer);
-    assert_eq!(crate::query::count(&index.reader().unwrap()).unwrap(), 1);
-
-    let mut writer = crate::index::content_writer(&content_index).unwrap();
-    upsert_with_body(&writer, &content_fields, &path, "new text").unwrap();
-    writer.commit().unwrap();
-    drop(writer);
-    assert_eq!(crate::query::count(&index.reader().unwrap()).unwrap(), 1);
+    for body in ["old text", "new text"] {
+        let mut writer = crate::index::content_writer(&content_index).unwrap();
+        upsert_with_body(&writer, &content_fields, &path, body).unwrap();
+        writer.commit().unwrap();
+    }
+    let reader = content_index.reader().unwrap();
+    assert_eq!(crate::query::count(&reader).unwrap(), 1);
     assert_eq!(
-        crate::query::search_content(&content_index.reader().unwrap(), "new", 10)
+        crate::query::search_content(&reader, "new", 10)
             .unwrap()
             .len(),
         1
+    );
+    assert!(
+        crate::query::search_content(&reader, "old", 10)
+            .unwrap()
+            .is_empty()
     );
 
     std::fs::remove_dir_all(&base).ok();

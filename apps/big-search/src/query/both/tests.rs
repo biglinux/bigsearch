@@ -3,8 +3,6 @@ use crate::query::tests::{content_index_with, content_index_with_profile, index_
 
 #[test]
 fn both_ranks_name_and_content_highest() {
-    let dir = std::env::temp_dir().join(format!("lsearch-test-{}-rank", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
     let index = index_with(
         "rank-name",
         &["/x/alpha_report.md", "/y/other.md", "/z/alpha_notes.md"],
@@ -17,7 +15,6 @@ fn both_ranks_name_and_content_highest() {
             ("/z/alpha_notes.md", "an alpha note"),
         ],
     );
-    let _ = dir;
     let hits = search_both(&index, &content_index, "alpha", 10).unwrap();
     let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
     // both-match ranks first; name-only above content-only.
@@ -28,7 +25,6 @@ fn both_ranks_name_and_content_highest() {
         .unwrap();
     let content_only = paths.iter().position(|p| *p == "/y/other.md").unwrap();
     assert!(name_only < content_only);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Relevance survives the merge inside every band, and the band a hit is in

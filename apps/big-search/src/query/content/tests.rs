@@ -5,8 +5,6 @@ use crate::query::tests::{content_index_with, index_with, names};
 
 #[test]
 fn content_word_search() {
-    let dir = std::env::temp_dir().join(format!("lsearch-test-{}-body", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
     let index = index_with("body-name", &["/n/report.md"]);
     let content_index =
         content_index_with("body", &[("/n/report.md", "the quick brown fox jumps")]);
@@ -30,7 +28,6 @@ fn content_word_search() {
             .unwrap()
             .is_empty()
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The last word is read as typed so far: it finds the words it begins,
@@ -222,8 +219,6 @@ fn content_words_match_plural_and_singular() {
 
 #[test]
 fn accent_insensitive() {
-    let dir = std::env::temp_dir().join(format!("lsearch-test-{}-acc", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
     let index = index_with("acc-name", &["/n/relatório Gonçalves.md"]);
     let content_index = content_index_with(
         "acc",
@@ -257,5 +252,4 @@ fn accent_insensitive() {
             .len(),
         1
     );
-    std::fs::remove_dir_all(&dir).ok();
 }

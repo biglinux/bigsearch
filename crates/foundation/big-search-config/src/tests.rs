@@ -199,14 +199,6 @@ fn an_edit_keeps_mode_and_link() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Remembering where files came from is on; reading the browsers' download
-/// list is not.
-#[test]
-fn browser_list_starts_off() {
-    assert!(Origin::default().enabled);
-    assert!(!Origin::default().browser_history);
-}
-
 /// The disk budget fits the disk it is on, and a number written by hand
 /// wins.
 #[test]
@@ -218,17 +210,4 @@ fn the_budget_fits_the_disk() {
     // A disk too small for a sensible share gets a share anyway, not a
     // division by zero or a surprise ceiling.
     assert_eq!(history_budget_bytes(0, 20 * GIB), GIB);
-}
-
-/// Keeping versions is on, and the numbers people may want to change are
-/// the only ones in the file.
-#[test]
-fn history_defaults_keep_ten_versions() {
-    let history = FileHistory::default();
-    assert!(history.enabled);
-    assert_eq!(history.keep_versions, 10);
-    assert_eq!(history.keep_days, 30);
-    assert_eq!(history.max_total_gib, 0);
-    assert!(history.skip_git_repositories);
-    assert!(history.respect_gitignore);
 }

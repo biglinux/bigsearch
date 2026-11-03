@@ -475,6 +475,13 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// `PATH` with `bin` first, so its fake extractor wins.
+    fn path_with(bin: &Path) -> String {
+        std::env::var_os("PATH")
+            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
+            .unwrap_or_else(|| bin.to_string_lossy().into_owned())
+    }
+
     fn temporary_extract_dir(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("lsearch-ex-{}-{label}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -520,12 +527,7 @@ mod tests {
         let path = dir.join("large-output.pdf");
         std::fs::write(&path, b"%PDF fake").unwrap();
 
-        let previous_path = std::env::var_os("PATH");
-        let test_path = previous_path
-            .as_ref()
-            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
-            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &path_with(&bin));
         let _limit = crate::test_env::EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
 
         let text = read_pdf(&path).unwrap();
@@ -563,12 +565,7 @@ mod tests {
         let text = dir.join("README.DOC");
         std::fs::write(&text, b"Keymap notes\n").unwrap();
 
-        let previous_path = std::env::var_os("PATH");
-        let test_path = previous_path
-            .as_ref()
-            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
-            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &path_with(&bin));
         let word_text = crate::extract::content(&word);
         let rtf_described = crate::extract::described(&rtf);
         let other_text = crate::extract::content(&other);
@@ -607,12 +604,7 @@ mod tests {
         let path = dir.join("spinning.pdf");
         std::fs::write(&path, b"%PDF fake").unwrap();
 
-        let previous_path = std::env::var_os("PATH");
-        let test_path = previous_path
-            .as_ref()
-            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
-            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &path_with(&bin));
         let _limit = crate::test_env::EnvVarGuard::set("BIG_SEARCH_PDF_TIMEOUT_SECS", "1");
 
         let started = std::time::Instant::now();
@@ -641,12 +633,7 @@ mod tests {
         let path = dir.join("hung.pdf");
         std::fs::write(&path, b"%PDF fake").unwrap();
 
-        let previous_path = std::env::var_os("PATH");
-        let test_path = previous_path
-            .as_ref()
-            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
-            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &path_with(&bin));
         let _limit = crate::test_env::EnvVarGuard::set("BIG_SEARCH_PDF_TIMEOUT_SECS", "1");
 
         let started = std::time::Instant::now();
