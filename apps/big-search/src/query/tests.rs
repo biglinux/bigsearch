@@ -293,6 +293,43 @@ fn type_filter_finds_videos_by_content() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A folder is its type in the name index, so the index keeps folders, or
+/// leaves them out, in the name search and the listing alike.
+#[test]
+fn kind_filter_keeps_folders_or_files() {
+    let dir = std::env::temp_dir().join(format!("lsearch-kind-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join("fotos")).unwrap();
+    std::fs::create_dir_all(dir.join("fotos.d")).unwrap();
+    std::fs::write(dir.join("fotos.txt"), b"x").unwrap();
+    let paths: Vec<String> = ["fotos", "fotos.d", "fotos.txt"]
+        .iter()
+        .map(|name| dir.join(name).to_string_lossy().into_owned())
+        .collect();
+    let index = index_with(
+        "kind-filter",
+        &paths.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let found = |q: &str, mode: &str, kind: EntryKind| {
+        let filter = Filter {
+            kind: Some(kind),
+            ..Default::default()
+        };
+        let mut found = names(run_names(&index, q, mode, &filter, &Page::default()).hits);
+        found.sort();
+        found
+    };
+    for (q, mode) in [("fotos", "name"), ("", "list")] {
+        assert_eq!(
+            found(q, mode, EntryKind::Folder),
+            ["fotos", "fotos.d"],
+            "{mode}"
+        );
+        assert_eq!(found(q, mode, EntryKind::File), ["fotos.txt"], "{mode}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn list_sees_past_the_ceiling() {
     let mut paths: Vec<String> = (0..40)

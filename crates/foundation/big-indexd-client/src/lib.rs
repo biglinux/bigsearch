@@ -152,7 +152,8 @@ pub struct Hit {
 
 /// Server-side result filter. `under`/`ext` are path-only; `mime` takes exact
 /// types or `major/*` groups (daemons with the `mime-filter` capability);
-/// `mtime`/`size` are inclusive `[min, max]` ranges.
+/// `mtime`/`size` are inclusive `[min, max]` ranges; `kind` keeps folders or
+/// everything else (daemons with the `kind-filter` capability).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Filter {
     /// Only paths inside this folder, at any depth; the folder itself is not
@@ -167,6 +168,20 @@ pub struct Filter {
     pub mtime: Option<[i64; 2]>,
     #[serde(default)]
     pub size: Option<[u64; 2]>,
+    /// Left out when `None`, so a request without it reads the same to a
+    /// daemon that predates it. Such a daemon ignores the field and answers
+    /// both kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<EntryKind>,
+}
+
+/// What [`Filter::kind`] keeps. A link to a folder is a folder.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    Folder,
+    /// Anything that is not a folder.
+    File,
 }
 
 /// Page window for virtual scrolling.
@@ -205,13 +220,13 @@ pub struct QueryOutcome {
     /// what paging reaches: the last `next_offset` may return fewer hits than
     /// asked for, or none.
     ///
-    /// In the `list` and `largest` modes without a `mime` filter it is the
-    /// exact number of catalogued files matching the filter, and may exceed
-    /// the ceiling; hits come newest modification (`list`) or largest size
-    /// (`largest`) first, and every match is reachable by paging with
+    /// In the `list` and `largest` modes without a `mime` or `kind` filter it
+    /// is the exact number of catalogued files matching the filter, and may
+    /// exceed the ceiling; hits come newest modification (`list`) or largest
+    /// size (`largest`) first, and every match is reachable by paging with
     /// `next_offset`. A client that reads a total at or above the ceiling as
-    /// "at least this many" is still right. With a `mime` filter, both are
-    /// unordered and capped like the other modes.
+    /// "at least this many" is still right. With a `mime` or `kind` filter,
+    /// both are unordered and capped like the other modes.
     ///
     /// Files deleted since they were indexed are counted in every mode, so a
     /// page can hold fewer hits than asked for while `next_offset` still

@@ -100,7 +100,7 @@ The name index holds one document per visible file:
 | `source` | stored | the device a hit lives on, kept while it is offline |
 | `dir` | raw, one term per ancestor folder | "under this folder" is one posting list |
 | `ext` | raw, lowercase | "only this extension" is one posting list |
-| `mime` | raw, stored: the type, then `major/*` | type filter; from the shared-mime-info globs, reading the first bytes only when no glob matches the name or the heaviest ones name different types |
+| `mime` | raw, stored: the type, then `major/*` | type filter, and folders (`inode/directory`) apart from files; from the shared-mime-info globs, reading the first bytes only when no glob matches the name or the heaviest ones name different types |
 | `stem` | raw: the whole folded name without extension | the exact name ranks first |
 | `mtime_day` | u64 fast field | newest first among equal scores |
 
@@ -514,8 +514,8 @@ row was written is counted until the watcher removes it, and is dropped from
 its page. The `largest` query ("large and old files") reads the same rows
 largest first. It has no index of its own: SQLite sorts the matches keeping
 only the rows up to the requested page, where a size index would cost every
-catalogue write. A `mime` filter still goes to the name index, which alone
-knows types, unordered and capped.
+catalogue write. A `mime` or `kind` filter still goes to the name index, which
+alone knows types and folders, unordered and capped.
 
 ## 10. Dependencies
 

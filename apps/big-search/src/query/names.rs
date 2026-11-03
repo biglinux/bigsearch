@@ -1,5 +1,5 @@
 //! Name search: ngram recall via Tantivy, then exact substring post-filter.
-use super::{Filter, Hit, count_capped, file_name};
+use super::{EntryKind, Filter, Hit, count_capped, file_name};
 use crate::index::fields;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -244,10 +244,11 @@ pub(super) fn name_match(name: &str, words: &[String]) -> Option<NameMatch> {
     })
 }
 
-/// The index clauses for `filter.under`, `filter.ext` and `filter.mime`, none
-/// for a filter without them: the folder is one term of the `dir` field, the
-/// extensions and types terms of their own fields. `run_query` still checks
-/// them afterwards, for the content modes that do not narrow by them.
+/// The index clauses for `filter.under`, `filter.ext`, `filter.mime` and
+/// `filter.kind`, none for a filter without them: the folder is one term of
+/// the `dir` field, the extensions and types terms of their own fields, and a
+/// folder is its type. `run_query` still checks them afterwards, for the
+/// content modes that do not narrow by them.
 pub(super) fn filter_clauses(
     f: &crate::index::Fields,
     filter: &Filter,
@@ -298,6 +299,19 @@ pub(super) fn filter_clauses(
             })
             .collect();
         clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_mime))));
+    }
+    if let Some(kind) = filter.kind {
+        let occur = match kind {
+            EntryKind::Folder => Occur::Must,
+            EntryKind::File => Occur::MustNot,
+        };
+        clauses.push((
+            occur,
+            Box::new(TermQuery::new(
+                Term::from_field_text(f.mime, crate::mime::DIRECTORY),
+                IndexRecordOption::Basic,
+            )),
+        ));
     }
     clauses
 }

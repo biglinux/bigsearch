@@ -18,6 +18,9 @@ use std::sync::OnceLock;
 /// looks for (an ISO 9660 volume's, at 32 769).
 const HEAD_BYTES: u64 = 40 * 1024;
 
+/// The type of a directory, and of a link to one.
+pub const DIRECTORY: &str = "inode/directory";
+
 struct Glob {
     weight: u32,
     mime: String,
@@ -163,7 +166,7 @@ impl Database {
         };
         // `conf.d` is a directory, not D source, and an empty `.mp4` no video.
         if known.is_some_and(std::fs::Metadata::is_dir) {
-            return Some("inode/directory".to_string());
+            return Some(DIRECTORY.to_string());
         }
         if known.is_some_and(|metadata| metadata.is_file() && metadata.len() == 0) {
             return Some("application/x-zerosize".to_string());

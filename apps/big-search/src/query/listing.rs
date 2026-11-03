@@ -5,7 +5,7 @@ use crate::index::fields;
 use anyhow::Result;
 use std::collections::HashSet;
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, Query};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query};
 use tantivy::schema::Value;
 use tantivy::{IndexReader, TantivyDocument};
 
@@ -15,9 +15,13 @@ use tantivy::{IndexReader, TantivyDocument};
 /// whole index: cut first and filtered after, "every video in ~/Videos" would
 /// come back empty whenever the first files of the index held none.
 pub fn list_matching(reader: &IndexReader, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
-    let clauses = filter_clauses(&fields(reader.searcher().index())?, filter);
+    let mut clauses = filter_clauses(&fields(reader.searcher().index())?, filter);
     if clauses.is_empty() {
         return collect_paths(reader, &AllQuery, limit);
+    }
+    // Exclusions alone match nothing: they take away from what the others match.
+    if clauses.iter().all(|(occur, _)| *occur == Occur::MustNot) {
+        clauses.push((Occur::Must, Box::new(AllQuery)));
     }
     collect_paths(reader, &BooleanQuery::new(clauses), limit)
 }

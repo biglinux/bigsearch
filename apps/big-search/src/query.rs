@@ -23,7 +23,7 @@ use names::{count_names, indexed_mime};
 
 // Wire types (Hit/Filter/Page/QueryOutcome) live in the shared `big-indexd-client`
 // crate so the daemon and its GUI clients cannot drift; the daemon adds the engine.
-pub use big_indexd_client::{Filter, Hit, MatchKind, Page, QueryOutcome};
+pub use big_indexd_client::{EntryKind, Filter, Hit, MatchKind, Page, QueryOutcome};
 
 /// Ceiling on candidates pulled from the index before filtering/paging. Bounds the
 /// daemon's work (and `stat` count) per request regardless of how broad the query is.
@@ -71,7 +71,8 @@ pub fn run_query(
     // there are, and "large and old" the largest: only the catalogue's recorded
     // mtimes and sizes answer that without a `stat` per file. A type filter
     // needs the name index, which knows the type of a file whose name does not
-    // tell it, so that case keeps the unordered, ceiling-capped index listing.
+    // tell it, and which entries are folders, so those filters keep the
+    // unordered, ceiling-capped index listing.
     let order = match mode {
         "list" => Some(ListOrder::Newest),
         "largest" => Some(ListOrder::Largest),
@@ -79,6 +80,7 @@ pub fn run_query(
     };
     let (mut hits, total, limit) = if let Some(order) = order
         && filter.mime.is_empty()
+        && filter.kind.is_none()
     {
         // The page is what gets `stat`ed, so it stays under the same ceiling as
         // the candidates of the other modes; the client pages past it.
@@ -198,7 +200,10 @@ fn search_by_mode(
 /// may see only one of the two, so its order would change with the offset.
 fn candidates_to_read(mode: &str, filter: &Filter, page: &Page) -> (bool, usize) {
     let stat_filters = filter.mtime.is_some() || filter.size.is_some();
-    let path_filters = filter.under.is_some() || !filter.ext.is_empty() || !filter.mime.is_empty();
+    let path_filters = filter.under.is_some()
+        || !filter.ext.is_empty()
+        || !filter.mime.is_empty()
+        || filter.kind.is_some();
     let paged = !matches!(mode, "list" | "largest" | "both")
         && !stat_filters
         && !(mode == "content" && path_filters);
@@ -238,23 +243,28 @@ fn keep_path_matches(base: Vec<Hit>, filter: &Filter) -> Vec<Hit> {
         .collect()
 }
 
-/// The hits of one of `filter.mime`, typed from the name index when the hit
-/// carries no type.
+/// The hits of one of `filter.mime` and of `filter.kind`, typed from the name
+/// index when the hit carries no type.
 fn keep_type_matches(
     kept: &mut Vec<Hit>,
     filter: &Filter,
     names: &tantivy::Searcher,
     name_fields: &crate::index::Fields,
 ) {
-    if !filter.mime.is_empty() {
+    if !filter.mime.is_empty() || filter.kind.is_some() {
         kept.retain_mut(|h| {
             if h.mime.is_empty() {
                 h.mime = indexed_mime(names, name_fields, &h.path);
             }
-            filter
-                .mime
-                .iter()
-                .any(|wanted| crate::mime::matches(&h.mime, wanted))
+            let folder = h.mime == crate::mime::DIRECTORY;
+            (filter.mime.is_empty()
+                || filter
+                    .mime
+                    .iter()
+                    .any(|wanted| crate::mime::matches(&h.mime, wanted)))
+                && filter
+                    .kind
+                    .is_none_or(|kind| folder == (kind == EntryKind::Folder))
         });
     }
 }
