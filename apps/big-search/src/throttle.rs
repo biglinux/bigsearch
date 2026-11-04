@@ -223,8 +223,7 @@ fn read_pressure(path: impl AsRef<std::path::Path>) -> Option<Pressure> {
 }
 
 fn pressure_delay(memory: Option<Pressure>, io: Option<Pressure>) -> Duration {
-    // These are bounded scheduling policy thresholds, not claims about memory
-    // capacity or benchmark-derived universal optima. Unknown PSI adds no delay.
+    // Policy thresholds, not measured optima. Unknown PSI adds no delay.
     if memory.is_some_and(|p| p.full >= 2.0 || p.some >= 20.0) {
         Duration::from_millis(250)
     } else if io.is_some_and(|p| p.full >= 10.0 || p.some >= 50.0) {

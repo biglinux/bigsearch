@@ -318,8 +318,7 @@ pub fn content_for_mime(path: &Path, mime: &str) -> Option<String> {
 fn read_text(path: &Path) -> Option<String> {
     let size = text_input_size(path)?;
     let cap = max_extract_bytes();
-    // The buffer is the right size from the start. Growing it costs a copy of
-    // everything read so far at each step, and a text file is read whole.
+    // Sized up front: a text file is read whole, and growth copies it.
     let mut buf = Vec::with_capacity(size.min(cap as u64) as usize);
     std::fs::File::open(path)
         .ok()?
@@ -333,12 +332,9 @@ fn read_text(path: &Path) -> Option<String> {
 }
 
 /// The size of a text file, or `None` when it is over the input cap.
-///
-/// One `stat`, answering both questions: whether to read the file at all, and
-/// how big a buffer it needs.
 fn text_input_size(path: &Path) -> Option<u64> {
     let size = std::fs::metadata(path).ok()?.len();
-    let cap = text_max_input_bytes();
+    let cap = crate::settings::text_max_input_bytes();
     (cap == 0 || size <= cap).then_some(size)
 }
 
@@ -387,19 +383,11 @@ fn read_office(path: &Path, ext: &str) -> Option<String> {
 }
 
 fn exceeds_input_cap(path: &Path) -> bool {
-    let cap = max_input_bytes();
+    let cap = crate::settings::office_max_input_bytes();
     cap > 0
         && std::fs::metadata(path)
             .map(|m| m.len() > cap)
             .unwrap_or(false)
-}
-
-fn max_input_bytes() -> u64 {
-    crate::settings::office_max_input_bytes()
-}
-
-fn text_max_input_bytes() -> u64 {
-    crate::settings::text_max_input_bytes()
 }
 
 /// Entries an office archive may declare before we refuse it. Generous against
@@ -452,7 +440,7 @@ fn office_text_with<R: std::io::Read + std::io::Seek>(
     let cap = max_extract_bytes();
     let mut out = String::new();
     for part in parts {
-        let Ok(mut entry) = zip.by_name(&part) else {
+        let Ok(mut entry) = zip_entry(&mut zip, &part) else {
             continue;
         };
         let mut xml = Vec::new();
@@ -668,7 +656,7 @@ fn for_each_pptx_slide(path: &Path, on_page: &mut dyn FnMut(&str)) {
         // calls to number the pages, and skipping one would move every slide
         // after it up by one.
         text.clear();
-        if let Ok(mut entry) = zip.by_name(&name) {
+        if let Ok(mut entry) = zip_entry(&mut zip, &name) {
             xml.clear();
             if entry
                 .by_ref()
@@ -730,8 +718,10 @@ fn for_each_office_page(
 pub(crate) fn slide_names<R: std::io::Read + std::io::Seek>(
     zip: &zip::ZipArchive<R>,
 ) -> Vec<String> {
+    // A name the archive cannot decode is no slide of ours: they are ASCII.
     let mut names: Vec<String> = zip
         .file_names()
+        .filter_map(Result::ok)
         .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
         .map(String::from)
         .collect();
@@ -746,11 +736,21 @@ pub(crate) fn slide_names<R: std::io::Read + std::io::Seek>(
     names
 }
 
+/// Entry `name` of `zip`, matched on the bytes it is stored under, so that a
+/// missing name costs one hash lookup: on a miss, `ZipArchive::by_name`
+/// decodes every entry's name, which a crafted archive would repeat for each
+/// name its manifest asks for.
+fn zip_entry<'a, R: std::io::Read + std::io::Seek>(
+    zip: &'a mut zip::ZipArchive<R>,
+    name: &str,
+) -> zip::result::ZipResult<zip::read::ZipFile<'a, R>> {
+    let index = zip
+        .index_for_name_raw(name.as_bytes())
+        .ok_or(zip::result::ZipError::FileNotFound)?;
+    zip.by_index(index)
+}
+
 /// Bytes of a zip entry (capped), or `None`.
-///
-/// Bytes, not text: the XML parser reads bytes, so turning the part into a
-/// `String` first only buys a second copy of a part that can be tens of
-/// megabytes.
 pub(crate) fn zip_entry_bytes(path: &Path, name: &str) -> Option<Vec<u8>> {
     let cap = max_extract_bytes();
     let file = std::fs::File::open(path).ok()?;
@@ -758,7 +758,7 @@ pub(crate) fn zip_entry_bytes(path: &Path, name: &str) -> Option<Vec<u8>> {
     if zip.len() > MAX_ZIP_ENTRIES {
         return None;
     }
-    let mut entry = zip.by_name(name).ok()?;
+    let mut entry = zip_entry(&mut zip, name).ok()?;
     let mut xml = Vec::new();
     entry.by_ref().take(cap as u64).read_to_end(&mut xml).ok()?;
     Some(xml)
@@ -780,9 +780,6 @@ fn is_page_break(e: &quick_xml::events::BytesStart, break_tag: &str) -> bool {
 }
 
 /// Append all XML character data from `xml` to `out`, a space between elements.
-///
-/// Bytes, not text: every caller has an office part it just read, and turning
-/// that into a `String` first is a copy of the whole part for nothing.
 pub fn xml_text(xml: &[u8], out: &mut String) {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_reader(xml);

@@ -100,7 +100,7 @@ The name index holds one document per visible file:
 | `source` | stored | the device a hit lives on, kept while it is offline |
 | `dir` | raw, one term per ancestor folder | "under this folder" is one posting list |
 | `ext` | raw, lowercase | "only this extension" is one posting list |
-| `mime` | raw, stored: the type, then `major/*` | type filter; from the shared-mime-info globs, reading the first bytes only when the name has no type or several |
+| `mime` | raw, stored: the type, then `major/*` | type filter, and folders (`inode/directory`) apart from files; from the shared-mime-info globs, reading the first bytes only when no glob matches the name or the heaviest ones name different types |
 | `stem` | raw: the whole folded name without extension | the exact name ranks first |
 | `mtime_day` | u64 fast field | newest first among equal scores |
 
@@ -298,7 +298,11 @@ hidden and gitignored churn never wakes the daemon.
 - A new visible folder gets a watch and a scoped rescan, which closes the race
   between its creation and the watch.
 - Events are coalesced over 250 ms (`DEBOUNCE`), then reconciled by existence:
-  a present path is upserted, a missing one deleted.
+  a present path is upserted, a missing one deleted with its whole tree. A
+  folder moved away, to the trash included, is one event naming the folder and
+  none for what it held, so the tree goes as one `dir` term in the name index
+  and one key range in the catalogue, never read into memory; its content
+  documents follow through the orphan prune of the next backfill passes.
 - At most 16,384 events wait for the watcher (`MAX_QUEUED_EVENTS`), so a backup
   or a recursive copy cannot queue its whole tree in memory. Past that, or when
   the kernel's own queue overflows, the events are dropped and the watcher
@@ -498,6 +502,20 @@ its own UID (`SO_PEERCRED`). The protocol is newline-framed JSON, versioned
 over 64 KiB is refused. Other BigLinux programs speak it, so its description
 lives in the `big-indexd-client` rustdoc. The `big-search` CLI uses that client,
 and with no daemon running it searches the indexes in-process, read-only.
+
+The `list` query ("every picture under my home folder") is answered from the
+name rows of the catalogue, not from the name index: a read-only connection per
+client counts the matches exactly and reads one page newest first through a
+partial `(namespace, mtime)` index, so neither the order nor the count needs a
+`stat` per file; only the returned page is `stat`ed and typed. The folder is a
+path range, the extensions a suffix match. The rows and the name index are
+written in the same step, so they hold the same paths; a file deleted since its
+row was written is counted until the watcher removes it, and is dropped from
+its page. The `largest` query ("large and old files") reads the same rows
+largest first. It has no index of its own: SQLite sorts the matches keeping
+only the rows up to the requested page, where a size index would cost every
+catalogue write. A `mime` or `kind` filter still goes to the name index, which
+alone knows types and folders, unordered and capped.
 
 ## 10. Dependencies
 

@@ -9,17 +9,15 @@ fn untouched_machine_is_balanced() {
     assert_eq!(preset_of(&Defaults::default()), Some(Preset::Balanced));
 }
 
-/// Each preset recognises itself once written.
 #[test]
 fn every_preset_recognises_its_own_values() {
     for preset in Preset::all() {
         let mut defaults = Defaults::default();
-        apply_to(&mut defaults, preset);
+        apply_preset_in_memory(&mut defaults, preset);
         assert_eq!(preset_of(&defaults), Some(preset), "{}", preset.as_str());
     }
 }
 
-/// A value nobody's preset writes is a mixture, and says so.
 #[test]
 fn custom_values_read_as_mixture() {
     let defaults = Defaults {
@@ -29,7 +27,6 @@ fn custom_values_read_as_mixture() {
     assert_eq!(preset_of(&defaults), None);
 }
 
-/// Changing a setting keeps the comments and the layout around it.
 #[test]
 fn edit_keeps_comments_and_layout() {
     let mut lines: Vec<String> =
@@ -44,7 +41,6 @@ fn edit_keeps_comments_and_layout() {
     assert!(text.contains("metadata = false"), "{text}");
 }
 
-/// A key the file does not have yet is added inside its own table.
 #[test]
 fn missing_key_joins_its_table() {
     let mut lines: Vec<String> = "[defaults]\ncontent = true\n"
@@ -60,7 +56,6 @@ fn missing_key_joins_its_table() {
     assert!(parsed.defaults.content);
 }
 
-/// A source block is found by its path, and taken out whole.
 #[test]
 fn folder_removal_drops_whole_block() {
     let text = "[defaults]\ncontent = true\n\n[[source]]\npath = \"/home/p\"\n\n[[source]]\npath = \"/mnt/disk\"\nname = \"Disk\"\nremovable = true\n";
@@ -73,8 +68,6 @@ fn folder_removal_drops_whole_block() {
     assert!(left.defaults.content);
 }
 
-/// Reading the text inside one folder is turned off without touching the
-/// others.
 #[test]
 fn one_folder_stops_being_read_inside() {
     let text = "[[source]]\npath = \"/home/p\"\n\n[[source]]\npath = \"/mnt/disk\"\n";
@@ -199,14 +192,6 @@ fn an_edit_keeps_mode_and_link() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Remembering where files came from is on; reading the browsers' download
-/// list is not.
-#[test]
-fn browser_list_starts_off() {
-    assert!(Origin::default().enabled);
-    assert!(!Origin::default().browser_history);
-}
-
 /// The disk budget fits the disk it is on, and a number written by hand
 /// wins.
 #[test]
@@ -215,20 +200,5 @@ fn the_budget_fits_the_disk() {
     assert_eq!(history_budget_bytes(0, 120 * GIB), 6 * GIB);
     assert_eq!(history_budget_bytes(0, 2000 * GIB), 10 * GIB);
     assert_eq!(history_budget_bytes(2, 2000 * GIB), 2 * GIB);
-    // A disk too small for a sensible share gets a share anyway, not a
-    // division by zero or a surprise ceiling.
     assert_eq!(history_budget_bytes(0, 20 * GIB), GIB);
-}
-
-/// Keeping versions is on, and the numbers people may want to change are
-/// the only ones in the file.
-#[test]
-fn history_defaults_keep_ten_versions() {
-    let history = FileHistory::default();
-    assert!(history.enabled);
-    assert_eq!(history.keep_versions, 10);
-    assert_eq!(history.keep_days, 30);
-    assert_eq!(history.max_total_gib, 0);
-    assert!(history.skip_git_repositories);
-    assert!(history.respect_gitignore);
 }

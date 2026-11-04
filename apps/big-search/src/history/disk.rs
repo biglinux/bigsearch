@@ -145,11 +145,7 @@ mod tests {
     use super::*;
 
     /// A refusal is filed against the right thing: the disk, the file, or the
-    /// space left.
-    ///
-    /// Getting this wrong in either direction is expensive: blaming the disk for
-    /// one file switches the feature off for everything, and blaming the file
-    /// for the disk means retrying on every document forever.
+    /// space left. Blaming the disk for one file switches the feature off.
     #[test]
     fn errno_maps_to_its_refusal() {
         let of = |code| classify(&io::Error::from_raw_os_error(code));

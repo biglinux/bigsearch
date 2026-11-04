@@ -43,12 +43,13 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// How many candidates the daemon considers before filtering and paging.
 ///
 /// Part of the wire contract rather than an implementation detail of the daemon,
-/// because [`QueryOutcome::total`] is capped at it, so a caller cannot tell
-/// an exact count from a floor without knowing this number. A total below it is
-/// how many matched, within what [`QueryOutcome::total`] says about paged
-/// counts; a total equal to it means "this many, and possibly far more", and a
-/// surface that prints it as an exact figure is stating something nobody
-/// established.
+/// because in every mode but `list` and `largest` [`QueryOutcome::total`] is
+/// capped at it, so a caller cannot tell an exact count from a floor without
+/// knowing this number. A total below it is how many matched, within what
+/// [`QueryOutcome::total`] says about paged counts; a total equal to it means
+/// "this many, and possibly far more", and a surface that prints it as an exact
+/// figure is stating something nobody established. A `list` or `largest` page
+/// is also at most this long.
 pub const CANDIDATE_CEILING: usize = 5_000;
 
 /// Short origin/provenance summary attached to visible hits only when requested.
@@ -151,9 +152,12 @@ pub struct Hit {
 
 /// Server-side result filter. `under`/`ext` are path-only; `mime` takes exact
 /// types or `major/*` groups (daemons with the `mime-filter` capability);
-/// `mtime`/`size` are inclusive `[min, max]` ranges.
+/// `mtime`/`size` are inclusive `[min, max]` ranges; `kind` keeps folders or
+/// everything else (daemons with the `kind-filter` capability).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Filter {
+    /// Only paths inside this folder, at any depth; the folder itself is not
+    /// inside it. `/` holds everything.
     #[serde(default)]
     pub under: Option<String>,
     #[serde(default)]
@@ -164,6 +168,20 @@ pub struct Filter {
     pub mtime: Option<[i64; 2]>,
     #[serde(default)]
     pub size: Option<[u64; 2]>,
+    /// Left out when `None`, so a request without it reads the same to a
+    /// daemon that predates it. Such a daemon ignores the field and answers
+    /// both kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<EntryKind>,
+}
+
+/// What [`Filter::kind`] keeps. A link to a folder is a folder.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    Folder,
+    /// Anything that is not a folder.
+    File,
 }
 
 /// Page window for virtual scrolling.
@@ -192,14 +210,27 @@ impl Default for Page {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct QueryOutcome {
     pub hits: Vec<Hit>,
-    /// Matches after filtering, capped at [`CANDIDATE_CEILING`]. Equal to that
-    /// ceiling means the real number is unknown and at least this large.
+    /// Matches after filtering.
     ///
-    /// In the `name` and `content` modes without date or size filters the
-    /// daemon reads only the candidates a page needs and counts the rest from
-    /// the index, so a total can run over what paging reaches: the last
-    /// `next_offset` may return fewer hits than asked for, or none. Files
-    /// deleted since they were indexed have the same effect in every mode.
+    /// In the `name`, `content` and `both` modes it is capped at
+    /// [`CANDIDATE_CEILING`]: equal to that ceiling means the real number is
+    /// unknown and at least this large. In the `name` and `content` modes
+    /// without date or size filters the daemon reads only the candidates a
+    /// page needs and counts the rest from the index, so a total can run over
+    /// what paging reaches: the last `next_offset` may return fewer hits than
+    /// asked for, or none.
+    ///
+    /// In the `list` and `largest` modes without a `mime` or `kind` filter it
+    /// is the exact number of catalogued files matching the filter, and may
+    /// exceed the ceiling; hits come newest modification (`list`) or largest
+    /// size (`largest`) first, and every match is reachable by paging with
+    /// `next_offset`. A client that reads a total at or above the ceiling as
+    /// "at least this many" is still right. With a `mime` or `kind` filter,
+    /// both are unordered and capped like the other modes.
+    ///
+    /// Files deleted since they were indexed are counted in every mode, so a
+    /// page can hold fewer hits than asked for while `next_offset` still
+    /// advances by the full page.
     pub total: usize,
     /// Offset to request next, or `None` at the end.
     pub next_offset: Option<usize>,
@@ -235,18 +266,13 @@ pub enum RequestBody {
     Reindex(ReindexRequest),
     /// Which directories this daemon catalogues. See [`IndexedRoot`].
     Sources,
-    /// Forget every recorded file origin.
-    ///
-    /// Done by the daemon rather than by deleting the file: the daemon holds an
-    /// open write-ahead connection to that database, and a client that unlinked
-    /// the file would leave it writing into an inode nobody can read.
+    /// Forget every recorded file origin. Done by the daemon because it holds
+    /// the database open; unlinking the file would orphan its writes.
     ClearOrigin,
     /// The earlier versions kept for one document.
     Versions(PathRequest),
-    /// Keep the state a document is in right now.
-    ///
-    /// What a file manager asks for just before putting an older version back,
-    /// so changing one's mind about that is possible too.
+    /// Keep the state a document is in right now, e.g. before restoring an
+    /// older version, so the restore can be undone.
     SaveVersion(PathRequest),
     /// Forget the versions of one document.
     ForgetVersions(PathRequest),
@@ -286,6 +312,11 @@ pub struct ReindexRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryRequest {
     pub q: String,
+    /// `name` (the default), `content` or `both` search for the words in `q`;
+    /// `list` and `largest` ignore `q` and list what matches `filter`, newest
+    /// or largest first (daemons with the `list-largest` capability know
+    /// `largest`). A folder is catalogued with its own size, so a `size`
+    /// floor keeps folders out of `largest`.
     #[serde(default = "default_mode")]
     pub mode: String,
     #[serde(default)]
@@ -334,8 +365,6 @@ pub struct RegisterDerivedRequest {
     pub dst: String,
     #[serde(default)]
     pub app_id: Option<String>,
-    #[serde(default)]
-    pub action: Option<String>,
 }
 
 /// A versioned reply; `kind` discriminates.
@@ -397,12 +426,8 @@ pub enum Reply {
 
 /// Why a machine keeps no earlier versions of documents, when it keeps none.
 ///
-/// The type lives here, in the crate both sides already depend on, because each
-/// value is a different sentence on three screens: the file manager's history
-/// tab, the search settings, and the command line. As a bare string those three
-/// all ended in a catch-all arm, so a reason added later showed up as "not kept
-/// on this computer" everywhere and nobody noticed. A variant added here is a
-/// compile error in all three.
+/// An enum shared by daemon and clients so a new reason is a compile error in
+/// every screen that explains it, not a silent catch-all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unavailable {
     /// The person turned it off.
@@ -457,8 +482,7 @@ pub struct VersionsAnswer {
     pub paused_for_space: bool,
 }
 
-/// One directory the daemon catalogues, as a caller standing in a folder needs
-/// to hear it.
+/// One directory the daemon catalogues.
 ///
 /// This exists so a file manager can tell "the index has nothing matching here"
 /// apart from "the index has never looked here": two states that produce the
@@ -684,8 +708,6 @@ mod tests {
             );
         }
 
-        // And it goes back out in the same words, so the daemon and the GUI
-        // cannot disagree about the spelling.
         let hit = Hit {
             match_kind: MatchKind::Both,
             ..Hit::default()

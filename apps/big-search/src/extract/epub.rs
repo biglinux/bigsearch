@@ -2,7 +2,7 @@
 //! each spine chapter in reading order, read as HTML by [`super::html_text`].
 use super::{
     MAX_ZIP_ENTRIES, decode_entities, exceeds_input_cap, html_text, max_extract_bytes,
-    push_xml_text, truncate_to_char_boundary,
+    push_xml_text, truncate_to_char_boundary, zip_entry,
 };
 use std::io::Read;
 use std::path::Path;
@@ -25,7 +25,7 @@ pub(super) fn read_epub(path: &Path) -> Option<(String, Option<String>)> {
     }
     let cap = max_extract_bytes();
     let mut part = |name: &str, limit: usize| -> Option<String> {
-        let mut entry = zip.by_name(name).ok()?;
+        let mut entry = zip_entry(&mut zip, name).ok()?;
         let mut bytes = Vec::new();
         entry
             .by_ref()

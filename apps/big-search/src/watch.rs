@@ -5,7 +5,7 @@
 //! the hidden/gitignored churn (most changes) is never watched, so it never
 //! wakes us. New visible dirs get a watch + a scoped rescan. Events are
 //! coalesced over a short window, then reconciled by existence: present →
-//! upsert, gone → delete.
+//! upsert, gone → delete it and everything under it.
 mod content_backfill;
 mod event_batch;
 
@@ -28,12 +28,8 @@ use std::time::{Duration, Instant};
 use tantivy::{Index, IndexWriter};
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
-/// How often an idle watcher offers the versions worker another page of the
-/// catalogue.
-///
-/// Slow on purpose: this is the pass that gives every document its first
-/// version, and on a slow disk it should be a trickle nobody notices rather than
-/// a burst that makes the machine feel busy.
+/// How often an idle watcher offers the versions worker another catalogue page.
+/// Slow on purpose: the first-version pass must be an unnoticed trickle.
 const HISTORY_PASS_TICK: Duration = Duration::from_millis(750);
 /// Filesystem events waiting for the watcher, at most. Past it they are
 /// dropped and the loop rescans, as the kernel does when its own queue fills:
@@ -135,15 +131,9 @@ pub enum WatchControlCommand {
     Pause,
     Resume,
     Rebuild,
-    /// Index this one path again even though nothing about its size or its
-    /// modification time changed.
-    ///
-    /// The incremental check exists to skip exactly this case, and it is right to:
-    /// a `chmod` or a `touch -a` must not cost a re-index. But writing a *tag*
-    /// changes only an extended attribute, and then the file's searchable text is
-    /// stale with no event that says so. The program that wrote the tag asks for
-    /// this explicitly, which is cheaper and far less noisy than teaching the
-    /// watcher to believe every `ATTRIB`.
+    /// Reindex one path whose size and mtime did not change, e.g. after a tag
+    /// (extended attribute) write. Requested explicitly by the tagging program,
+    /// which is cheaper than reindexing on every `ATTRIB`.
     ReindexPath(std::path::PathBuf),
     /// A content search happened: extract every pending body now, bypassing the
     /// edit cooldown, so the next search sees the freshest content.

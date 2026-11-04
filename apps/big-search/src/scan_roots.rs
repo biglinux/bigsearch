@@ -19,12 +19,6 @@ enum MountKind {
     Unknown,
 }
 
-/// Expand a base root set for symlink-aware scanning using the safe default
-/// policy. Prefer [`resolve_roots_with_policy`] when a config value is available.
-pub fn resolve_roots(base: &[PathBuf], follow: bool) -> Vec<PathBuf> {
-    resolve_roots_with_policy(base, follow, SymlinkPolicy::PersonalLocal)
-}
-
 /// Expand a base root set for symlink-aware scanning. The walk itself never
 /// follows symlinks, so deep links and loops are left alone. Only top-level links
 /// under a configured root are evaluated, and the target policy decides which
@@ -276,7 +270,11 @@ mod tests {
 
         // follow OFF: base returned unchanged.
         assert_eq!(
-            resolve_roots(std::slice::from_ref(&home), false),
+            resolve_roots_with_policy(
+                std::slice::from_ref(&home),
+                false,
+                SymlinkPolicy::PersonalLocal
+            ),
             vec![home.clone()]
         );
 

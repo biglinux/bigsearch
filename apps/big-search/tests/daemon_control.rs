@@ -230,50 +230,141 @@ fn content_backfill_continues_past_batch() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// One `query` over the socket: the reply's `total` and the hits' paths.
+///
+/// `total` is counted before any hit is `stat`ed, so it still counts what an
+/// index holds for a file that has disappeared; the hits do not.
+fn query_paths(sock: &Path, mode: &str, q: &str, under: &Path) -> (u64, Vec<String>) {
+    let request = serde_json::json!({
+        "v": 2, "cmd": "query", "q": q, "mode": mode,
+        "filter": { "under": under }, "page": { "limit": 100 },
+    });
+    let reply: serde_json::Value =
+        serde_json::from_str(&send_daemon_request(sock, &request.to_string())).unwrap();
+    let paths = reply["hits"]
+        .as_array()
+        .map(|hits| {
+            hits.iter()
+                .filter_map(|hit| hit["path"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    (reply["total"].as_u64().unwrap_or(u64::MAX), paths)
+}
+
+/// Rows the catalogue keeps under `dir` in `namespace`.
+fn catalogue_rows(xdg_storage_home: &Path, namespace: &str, dir: &Path) -> i64 {
+    let db = rusqlite::Connection::open_with_flags(
+        xdg_storage_home.join("big-search/state.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let dir = dir.to_str().unwrap();
+    db.query_row(
+        "SELECT COUNT(*) FROM file_state WHERE namespace = ?1 AND path >= ?2 AND path < ?3",
+        rusqlite::params![namespace, format!("{dir}/"), format!("{dir}0")],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// A folder deleted or moved while the daemon runs leaves nothing of its tree
+/// behind: not in the name index, the content index or either catalogue.
 #[test]
-fn moved_folder_leaves_the_index() {
-    let base = scratch::scratch_dir("bs-moved-tree");
+fn departed_tree_leaves_every_index() {
+    let base = scratch::scratch_dir("bs-tree-gone");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     let run = base.join("run");
-    std::fs::create_dir_all(home.join("docs/projeto/sub")).unwrap();
+    let outside = base.join("outside");
+    let docs = home.join("docs");
+    for tree in ["deleted", "away", "moving"] {
+        std::fs::create_dir_all(docs.join(tree).join("deep")).unwrap();
+        std::fs::write(
+            docs.join(tree).join(format!("{tree}-top.txt")),
+            format!("{tree}wordtop"),
+        )
+        .unwrap();
+        std::fs::write(
+            docs.join(tree).join(format!("deep/{tree}-deep.txt")),
+            format!("{tree}worddeep"),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(&outside).unwrap();
     std::fs::create_dir_all(&run).unwrap();
-    std::fs::write(home.join("docs/projeto/sub/relatorio.md"), "x").unwrap();
 
     let sock = run.join("biglinux/indexd.sock");
     let _d = KillOnDrop(
         env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .env("BIG_SEARCH_DAEMON_CONTENT_IDLE_MS", "100")
+            .env("BIG_SEARCH_CONTENT_COOLDOWN_SECS", "0")
+            .env("BIG_SEARCH_META", "0")
             .spawn()
             .unwrap(),
     );
     assert!(wait_socket(&sock), "daemon never bound socket");
-    // `total` counts index postings before any file is stat'ed, so a document
-    // left behind for a file that has disappeared still counts.
-    let total = || {
-        let reply = send_daemon_request(
-            &sock,
-            r#"{"v":2,"cmd":"query","q":"relatorio","mode":"name","page":{"limit":5}}"#,
+    for tree in ["deleted", "away", "moving"] {
+        let word = format!("{tree}worddeep");
+        let file = format!("{tree}-deep.txt");
+        assert!(
+            await_content_result(&home, &xdg_storage_home, &run, &word, &file),
+            "{file} was not indexed"
         );
-        let rest = &reply[reply.find("\"total\":").expect("query reply has a total") + 8..];
-        rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap()]
-            .parse::<u64>()
-            .unwrap()
-    };
-    // The watcher indexes only on CPU time nobody else wants: on a busy machine
-    // a batch can wait long, as the content backfill does above.
-    let deadline = Instant::now() + Duration::from_secs(45);
-    while total() == 0 && Instant::now() < deadline {
-        sleep(Duration::from_millis(50));
     }
-    assert_eq!(total(), 1, "the file was never indexed");
 
-    // One event names the folder; none name what it held.
-    std::fs::rename(home.join("docs/projeto"), base.join("projeto")).unwrap();
+    // A folder moved away is one event naming the folder; none name what it
+    // held.
+    std::fs::remove_dir_all(docs.join("deleted")).unwrap();
+    std::fs::rename(docs.join("away"), outside.join("away")).unwrap();
+    std::fs::rename(docs.join("moving"), docs.join("moved")).unwrap();
+
+    // Each check polls: the watcher debounces, and the content side follows
+    // in the next backfill pass, which a busy machine delays (see
+    // `await_content_result`).
     let deadline = Instant::now() + Duration::from_secs(45);
-    while total() != 0 && Instant::now() < deadline {
-        sleep(Duration::from_millis(50));
+    let settled = |check: &dyn Fn() -> bool| {
+        while Instant::now() < deadline {
+            if check() {
+                return true;
+            }
+            sleep(Duration::from_millis(100));
+        }
+        false
+    };
+    for tree in ["deleted", "away", "moving"] {
+        let old = docs.join(tree);
+        assert!(
+            settled(&|| query_paths(&sock, "list", "", &old).0 == 0),
+            "{tree}: the catalogue still lists {:?}",
+            query_paths(&sock, "list", "", &old)
+        );
+        assert!(
+            settled(&|| query_paths(&sock, "name", tree, &old).0 == 0),
+            "{tree}: the name index still holds {:?}",
+            query_paths(&sock, "name", tree, &old)
+        );
+        let word = format!("{tree}worddeep");
+        assert!(
+            settled(&|| query_paths(&sock, "content", &word, &old).0 == 0),
+            "{tree}: the content index still answers for the old path"
+        );
+        assert!(
+            settled(&|| catalogue_rows(&xdg_storage_home, "content", &old) == 0),
+            "{tree}: the content catalogue still holds rows under the old path"
+        );
+        assert_eq!(catalogue_rows(&xdg_storage_home, "name", &old), 0);
     }
-    assert_eq!(total(), 0, "the moved folder's file is still indexed");
+    let moved = docs.join("moved");
+    let deep = moved.join("deep/moving-deep.txt").display().to_string();
+    assert!(
+        settled(&|| query_paths(&sock, "list", "", &moved).1.contains(&deep)),
+        "the moved tree is not catalogued under its new path"
+    );
+    assert!(
+        settled(&|| query_paths(&sock, "content", "movingworddeep", &home).1 == [deep.clone()]),
+        "the moved tree is not searchable by content under its new path"
+    );
 
     std::fs::remove_dir_all(&base).ok();
 }

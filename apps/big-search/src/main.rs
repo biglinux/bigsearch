@@ -234,9 +234,7 @@ fn main() -> Result<()> {
     }
 }
 
-/// Parse flags out of the tokens: `-n N`/`--limit N`, `-a`/`--all`,
-/// `-p`/`--pages` (show PDF/PPTX page numbers), `--ext EXT` (repeatable; restrict
-/// to those extensions, server-side). The rest is the query.
+/// Search flags parsed by [`parse_query`]; the remaining tokens form the query.
 struct Search {
     limit: usize,
     pages: bool,
@@ -507,13 +505,9 @@ fn cmd_register_move(tokens: &[String]) -> Result<()> {
 }
 
 fn cmd_register_derived(tokens: &[String]) -> Result<()> {
-    if !(2..=4).contains(&tokens.len()) {
-        print_usage();
-        anyhow::bail!("usage: register-derived SRC DST [APP_ID] [ACTION]");
-    }
-    let app_id = tokens.get(2).map(String::as_str);
-    let action = tokens.get(3).map(String::as_str);
-    register_with_daemon(|client| client.register_derived(&tokens[0], &tokens[1], app_id, action))
+    let (src, dst, app_id) =
+        two_paths_and_optional_app(tokens, "register-derived SRC DST [APP_ID]")?;
+    register_with_daemon(|client| client.register_derived(src, dst, app_id))
 }
 
 fn register_with_daemon(
@@ -640,8 +634,7 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
         print_usage();
         return Ok(());
     }
-    // Server-side filter + single page; the daemon resolves everything (the CLI is
-    // just another thin client of the shared crate). `--under` is a server filter.
+    // Filters and paging are resolved server-side.
     let filter = query::Filter {
         under: s.under.clone(),
         ext: s.ext.clone(),
@@ -652,8 +645,7 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
         limit: s.limit,
     };
 
-    // Prefer the warm daemon (via the shared client); fall back to opening the index
-    // read-only when no daemon is listening.
+    // Prefer the warm daemon; open the index read-only when none is listening.
     let client = daemon_client()?;
     let daemon_query = if s.include_origin {
         client.query_with_origin(&s.query, mode, filter.clone(), page.clone())
@@ -702,10 +694,12 @@ fn query_without_daemon(
         .as_ref()
         .map(index::query_reader)
         .transpose()?;
+    let catalogue = catalogue::CatalogueReader::new(&config::state_db_path());
     query::run_query(
         query::QueryIndexes {
             name: &name_reader,
             content: content_reader.as_ref(),
+            catalogue: &catalogue,
         },
         &s.query,
         mode,

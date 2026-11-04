@@ -113,9 +113,6 @@ pub(crate) fn group(settings: &Rc<SearchSettings>) -> adw::PreferencesGroup {
     }
     group.add(&forget);
 
-    // What the service says about itself replaces the switch when it cannot
-    // work here. Asked after the rows are built, because the answer comes from
-    // another process and must not hold the window open.
     ask_whether_this_computer_can(
         &group,
         [
@@ -128,10 +125,9 @@ pub(crate) fn group(settings: &Rc<SearchSettings>) -> adw::PreferencesGroup {
     group
 }
 
-/// Ask the service whether versions are kept here, and say so.
-///
-/// The question is asked about a file that certainly has no versions, because
-/// the answer carries the reason whatever the file is.
+/// Ask the service, off the main loop, whether versions are kept here, and
+/// say so. Asks about `/`, which has no versions: the reason comes with any
+/// answer.
 fn ask_whether_this_computer_can(group: &adw::PreferencesGroup, controls: [gtk::Widget; 4]) {
     let group = group.clone();
     glib::spawn_future_local(async move {
@@ -143,12 +139,10 @@ fn ask_whether_this_computer_can(group: &adw::PreferencesGroup, controls: [gtk::
         .ok()
         .flatten();
         let Some(answer) = answer else {
-            // The service is not running, which the card above already says. The
-            // switch stays: turning it on is what the person came here to do.
+            // Not running; the status card says so, and the switch stays.
             return;
         };
-        // Exhaustive on purpose: a reason added to the service has to be given a
-        // sentence here, not swallowed by a catch-all that says nothing.
+        // Exhaustive on purpose: a new reason must get its own sentence.
         let explanation = match answer.unavailable {
             None | Some(Unavailable::Disabled) => None,
             Some(Unavailable::NoReflink) => Some(tr(
@@ -170,7 +164,6 @@ fn ask_whether_this_computer_can(group: &adw::PreferencesGroup, controls: [gtk::
                 control.set_visible(false);
             }
         } else if answer.paused_for_space {
-            // A different thing from "off": it is on, and waiting for room.
             group.set_description(Some(&tr(
                 "There is little free disk space, so new versions are not being kept for now.",
             )));

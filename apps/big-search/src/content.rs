@@ -235,9 +235,8 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
         return Ok(0);
     }
     let f = content_fields(index)?;
-    // One writer for the whole pass. A writer per batch, dropped without
-    // waiting, leaves its merges running: a cold pass over 220 000 files had
-    // 23 writers merging at once, 466 segments and nearly 1 GB resident.
+    // One writer for the whole pass: a writer per batch, dropped without
+    // waiting, leaves its merges running, and they pile up across batches.
     let mut writer = crate::index::content_writer(index).context("content writer")?;
     let mut indexed_total = 0u64;
     let mut cursor: CatalogCursor = None;
@@ -299,7 +298,9 @@ pub fn index_content_limited_with_writer(
         &crate::config::state_db_path(),
         crate::catalogue::CONTENT_NAMESPACE,
     );
-    let files = pending_files(files, &content_state, limit);
+    let files =
+        pending_batch_with_byte_limit(files, &content_state, limit.unwrap_or(usize::MAX), u64::MAX)
+            .files;
     if files.is_empty() {
         return Ok(0);
     }
@@ -522,7 +523,7 @@ fn catalog_content_batch_limit() -> usize {
 ///
 /// This is the whole shape of a tag write. A tag lives in the `user.xdg.tags`
 /// extended attribute, and writing an extended attribute leaves size and
-/// modification time exactly as they were, so [`pending_batch`] calls the file
+/// modification time exactly as they were, so [`pending_batch_with_byte_limit`] calls the file
 /// unchanged and skips it. Forgetting the catalogue row alone does not help:
 /// the content index keeps its own record, and the tag token lives there.
 /// Without this, the forced reindex commits a name-index document with nothing
@@ -727,22 +728,6 @@ impl CatalogSelection {
             self.after,
         )
     }
-}
-
-fn pending_files(
-    files: Vec<PathBuf>,
-    content_state: &catalogue::State,
-    limit: Option<usize>,
-) -> Vec<PathBuf> {
-    pending_batch(files, content_state, limit.unwrap_or(usize::MAX)).files
-}
-
-fn pending_batch(
-    files: Vec<PathBuf>,
-    content_state: &catalogue::State,
-    limit: usize,
-) -> PendingContentBatch {
-    pending_batch_with_byte_limit(files, content_state, limit, u64::MAX)
 }
 
 fn pending_batch_with_byte_limit(

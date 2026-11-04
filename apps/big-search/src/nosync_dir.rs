@@ -178,10 +178,8 @@ impl Directory for NoFsyncDirectory {
     /// temporary. The rename still makes the swap atomic against a *reader*; it
     /// is a power cut that may leave the new content unwritten.
     ///
-    /// The temporary is named after the target plus our pid rather than taken
-    /// from `tempfile`: only the process holding the tantivy writer lock ever
-    /// writes here, so that is unique enough, and the rename must stay inside
-    /// the same directory to be atomic.
+    /// The temporary is target + pid in the same directory: only the writer-lock
+    /// holder writes here, and the rename must stay in-directory to be atomic.
     fn atomic_write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
         let target = self.root.join(path);
         let mut temp_name = target

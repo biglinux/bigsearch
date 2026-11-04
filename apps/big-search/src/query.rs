@@ -1,5 +1,6 @@
 //! Query engine: name, content and combined searches, then the filters,
 //! paging and metadata a client sees.
+use crate::catalogue::ListOrder;
 use crate::index::fields;
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -16,20 +17,18 @@ mod tests;
 pub use both::search_both;
 use content::count_content;
 pub use content::search_content;
-pub use listing::{count, list_all, list_matching, list_paths};
+pub use listing::{count, list_matching, list_paths};
 pub use names::search;
 use names::{count_names, indexed_mime};
 
 // Wire types (Hit/Filter/Page/QueryOutcome) live in the shared `big-indexd-client`
 // crate so the daemon and its GUI clients cannot drift; the daemon adds the engine.
-pub use big_indexd_client::{Filter, Hit, MatchKind, Page, QueryOutcome};
+pub use big_indexd_client::{EntryKind, Filter, Hit, MatchKind, Page, QueryOutcome};
 
 /// Ceiling on candidates pulled from the index before filtering/paging. Bounds the
 /// daemon's work (and `stat` count) per request regardless of how broad the query is.
-///
-/// From the shared crate rather than written here: it caps `QueryOutcome::total`,
-/// so a client has to know it to tell an exact count from a floor, and one fact
-/// in two files is a fact that can drift.
+/// Shared with clients: it caps `QueryOutcome::total`, so they can tell an exact
+/// count from a floor.
 use big_indexd_client::CANDIDATE_CEILING;
 
 /// Longest query read, in characters; the rest is ignored. The query comes
@@ -39,11 +38,18 @@ const MAX_QUERY_CHARS: usize = 256;
 pub struct QueryIndexes<'a> {
     pub name: &'a IndexReader,
     pub content: Option<&'a IndexReader>,
+    /// The recorded `(mtime, size)` of every catalogued path, which orders and
+    /// counts the `list` and `largest` modes.
+    pub catalogue: &'a crate::catalogue::CatalogueReader,
 }
 
 /// Run a full query: base search → cheap path filters → `stat`-based date/size
 /// filters → page → metadata enrichment. Everything the GUI would otherwise do
 /// (and leak over) happens here, server-side and bounded.
+///
+/// The `list` and `largest` modes instead read the catalogue, newest or
+/// largest first, with an exact `total`; see
+/// [`crate::catalogue::CatalogueReader::list`].
 pub fn run_query(
     indexes: QueryIndexes<'_>,
     q: &str,
@@ -57,27 +63,55 @@ pub fn run_query(
         Some((end, _)) => &q[..end],
         None => q,
     };
-    let (paged, fetch) = candidates_to_read(mode, filter, page);
-    let (base, counted) = search_by_mode(&indexes, q, mode, filter, paged, fetch)?;
-
-    let mut kept = keep_path_matches(base, filter);
-
-    // A content hit carries no type of its own: the name index has it.
+    // The name index holds the type of every hit, a content hit's included.
     let names = indexes.name.searcher();
     let name_fields = fields(names.index())?;
-    keep_type_matches(&mut kept, filter, &names, &name_fields);
-    keep_stat_matches(&mut kept, filter);
 
-    let total = counted.map_or(kept.len(), |counted| counted.max(kept.len()));
-    let end = page.offset.saturating_add(page.limit);
+    // "Every picture under my home folder" wants the newest ones and how many
+    // there are, and "large and old" the largest: only the catalogue's recorded
+    // mtimes and sizes answer that without a `stat` per file. A type filter
+    // needs the name index, which knows the type of a file whose name does not
+    // tell it, and which entries are folders, so those filters keep the
+    // unordered, ceiling-capped index listing.
+    let order = match mode {
+        "list" => Some(ListOrder::Newest),
+        "largest" => Some(ListOrder::Largest),
+        _ => None,
+    };
+    let (mut hits, total, limit) = if let Some(order) = order
+        && filter.mime.is_empty()
+        && filter.kind.is_none()
+    {
+        // The page is what gets `stat`ed, so it stays under the same ceiling as
+        // the candidates of the other modes; the client pages past it.
+        let limit = page.limit.min(CANDIDATE_CEILING);
+        let (total, paths) = indexes.catalogue.list(filter, order, page.offset, limit)?;
+        let hits: Vec<Hit> = paths
+            .into_iter()
+            .map(|path| Hit {
+                name: file_name(&path),
+                source: crate::settings::source_name(Path::new(&path)),
+                path,
+                ..Default::default()
+            })
+            .collect();
+        (hits, total, limit)
+    } else {
+        let (kept, total) = ranked(&indexes, q, mode, filter, page, &names, &name_fields)?;
+        let hits = kept
+            .into_iter()
+            .skip(page.offset)
+            .take(page.limit)
+            .collect();
+        (hits, total, page.limit)
+    };
+    let end = page.offset.saturating_add(limit);
     let next_offset = (end < total).then_some(end);
 
-    // Page, then enrich only the visible window with metadata.
-    let mut hits: Vec<Hit> = kept
-        .into_iter()
-        .skip(page.offset)
-        .take(page.limit)
-        .collect();
+    // Paths that vanished since they were catalogued are dropped from the page
+    // without renumbering: the next page still starts where this one ended, so
+    // nothing is skipped, and `total` overcounts them until the watcher removes
+    // them.
     enrich_page(&mut hits, &names, &name_fields);
     if include_origin && let Some(origin_reader) = origin_reader {
         origin_reader.attach_summaries(&mut hits);
@@ -89,6 +123,26 @@ pub fn run_query(
         next_offset,
         content_pending: 0, // the daemon overwrites this from its live gauge
     })
+}
+
+/// Every candidate of the index-backed modes that passes `filter`, in rank
+/// order, and how many match in all.
+fn ranked(
+    indexes: &QueryIndexes<'_>,
+    q: &str,
+    mode: &str,
+    filter: &Filter,
+    page: &Page,
+    names: &tantivy::Searcher,
+    name_fields: &crate::index::Fields,
+) -> Result<(Vec<Hit>, usize)> {
+    let (paged, fetch) = candidates_to_read(mode, filter, page);
+    let (base, counted) = search_by_mode(indexes, q, mode, filter, paged, fetch)?;
+    let mut kept = keep_path_matches(base, filter);
+    keep_type_matches(&mut kept, filter, names, name_fields);
+    keep_stat_matches(&mut kept, filter);
+    let total = counted.map_or(kept.len(), |counted| counted.max(kept.len()));
+    Ok((kept, total))
 }
 
 /// The base search of `mode`, and the count of a paged query whose page did
@@ -113,7 +167,7 @@ fn search_by_mode(
         // filter rather than by words: "every PDF under my home folder" has
         // no text to search for, and the name search refuses a query shorter
         // than two letters because the ngram index cannot narrow one.
-        "list" => list_matching(indexes.name, filter, CANDIDATE_CEILING)?,
+        "list" | "largest" => list_matching(indexes.name, filter, CANDIDATE_CEILING)?,
         _ => search(indexes.name, q, filter, fetch)?,
     };
     // The count of a paged query comes from the postings, up to the ceiling,
@@ -146,9 +200,13 @@ fn search_by_mode(
 /// may see only one of the two, so its order would change with the offset.
 fn candidates_to_read(mode: &str, filter: &Filter, page: &Page) -> (bool, usize) {
     let stat_filters = filter.mtime.is_some() || filter.size.is_some();
-    let path_filters = filter.under.is_some() || !filter.ext.is_empty() || !filter.mime.is_empty();
-    let paged =
-        !matches!(mode, "list" | "both") && !stat_filters && !(mode == "content" && path_filters);
+    let path_filters = filter.under.is_some()
+        || !filter.ext.is_empty()
+        || !filter.mime.is_empty()
+        || filter.kind.is_some();
+    let paged = !matches!(mode, "list" | "largest" | "both")
+        && !stat_filters
+        && !(mode == "content" && path_filters);
     let fetch = if paged {
         // Room for names the post-filter turns away and files gone since.
         page.offset
@@ -171,9 +229,8 @@ fn keep_path_matches(base: Vec<Hit>, filter: &Filter) -> Vec<Hit> {
         .collect();
     base.into_iter()
         .filter(|h| under.is_none_or(|d| is_under(&h.path, d)))
-        // The extension is read once per candidate, not once per wanted
-        // extension: `ext_of` builds a lowercase `String`, and inside `any` that
-        // happened again for every extension in the filter.
+        // Borrow the extension once per candidate instead of building a
+        // lowercase `String` per wanted extension.
         .filter(|h| {
             exts.is_empty() || {
                 let ext = Path::new(&h.path)
@@ -186,23 +243,28 @@ fn keep_path_matches(base: Vec<Hit>, filter: &Filter) -> Vec<Hit> {
         .collect()
 }
 
-/// The hits of one of `filter.mime`, typed from the name index when the hit
-/// carries no type.
+/// The hits of one of `filter.mime` and of `filter.kind`, typed from the name
+/// index when the hit carries no type.
 fn keep_type_matches(
     kept: &mut Vec<Hit>,
     filter: &Filter,
     names: &tantivy::Searcher,
     name_fields: &crate::index::Fields,
 ) {
-    if !filter.mime.is_empty() {
+    if !filter.mime.is_empty() || filter.kind.is_some() {
         kept.retain_mut(|h| {
             if h.mime.is_empty() {
                 h.mime = indexed_mime(names, name_fields, &h.path);
             }
-            filter
-                .mime
-                .iter()
-                .any(|wanted| crate::mime::matches(&h.mime, wanted))
+            let folder = h.mime == crate::mime::DIRECTORY;
+            (filter.mime.is_empty()
+                || filter
+                    .mime
+                    .iter()
+                    .any(|wanted| crate::mime::matches(&h.mime, wanted)))
+                && filter
+                    .kind
+                    .is_none_or(|kind| folder == (kind == EntryKind::Folder))
         });
     }
 }
@@ -271,6 +333,14 @@ impl OfflineSources {
     }
 }
 
+/// The last component of `path`; empty for none.
+fn file_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Lowercase extension of `path` without the dot; empty when there is none.
 fn ext_of(path: &str) -> String {
     Path::new(path)
@@ -280,12 +350,11 @@ fn ext_of(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Whether `path` is inside directory `dir` (or is `dir` itself).
+/// Whether `path` is inside directory `dir`, which is not inside itself. An
+/// empty `dir`, the root with its slash trimmed, holds everything.
 fn is_under(path: &str, dir: &str) -> bool {
-    path == dir
-        || path
-            .strip_prefix(dir)
-            .is_some_and(|rest| rest.starts_with('/'))
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Matches of `query` in the index, counted up to `cap`: the posting lists

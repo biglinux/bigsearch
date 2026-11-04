@@ -59,8 +59,7 @@ pub(crate) fn group(settings: &Rc<SearchSettings>) -> adw::PreferencesGroup {
             );
         });
     }
-    // Without the first switch there is nothing to feed, so the second one
-    // cannot be on: a switch that changes nothing is a switch that lies.
+    // The browser list only feeds origin memory, so it is inert without it.
     {
         let browsers = browsers.clone();
         remember.connect_active_notify(move |row| browsers.set_sensitive(row.is_active()));
@@ -82,12 +81,8 @@ pub(crate) fn group(settings: &Rc<SearchSettings>) -> adw::PreferencesGroup {
     group
 }
 
-/// What the download-list switch reads, and which browsers were found.
-///
-/// The list of browsers is said rather than asked about: a person does not know
-/// which browser wrote what, and one switch per browser would be seven decisions
-/// nobody can make. Naming what was found gives them the fact without the
-/// decision.
+/// What the download-list switch reads, and which browsers were found (named,
+/// not one switch each).
 fn browser_subtitle() -> String {
     let found = installed_browsers();
     let promise = tr(
@@ -102,11 +97,8 @@ fn browser_subtitle() -> String {
     )
 }
 
-/// The Chromium-family browsers whose profile folder exists.
-///
-/// Only the folder is looked at, never opened: this is for the sentence on the
-/// screen, and the reading itself happens in the service and only once the
-/// switch is on.
+/// The Chromium-family browsers whose profile folder exists. Only checks the
+/// folder; the service does the reading, and only once the switch is on.
 fn installed_browsers() -> Vec<String> {
     const BROWSERS: [(&str, &str); 6] = [
         ("google-chrome", "Google Chrome"),

@@ -33,7 +33,7 @@ pub(crate) const TITLE: &str = msgid("Where to look");
 pub(crate) struct Folders {
     group: adw::PreferencesGroup,
     rows: RefCell<Vec<adw::ActionRow>>,
-    settings: RefCell<Option<std::rc::Weak<SearchSettings>>>,
+    settings: std::rc::Weak<SearchSettings>,
     /// Which folders the service says it is actually catalogueing right now, so
     /// a disk that is unplugged can be shown as unplugged.
     available: RefCell<Vec<PathBuf>>,
@@ -47,9 +47,8 @@ impl Folders {
                 "The computer keeps a ready list of what is in these folders, so searching them is instant.",
             ))
             .build();
-        // A row of its own at the end of the list, not a button in the heading:
-        // beside a two-line explanation the heading suffix sits on top of the
-        // words, and the person reads a button through a sentence.
+        // A row at the end, not a heading suffix, which would overlap the
+        // two-line description.
         let add = gtk::Button::builder()
             .child(
                 &adw::ButtonContent::builder()
@@ -64,7 +63,7 @@ impl Folders {
         let folders = Rc::new(Self {
             group,
             rows: RefCell::new(Vec::new()),
-            settings: RefCell::new(Some(Rc::downgrade(settings))),
+            settings: Rc::downgrade(settings),
             available: RefCell::new(Vec::new()),
         });
 
@@ -87,16 +86,12 @@ impl Folders {
     }
 
     fn settings(&self) -> Option<Rc<SearchSettings>> {
-        self.settings
-            .borrow()
-            .as_ref()
-            .and_then(std::rc::Weak::upgrade)
+        self.settings.upgrade()
     }
 
     /// Build the rows from what the file says.
     fn reload(self: &Rc<Self>) {
-        // Also puts back the explanation, over whatever refusal was last shown
-        // in its place.
+        // Also replaces whatever refusal `say` last showed.
         self.group.set_description(Some(&tr(
             "The computer keeps a ready list of what is in these folders, so searching them is instant.",
         )));
@@ -105,8 +100,6 @@ impl Folders {
         }
         let config = big_search_config::read();
         let listed: Vec<big_search_config::SourceEntry> = if config.sources.is_empty() {
-            // Nothing written means the home folder, and the list has to show
-            // the person what is happening rather than an empty box.
             vec![big_search_config::SourceEntry::new(
                 big_search_config::home_dir(),
             )]
@@ -338,8 +331,7 @@ fn add_source_at(path: &Path) -> std::io::Result<bool> {
         return Ok(false);
     }
     let mut entry = big_search_config::SourceEntry::new(path.clone());
-    // A disk that comes and goes is recognised, not asked about: the person
-    // knows they plugged in a pendrive, not what "removable source" means.
+    // Recognised from the mount point rather than asked about.
     entry.removable = is_removable(&path);
     entry.network = is_network(&path);
     big_search_config::add_source(&entry)?;
@@ -367,8 +359,6 @@ fn folder_name(source: &big_search_config::SourceEntry) -> String {
 fn subtitle_for(source: &big_search_config::SourceEntry) -> String {
     let path = friendly_path(&source.path);
     if path == folder_name(source) {
-        // The home folder is called "Home folder" and lives at "Home folder";
-        // saying it twice tells nobody anything.
         return String::new();
     }
     path
@@ -401,7 +391,6 @@ fn is_network(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    /// A disk plugged into the machine is recognised as one without asking.
     #[test]
     fn a_plugged_in_disk_is_recognised() {
         assert!(is_removable(Path::new("/run/media/bruno/BACKUP")));

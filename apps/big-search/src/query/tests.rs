@@ -1,5 +1,7 @@
 use super::*;
+use crate::catalogue::{CatalogueReader, NAME_NAMESPACE, State};
 use crate::index::{content_fields, fields, open_or_create};
+use std::path::PathBuf;
 use tantivy::{IndexReader, doc};
 
 pub(super) fn index_with(label: &str, paths: &[&str]) -> tantivy::IndexReader {
@@ -49,6 +51,23 @@ pub(super) fn names(hits: Vec<Hit>) -> Vec<String> {
     hits.into_iter().map(|hit| hit.name).collect()
 }
 
+/// A reader of a catalogue that does not exist, for queries that never reach it.
+fn no_catalogue() -> CatalogueReader {
+    CatalogueReader::new(Path::new("/nonexistent/big-search/state.sqlite"))
+}
+
+/// A catalogue recording `files` with the given modification times and
+/// sizes, in a fresh directory under `dir`.
+fn catalogue_with(dir: &Path, files: &[(&Path, i64, u64)]) -> CatalogueReader {
+    let db = dir.join("state/state.sqlite");
+    let mut names = State::empty(&db, NAME_NAMESPACE);
+    for (path, mtime, size) in files {
+        names.set(path, *mtime, *size);
+    }
+    names.persist().unwrap();
+    CatalogueReader::new(&db)
+}
+
 /// `run_query` over a name index alone, without origins.
 fn run_names(
     index: &IndexReader,
@@ -61,6 +80,7 @@ fn run_names(
         QueryIndexes {
             name: index,
             content: None,
+            catalogue: &no_catalogue(),
         },
         q,
         mode,
@@ -100,14 +120,25 @@ fn list_mode_answers_wordless_queries() {
         "list-mode",
         &listed.iter().map(String::as_str).collect::<Vec<_>>(),
     );
+    let catalogue = catalogue_with(
+        &root,
+        &paths
+            .iter()
+            .map(|path| (path.as_path(), 1, 1))
+            .collect::<Vec<_>>(),
+    );
     let filter = Filter {
         under: Some(mine.to_string_lossy().into_owned()),
         ext: vec!["pdf".to_string()],
         ..Default::default()
     };
     let run = |mode: &str| {
-        run_names(
-            &index,
+        run_query(
+            QueryIndexes {
+                name: &index,
+                content: None,
+                catalogue: &catalogue,
+            },
             "",
             mode,
             &filter,
@@ -115,7 +146,10 @@ fn list_mode_answers_wordless_queries() {
                 offset: 0,
                 limit: 50,
             },
+            false,
+            None,
         )
+        .unwrap()
     };
     let outcome = run("list");
     let found: Vec<&str> = outcome.hits.iter().map(|hit| hit.path.as_str()).collect();
@@ -130,9 +164,81 @@ fn list_mode_answers_wordless_queries() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// The folder and the extensions narrow the index before the ceiling: a
-/// sample cut first (the first `limit` documents of all) held none of
-/// the videos, and the listing came back empty.
+/// The `largest` mode is the `list` mode ordered by recorded size.
+#[test]
+fn largest_pages_by_size() {
+    let root = std::env::temp_dir().join(format!("lsearch-largest-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(&root).unwrap();
+    // Recorded (mtime, size), in neither name nor time order.
+    let recorded = [
+        ("small.iso", 100, 10),
+        ("huge.iso", 300, 900),
+        ("tie-b.iso", 200, 500),
+        ("tie-a.iso", 400, 500),
+        ("recent.iso", 9_000, 2_000),
+    ];
+    let paths: Vec<PathBuf> = recorded
+        .iter()
+        .map(|(name, _, _)| {
+            let path = root.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            path
+        })
+        .collect();
+    let catalogue = catalogue_with(
+        &root,
+        &paths
+            .iter()
+            .zip(recorded)
+            .map(|(path, (_, mtime, size))| (path.as_path(), mtime, size))
+            .collect::<Vec<_>>(),
+    );
+    let owned: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let index = index_with(
+        "largest",
+        &owned.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    // "Large and old": everything not changed since 1000.
+    let filter = Filter {
+        under: Some(root.to_string_lossy().into_owned()),
+        mtime: Some([i64::MIN, 1_000]),
+        ..Default::default()
+    };
+    let page = |offset, limit| {
+        run_query(
+            QueryIndexes {
+                name: &index,
+                content: None,
+                catalogue: &catalogue,
+            },
+            "",
+            "largest",
+            &filter,
+            &Page { offset, limit },
+            false,
+            None,
+        )
+        .unwrap()
+    };
+    let names = |outcome: &QueryOutcome| -> Vec<String> {
+        outcome.hits.iter().map(|hit| hit.name.clone()).collect()
+    };
+
+    let first = page(0, 3);
+    // Same size: the path breaks the tie.
+    assert_eq!(names(&first), ["huge.iso", "tie-a.iso", "tie-b.iso"]);
+    assert_eq!((first.total, first.next_offset), (4, Some(3)));
+    let last = page(3, 3);
+    assert_eq!(names(&last), ["small.iso"]);
+    assert_eq!((last.total, last.next_offset), (4, None));
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A type filter finds videos by what they are, extension or not.
 #[test]
 fn type_filter_finds_videos_by_content() {
     let dir = std::env::temp_dir().join(format!("lsearch-mime-query-{}", std::process::id()));
@@ -187,6 +293,43 @@ fn type_filter_finds_videos_by_content() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A folder is its type in the name index, so the index keeps folders, or
+/// leaves them out, in the name search and the listing alike.
+#[test]
+fn kind_filter_keeps_folders_or_files() {
+    let dir = std::env::temp_dir().join(format!("lsearch-kind-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join("fotos")).unwrap();
+    std::fs::create_dir_all(dir.join("fotos.d")).unwrap();
+    std::fs::write(dir.join("fotos.txt"), b"x").unwrap();
+    let paths: Vec<String> = ["fotos", "fotos.d", "fotos.txt"]
+        .iter()
+        .map(|name| dir.join(name).to_string_lossy().into_owned())
+        .collect();
+    let index = index_with(
+        "kind-filter",
+        &paths.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let found = |q: &str, mode: &str, kind: EntryKind| {
+        let filter = Filter {
+            kind: Some(kind),
+            ..Default::default()
+        };
+        let mut found = names(run_names(&index, q, mode, &filter, &Page::default()).hits);
+        found.sort();
+        found
+    };
+    for (q, mode) in [("fotos", "name"), ("", "list")] {
+        assert_eq!(
+            found(q, mode, EntryKind::Folder),
+            ["fotos", "fotos.d"],
+            "{mode}"
+        );
+        assert_eq!(found(q, mode, EntryKind::File), ["fotos.txt"], "{mode}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn list_sees_past_the_ceiling() {
     let mut paths: Vec<String> = (0..40)
@@ -221,22 +364,115 @@ fn list_sees_past_the_ceiling() {
         found,
         ["/home/u/Videos/show.mp4", "/home/u/Videos/sub/film.MKV"]
     );
-    let outcome = run_names(
-        &index,
-        "",
-        "list",
-        &filter,
-        &Page {
-            offset: 0,
-            limit: 50,
-        },
+}
+
+/// The `list` mode answers newest first by the catalogue's recorded times,
+/// counts every match, and pages through all of them.
+#[test]
+fn list_pages_newest_first() {
+    let root = std::env::temp_dir().join(format!("lsearch-newest-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    let pictures = root.join("Pictures");
+    std::fs::create_dir_all(&pictures).unwrap();
+    // Recorded times, not in name or creation order.
+    let recorded = [
+        ("c.jpg", 300),
+        ("a.jpg", 500),
+        ("e.png", 100),
+        ("b.JPG", 400),
+        ("d.jpg", 200),
+    ];
+    let files: Vec<(PathBuf, i64)> = recorded
+        .iter()
+        .map(|(name, mtime)| {
+            let path = pictures.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            (path, *mtime)
+        })
+        .collect();
+    let catalogue = catalogue_with(
+        &root,
+        &files
+            .iter()
+            .map(|(path, mtime)| (path.as_path(), *mtime, 1))
+            .collect::<Vec<_>>(),
     );
-    let mut exact: Vec<&str> = outcome.hits.iter().map(|hit| hit.path.as_str()).collect();
-    exact.sort_unstable();
-    assert!(
-        exact.iter().all(|path| !path.ends_with(".part")),
-        "{exact:?}"
+    let owned: Vec<String> = files
+        .iter()
+        .map(|(path, _)| path.to_string_lossy().into_owned())
+        .collect();
+    let index = index_with(
+        "newest",
+        &owned.iter().map(String::as_str).collect::<Vec<_>>(),
     );
+    let filter = Filter {
+        under: Some(pictures.to_string_lossy().into_owned()),
+        ext: vec!["jpg".into(), "png".into()],
+        ..Default::default()
+    };
+    let page = |offset, limit| {
+        run_query(
+            QueryIndexes {
+                name: &index,
+                content: None,
+                catalogue: &catalogue,
+            },
+            "",
+            "list",
+            &filter,
+            &Page { offset, limit },
+            false,
+            None,
+        )
+        .unwrap()
+    };
+    let names = |outcome: &QueryOutcome| -> Vec<String> {
+        outcome.hits.iter().map(|hit| hit.name.clone()).collect()
+    };
+
+    let first = page(0, 2);
+    assert_eq!(names(&first), ["a.jpg", "b.JPG"]);
+    assert_eq!((first.total, first.next_offset), (5, Some(2)));
+    // Enriched like any page: the file's own stat and extension.
+    assert!(first.hits.iter().all(|hit| hit.available && hit.size == 1));
+    assert_eq!(first.hits[1].ext, "jpg");
+    let second = page(2, 2);
+    assert_eq!(names(&second), ["c.jpg", "d.jpg"]);
+    assert_eq!((second.total, second.next_offset), (5, Some(4)));
+    let last = page(4, 2);
+    assert_eq!(names(&last), ["e.png"]);
+    assert_eq!((last.total, last.next_offset), (5, None));
+
+    // A file deleted before the watcher noticed is dropped from its page,
+    // and the next page still starts after the rows this one covered.
+    std::fs::remove_file(pictures.join("b.JPG")).unwrap();
+    let first = page(0, 2);
+    assert_eq!(names(&first), ["a.jpg"]);
+    assert_eq!((first.total, first.next_offset), (5, Some(2)));
+    assert_eq!(names(&page(2, 2)), ["c.jpg", "d.jpg"]);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// `under` keeps what is inside the folder and not the folder itself, as
+/// the catalogue's range does.
+#[test]
+fn under_leaves_the_folder_out() {
+    let kept = |under: &str| -> Vec<String> {
+        let hits = ["/home/a", "/home/a/x.jpg", "/home/ab/y.jpg"].map(|path| Hit {
+            path: path.to_string(),
+            ..Default::default()
+        });
+        let filter = Filter {
+            under: Some(under.to_string()),
+            ..Default::default()
+        };
+        keep_path_matches(hits.into(), &filter)
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect()
+    };
+    assert_eq!(kept("/home/a/"), ["/home/a/x.jpg"]);
+    assert_eq!(kept("/").len(), 3, "the root holds everything");
 }
 
 #[test]
@@ -309,6 +545,7 @@ fn both_mode_counts_each_file_once() {
         QueryIndexes {
             name: &names,
             content: Some(&content),
+            catalogue: &no_catalogue(),
         },
         "recibo",
         "both",

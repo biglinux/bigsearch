@@ -7,12 +7,8 @@ use std::collections::HashMap;
 use tantivy::IndexReader;
 
 /// One file while the two searches are being merged, with the score each index
-/// gave it kept apart.
-///
-/// The two are BM25 over different indexes and different fields, so they are not
-/// points on one scale and adding them means nothing. Keeping them apart until
-/// the sort is what lets each tier be ordered by the evidence that tier actually
-/// has.
+/// gave it kept apart: BM25 over different indexes and fields is not one scale,
+/// so each tier is ordered by the evidence it actually has.
 struct Candidate {
     hit: Hit,
     name_match: Option<NameMatch>,
@@ -54,7 +50,7 @@ impl Candidate {
 /// process.
 ///
 /// Within `Both`, the filename score leads and the content score is secondary
-/// evidence: a strong filename hit must not be pushed down by a weak body match.
+/// evidence.
 ///
 /// The final tie-break is the path, raw rather than folded: determinism is all
 /// it has to provide, and folding would allocate a second string per candidate.
@@ -74,9 +70,8 @@ pub fn search_both(
     let contents = search_content(content_reader, q, limit)?;
 
     let mut candidates = merge_by_path(names, contents, q);
-    // Descending on both scores, ascending on the path: a hit missing a score
-    // for a band it is not in compares as zero, which never matters because the
-    // band is compared first.
+    // Descending on both scores, ascending on the path: a missing score sorts
+    // last, which only matters inside `Both`, since the band is compared first.
     let score_of = |score: Option<f32>| score.unwrap_or(f32::NEG_INFINITY);
     candidates.sort_by(|a, b| {
         a.tier()

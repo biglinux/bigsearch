@@ -14,17 +14,13 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-/// Extract PDF text: `timeout <N> pdftotext -q -- <path> -` → stdout. No shell.
-/// PDFs are not skipped by file size by default. Stdout is read with a hard cap;
-/// `Command::output()` would buffer the whole PDF text layer before truncation,
-/// which can spike RSS on pathological documents. Set `BIG_SEARCH_PDF_MAX_MB` if
-/// a deployment explicitly wants to skip very large PDF inputs.
+/// Extract PDF text with `pdftotext -q -- <path> -`, no shell. Stdout is read
+/// with a hard cap, never buffered whole, so a pathological text layer cannot
+/// spike memory. `BIG_SEARCH_PDF_MAX_MB` optionally skips large inputs.
 pub(crate) fn read_pdf(path: &Path) -> Option<String> {
     let cap = crate::extract::max_extract_bytes();
     let bytes = pdftotext_capped(path, cap, &[])?;
-    // The bytes become the string when they are valid UTF-8, which they are for
-    // every ordinary PDF: `from_utf8_lossy(&bytes).into_owned()` copied the whole
-    // text layer a second time.
+    // Valid UTF-8 (every ordinary PDF) becomes the string without a second copy.
     let text = match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(invalid) => String::from_utf8_lossy(invalid.as_bytes()).into_owned(),
@@ -420,19 +416,11 @@ fn kill_child_tree(child: &mut Child) {
 }
 
 fn exceeds_pdf_input_cap(path: &Path) -> bool {
-    let cap = pdf_max_input_bytes();
+    let cap = crate::settings::pdf_max_input_bytes();
     cap > 0
         && std::fs::metadata(path)
             .map(|m| m.len() > cap)
             .unwrap_or(false)
-}
-
-fn pdf_max_input_bytes() -> u64 {
-    crate::settings::pdf_max_input_bytes()
-}
-
-fn pdf_timeout_secs() -> u64 {
-    crate::settings::pdf_timeout_secs()
 }
 
 /// CPU time an extractor may use: the configured seconds of work, scaled by
@@ -443,7 +431,8 @@ fn pdf_timeout_secs() -> u64 {
 /// indexer runs at idle priority: on a busy machine a PDF waits its turn, and a
 /// wall-clock limit would kill it there and record the file as having no text.
 fn cpu_limit_secs() -> u64 {
-    pdf_timeout_secs().saturating_mul(1024) / u64::from(crate::throttle::INDEXER_UTIL_MAX)
+    crate::settings::pdf_timeout_secs().saturating_mul(1024)
+        / u64::from(crate::throttle::INDEXER_UTIL_MAX)
 }
 
 /// Wall-clock time an extractor may take, against one that hangs without
@@ -480,6 +469,13 @@ mod tests {
         crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `PATH` with `bin` first, so its fake extractor wins.
+    fn path_with(bin: &Path) -> String {
+        std::env::var_os("PATH")
+            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
+            .unwrap_or_else(|| bin.to_string_lossy().into_owned())
     }
 
     fn temporary_extract_dir(label: &str) -> std::path::PathBuf {
@@ -527,12 +523,7 @@ mod tests {
         let path = dir.join("large-output.pdf");
         std::fs::write(&path, b"%PDF fake").unwrap();
 
-        let previous_path = std::env::var_os("PATH");
-        let test_path = previous_path
-            .as_ref()
-            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
-            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &path_with(&bin));
         let _limit = crate::test_env::EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
 
         let text = read_pdf(&path).unwrap();
@@ -570,12 +561,7 @@ mod tests {
         let text = dir.join("README.DOC");
         std::fs::write(&text, b"Keymap notes\n").unwrap();
 
-        let previous_path = std::env::var_os("PATH");
-        let test_path = previous_path
-            .as_ref()
-            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
-            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &path_with(&bin));
         let word_text = crate::extract::content(&word);
         let rtf_described = crate::extract::described(&rtf);
         let other_text = crate::extract::content(&other);
@@ -614,12 +600,7 @@ mod tests {
         let path = dir.join("spinning.pdf");
         std::fs::write(&path, b"%PDF fake").unwrap();
 
-        let previous_path = std::env::var_os("PATH");
-        let test_path = previous_path
-            .as_ref()
-            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
-            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &path_with(&bin));
         let _limit = crate::test_env::EnvVarGuard::set("BIG_SEARCH_PDF_TIMEOUT_SECS", "1");
 
         let started = std::time::Instant::now();
@@ -648,12 +629,7 @@ mod tests {
         let path = dir.join("hung.pdf");
         std::fs::write(&path, b"%PDF fake").unwrap();
 
-        let previous_path = std::env::var_os("PATH");
-        let test_path = previous_path
-            .as_ref()
-            .map(|path| format!("{}:{}", bin.display(), path.to_string_lossy()))
-            .unwrap_or_else(|| bin.to_string_lossy().into_owned());
-        let _path = crate::test_env::EnvVarGuard::set("PATH", &test_path);
+        let _path = crate::test_env::EnvVarGuard::set("PATH", &path_with(&bin));
         let _limit = crate::test_env::EnvVarGuard::set("BIG_SEARCH_PDF_TIMEOUT_SECS", "1");
 
         let started = std::time::Instant::now();

@@ -93,9 +93,8 @@ pub struct OriginSettings {
     pub xattr_enabled: bool,
     pub watch_enabled: bool,
     pub query_enabled: bool,
-    /// Read the download lists the web browsers keep, to say which site a file
-    /// came from. Off unless the person turned it on: that list belongs to the
-    /// browser, and nobody expects a search service to have read it.
+    /// Read browsers' download lists to learn which site a file came from.
+    /// Opt-in: that list belongs to the browser.
     pub browser_history: bool,
     pub max_batch: usize,
 }
@@ -279,13 +278,7 @@ impl OriginWriter {
         upsert_record(conn, &record)
     }
 
-    pub fn register_derived(
-        &self,
-        src: &Path,
-        dst: &Path,
-        app_id: Option<&str>,
-        action: Option<&str>,
-    ) -> Result<()> {
+    pub fn register_derived(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
@@ -296,10 +289,7 @@ impl OriginWriter {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path_key(src));
-        let label = match action {
-            Some("video-conversion") => format!("Gerado a partir de {source_name}"),
-            Some(_) | None => format!("Gerado a partir de {source_name}"),
-        };
+        let label = format!("Gerado a partir de {source_name}");
         let record = OriginRecord {
             path: path_key(dst),
             dev,
@@ -402,13 +392,6 @@ impl OriginWriter {
                 path.display()
             );
         }
-    }
-
-    pub fn origin(&self, path: &Path) -> Result<Option<OriginProvenance>> {
-        let Some(conn) = &self.conn else {
-            return Ok(None);
-        };
-        Ok(select_record(conn, &path_key(path))?.map(OriginRecord::into_provenance))
     }
 }
 
@@ -618,10 +601,8 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
     Ok(())
 }
 
-/// The columns `row_to_record` reads, in the order it reads them.
-///
-/// One list, because it is read by position: a query that lists them in another
-/// order does not fail, it returns a record with the fields swapped.
+/// The columns `row_to_record` reads, in its positional order: a query listing
+/// them differently would silently swap fields.
 const RECORD_COLUMNS: &str = "path, dev, ino, kind, confidence, label, source_app, \
      source_path, source_device_id, source_device_label, source_domain, \
      first_seen_at, updated_at";
@@ -661,11 +642,8 @@ fn select_by_identity(conn: &Connection, path: &Path) -> Result<Option<OriginRec
     .map_err(Into::into)
 }
 
-/// How many unmatched paths are looked up by identity in one go.
-///
-/// `big-search -a --origin` can ask about a hundred thousand paths at once, and
-/// each one not already known costs a `stat`. A page of results is far smaller
-/// than this; a dump of the whole catalogue stops at the first few hundred.
+/// How many unmatched paths are looked up by identity (one `stat` each) per
+/// request; `-a --origin` can ask about a hundred thousand at once.
 const IDENTITY_FALLBACK_LIMIT: usize = 256;
 
 fn select_records(
@@ -688,7 +666,8 @@ fn select_records(
     Ok(by_path)
 }
 
-/// Fill in the paths the name lookup missed, by what the file *is*.
+/// Fill in the paths the name lookup missed by device and inode, filed under
+/// the name asked for, so a renamed file keeps its origin.
 ///
 /// A downloaded document renamed in another program keeps its origin: the row
 /// still holds the earlier name, and the file is the same file (same device,
@@ -860,9 +839,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(300));
             holder.execute_batch("COMMIT").unwrap();
         });
-        let writer = OriginWriter::open(db.clone()).unwrap();
+        let _writer = OriginWriter::open(db.clone()).unwrap();
         release.join().unwrap();
-        assert!(writer.origin(Path::new("/missing")).unwrap().is_none());
+        assert!(
+            OriginReader::new(db.clone())
+                .origin(Path::new("/missing"))
+                .is_none()
+        );
         std::fs::remove_dir_all(db.parent().unwrap()).ok();
     }
 
@@ -887,8 +870,12 @@ mod tests {
     #[test]
     fn fresh_store_has_no_origin() {
         let db = temporary_origin_path("schema");
-        let writer = OriginWriter::open(db.clone()).unwrap();
-        assert!(writer.origin(Path::new("/missing")).unwrap().is_none());
+        let _writer = OriginWriter::open(db.clone()).unwrap();
+        assert!(
+            OriginReader::new(db.clone())
+                .origin(Path::new("/missing"))
+                .is_none()
+        );
         assert!(db.exists());
         std::fs::remove_dir_all(db.parent().unwrap()).ok();
     }

@@ -1,13 +1,14 @@
 //! A file's media type, as the desktop's own database has it.
 //!
-//! The name decides whenever the shared-mime-info globs give it one type: that
+//! The name decides whenever one type holds the heaviest matching glob: that
 //! costs a map lookup and no read, which is the case for nearly every file.
-//! Only a name with no type, or with several (`.ts` is a video, TypeScript or a
-//! Qt translation), has its first bytes read (`file-format`, pure Rust like
-//! every parser here), and among the name's candidates the one the content is,
-//! or descends from most closely, wins: text makes a `.ts` TypeScript, a
-//! transport stream makes it a video. Directories, empty files and anything not
-//! a regular file are never opened (a FIFO would block the scan).
+//! Only a name with no type, or with several tied at the top (`.ts` is a video
+//! or a Qt translation), has its first bytes read (`file-format`, pure Rust
+//! like every parser here), and among the name's candidates the one the
+//! content is, or descends from most closely, wins: text makes a `.ts`
+//! TypeScript, a transport stream makes it a video. Directories, empty files
+//! and anything not a regular file are never opened (a FIFO would block the
+//! scan).
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,9 @@ use std::sync::OnceLock;
 /// Bytes read to tell a file's type: past the deepest signature `file-format`
 /// looks for (an ISO 9660 volume's, at 32 769).
 const HEAD_BYTES: u64 = 40 * 1024;
+
+/// The type of a directory, and of a link to one.
+pub const DIRECTORY: &str = "inode/directory";
 
 struct Glob {
     weight: u32,
@@ -146,43 +150,41 @@ impl Database {
     }
 
     fn of(&self, path: &Path, known: Option<&std::fs::Metadata>) -> Option<String> {
-        // A link is typed as what it points to.
+        // A link is typed as what it points to. Without metadata the path is
+        // read, or a directory named `conf.d` would be typed by its name.
         let followed;
         let known = match known {
             Some(metadata) if metadata.is_symlink() => {
-                followed = std::fs::metadata(path).ok()?;
-                Some(&followed)
+                followed = Some(std::fs::metadata(path).ok()?);
+                followed.as_ref()
             }
-            known => known,
+            Some(metadata) => Some(metadata),
+            None => {
+                followed = std::fs::metadata(path).ok();
+                followed.as_ref()
+            }
         };
         // `conf.d` is a directory, not D source, and an empty `.mp4` no video.
         if known.is_some_and(std::fs::Metadata::is_dir) {
-            return Some("inode/directory".to_string());
+            return Some(DIRECTORY.to_string());
         }
         if known.is_some_and(|metadata| metadata.is_file() && metadata.len() == 0) {
             return Some("application/x-zerosize".to_string());
         }
         let name = path.file_name()?.to_str()?;
         let candidates = self.candidates(name);
-        if let [only] = candidates {
-            return Some(only.mime.clone());
+        // shared-mime-info's checking order: the heaviest glob decides when
+        // one type holds it. `*.html` is also XHTML and `*.png` also APNG, at
+        // lower weights; only a tie at the top is worth reading the file for.
+        let top = candidates.iter().map(|glob| glob.weight).max();
+        let mut leaders = candidates.iter().filter(|glob| Some(glob.weight) == top);
+        if let Some(first) = leaders.next()
+            && leaders.all(|glob| self.canonical(&glob.mime) == self.canonical(&first.mime))
+        {
+            return Some(first.mime.clone());
         }
-        let stat;
-        let metadata = match known {
-            Some(metadata) => metadata,
-            None => {
-                stat = std::fs::metadata(path).ok()?;
-                &stat
-            }
-        };
-        if metadata.is_dir() {
-            return Some("inode/directory".to_string());
-        }
-        if !metadata.is_file() {
+        if !known?.is_file() {
             return None;
-        }
-        if metadata.len() == 0 {
-            return Some("application/x-zerosize".to_string());
         }
         self.settle_by_content(path, candidates)
     }
@@ -268,8 +270,7 @@ fn database() -> &'static Database {
 
 /// The media type of `path`, or `None` when it has none to tell (a FIFO, a
 /// device, a path that is gone). `metadata`, when the caller has it (the
-/// scan's walk does), saves a `stat` and tells a directory with a dotted name
-/// from a file.
+/// scan's walk does), saves a `stat`.
 #[must_use]
 pub fn of(path: &Path, metadata: Option<&std::fs::Metadata>) -> Option<String> {
     database().of(path, metadata)
@@ -305,6 +306,12 @@ mod tests {
             "50:text/x-csrc:*.c:cs\n",
             "50:text/x-csrc:*.c\n",
             "10:text/x-readme:README*\n",
+            "80:text/html:*.html\n",
+            "50:application/xhtml+xml:*.html\n",
+            "50:image/png:*.png\n",
+            "40:image/apng:*.png\n",
+            "50:text/markdown:*.md\n",
+            "10:application/x-genesis-rom:*.md\n",
         ));
         for (child, parent) in [
             ("text/vnd.trolltech.linguist", "application/xml"),
@@ -343,6 +350,20 @@ mod tests {
         assert_eq!(
             db.of(Path::new("/nowhere/Widget.C"), None).as_deref(),
             Some("text/x-c++src")
+        );
+        // A lighter second type does not make the name ambiguous: these paths
+        // do not exist, so any answer came from the name alone.
+        assert_eq!(
+            db.of(Path::new("/nowhere/page.html"), None).as_deref(),
+            Some("text/html")
+        );
+        assert_eq!(
+            db.of(Path::new("/nowhere/shot.png"), None).as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            db.of(Path::new("/nowhere/README.md"), None).as_deref(),
+            Some("text/markdown")
         );
     }
 
@@ -446,17 +467,15 @@ mod tests {
         assert_eq!(db.of(&dir, None).as_deref(), Some("inode/directory"));
         let dotted = dir.join("conf.d");
         std::fs::create_dir_all(&dotted).unwrap();
-        let metadata = std::fs::symlink_metadata(&dotted).unwrap();
-        assert_eq!(
-            db.of(&dotted, Some(&metadata)).as_deref(),
-            Some("inode/directory")
-        );
         let hollow = write("hollow.mp4", b"");
-        let metadata = std::fs::metadata(&hollow).unwrap();
-        assert_eq!(
-            db.of(&hollow, Some(&metadata)).as_deref(),
-            Some("application/x-zerosize")
-        );
+        for (path, inode) in [
+            (&dotted, "inode/directory"),
+            (&hollow, "application/x-zerosize"),
+        ] {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            assert_eq!(db.of(path, Some(&metadata)).as_deref(), Some(inode));
+            assert_eq!(db.of(path, None).as_deref(), Some(inode));
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

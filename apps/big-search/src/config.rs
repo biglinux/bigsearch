@@ -1,4 +1,4 @@
-//! XDG paths and default scan roots.
+//! XDG paths for data, config and the runtime socket.
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -20,8 +20,7 @@ pub fn data_dir() -> PathBuf {
     base.join("big-search")
 }
 
-/// Create the data directory owner-only, and tighten it if an earlier version
-/// left it group/world-readable.
+/// Create the data directory owner-only, tightening it if group/world-readable.
 ///
 /// Everything under it describes the user's private files: `state.sqlite` is a
 /// complete list of every path in their home, and the content index holds the
@@ -74,9 +73,7 @@ pub fn origin_db_path() -> PathBuf {
     data_dir().join("origin.sqlite")
 }
 
-/// Earlier versions of the person's documents. Separate from everything else
-/// for the same reason as the origin store, and one more: this is durable user
-/// data, not a cache the service can rebuild.
+/// Earlier versions of documents: durable user data, not a rebuildable cache.
 pub fn history_db_path() -> PathBuf {
     data_dir().join("history.sqlite")
 }
@@ -97,11 +94,7 @@ pub fn user_ignore() -> PathBuf {
 }
 
 /// Structured config (`$XDG_CONFIG_HOME/big-search/config.toml`): sources + policy.
-///
-/// The crate that owns the file's shape owns where it lives too. This file used
-/// to resolve the path itself and the two disagreed: with `XDG_CONFIG_HOME` set
-/// but empty, one looked at a relative `big-search/config.toml` and the other at
-/// `~/.config/big-search/config.toml`.
+/// Resolved by `big_search_config`, which owns the file.
 pub fn config_file() -> PathBuf {
     big_search_config::path()
 }

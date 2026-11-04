@@ -18,7 +18,8 @@ SQLite.
 ## Recursos
 
 - **Nomes:** busca por trecho, sem diferenciar maiúsculas, no caminho completo,
-  com filtro por pasta e extensão na CLI e por tipo de mídia pelo socket.
+  com filtro por pasta e extensão na CLI e, pelo socket, por tipo de mídia e
+  por ser pasta ou arquivo.
 - **Conteúdo:** texto puro, Markdown, código-fonte, HTML, PDF (via
   `pdftotext`), documentos OpenDocument e Office Open XML, EPUB, e-mails salvos,
   RTF e Word 97-2003 (via `antiword`). Chinês, japonês, coreano e as

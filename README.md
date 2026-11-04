@@ -16,7 +16,8 @@ the bookkeeping around it is SQLite.
 ## Features
 
 - **Names:** case-insensitive substring search over the full path, filtered by
-  folder and extension from the CLI, and by media type through the socket.
+  folder and extension from the CLI and, through the socket, by media type and
+  by whether an entry is a folder.
 - **Content:** plain text, Markdown, source code, HTML, PDF (through
   `pdftotext`), OpenDocument and Office Open XML documents, EPUB, saved e-mail,
   RTF and Word 97-2003 (through `antiword`). Chinese, Japanese, Korean and

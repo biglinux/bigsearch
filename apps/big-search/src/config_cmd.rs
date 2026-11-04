@@ -1,8 +1,5 @@
 //! The `config` subcommand: inspect and edit config.toml from the CLI.
-//! Split out of `main.rs`; a child module of the crate root, so
-//! `use super::*` supplies the shared imports, color helpers, and the
-//! library `config`/`settings` modules. The dispatcher glob-imports the
-//! entry point (`cmd_config`) back.
+//! A child module of `main.rs`; `use super::*` supplies its imports and helpers.
 
 use super::*;
 
@@ -157,7 +154,10 @@ pub(super) fn set_config_key(key: &str, value: &str) -> Result<()> {
             let Some(mode) = settings::ContentIndexMode::parse(value) else {
                 anyhow::bail!("content-index-mode must be auto, basic, or freqs");
             };
-            set_default_config_value("content_index_mode", string_literal(mode.as_str()))
+            set_default_config_value(
+                "content_index_mode",
+                big_search_config::string_literal(mode.as_str()),
+            )
         }
         "extract-max-mb" => set_default_config_value("extract_max_mb", parse_integer_value(value)?),
         "text-max-mb" => set_default_config_value("text_max_mb", parse_integer_value(value)?),
@@ -173,7 +173,7 @@ pub(super) fn set_config_key(key: &str, value: &str) -> Result<()> {
         }
         "symlink-policy" => match value {
             "personal-local" | "local-exact" => {
-                set_default_config_value("symlink_policy", string_literal(value))
+                set_default_config_value("symlink_policy", big_search_config::string_literal(value))
             }
             _ => anyhow::bail!("symlink-policy must be personal-local or local-exact"),
         },
@@ -205,11 +205,8 @@ pub(super) fn set_default_config_value(key: &str, literal: String) -> Result<()>
     set_default_config_literals(&[(key, literal)])
 }
 
-/// Apply one of the named profiles.
-///
-/// The profiles themselves are data in `big-search-config`, so the command line
-/// and the desktop's settings window offer the same four and write the same
-/// values.
+/// Apply one of the named profiles, defined in `big-search-config` and shared
+/// with the settings window.
 pub(super) fn apply_config_preset(name: &str) -> Result<()> {
     let Some(preset) = big_search_config::Preset::parse(name) else {
         anyhow::bail!("unknown preset: {name}");
@@ -217,10 +214,6 @@ pub(super) fn apply_config_preset(name: &str) -> Result<()> {
     settings::seed_config_template();
     big_search_config::apply_preset(preset)
         .with_context(|| format!("write {}", config::config_file().display()))
-}
-
-pub(super) fn string_literal(value: &str) -> String {
-    big_search_config::string_literal(value)
 }
 
 /// Write settings into `[defaults]`, keeping the person's comments and layout.

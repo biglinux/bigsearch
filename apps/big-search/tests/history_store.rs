@@ -6,9 +6,8 @@
 //! to be green on every machine this ships from, and the feature's whole answer
 //! there is "this computer keeps no versions".
 //!
-//! It runs in its own process, which is what lets it point `HOME` and
-//! `XDG_DATA_HOME` at a scratch directory: the service resolves both once into
-//! statics, so a unit test sharing the process could not.
+//! Its own process, so it can point `HOME` and `XDG_DATA_HOME` at a scratch
+//! directory: the service resolves both once into statics.
 #![cfg(not(miri))]
 #![allow(
     clippy::disallowed_methods,
@@ -31,20 +30,15 @@ fn scratch_home() -> PathBuf {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("Documentos")).expect("scratch home");
     std::fs::create_dir_all(root.join("data")).expect("scratch data");
-    // Canonical, because the service canonicalises the folders it catalogues and
-    // the paths it hears about from the kernel are canonical too. A build
-    // directory reached through a symlink would not match either.
+    // Canonical, as the service's own paths are.
     std::fs::canonicalize(&root).expect("canonical scratch home")
 }
 
 fn write_by_replacing(path: &Path, contents: &str) {
-    // The kernel stamps a file with a clock that only moves every few
-    // milliseconds, so two writes in a row here would carry the *same*
-    // modification time and the second one would look like no change at all.
-    // A person saving a document cannot hit that window; a test can.
+    // The mtime clock is coarse; back-to-back writes would look unchanged.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    // What every document editor does: write a temporary file, then rename it
-    // over the original. The inode changes; the path does not.
+    // What document editors do: write a temporary file, rename it over the
+    // original. The inode changes; the path does not.
     let temporary = path.with_extension("tmp-save");
     std::fs::write(&temporary, contents).expect("write temporary");
     std::fs::rename(&temporary, path).expect("rename over the original");
@@ -150,9 +144,8 @@ fn rename_carries_the_history(history: &mut History, home: &Path, document: &Pat
     // Renaming carries the history with it, instead of starting again.
     let renamed = home.join("Documentos/contrato assinado.odt");
     std::fs::rename(document, &renamed).expect("rename");
-    // What the watcher does when the kernel hands it both names at once. The
-    // save that follows replaces the inode, so this pair is the only thing that
-    // still connects the document to its own past.
+    // What the watcher does with a rename pair; the next save replaces the
+    // inode, so this is the only link to the document's past.
     history
         .note_rename(document, &renamed)
         .expect("note the rename");
@@ -207,10 +200,8 @@ fn state_before_a_restore_survives(history: &mut History, renamed: &Path) {
 }
 
 fn hidden_rename_and_forget(history: &mut History, home: &Path, renamed: &Path) {
-    // A file manager deletes for good by renaming to a hidden name and then
-    // unlinking. The history must not follow it there: filed under a name
-    // nobody can type, the request to forget it would never find it, and the
-    // content of a document somebody destroyed would sit here for a month.
+    // A file manager deletes by renaming to a hidden name, then unlinking. The
+    // history must not follow, or a later "forget" could never find it.
     let on_its_way_out = home.join("Documentos/.bigfiles-delete-copy-9f2c.odt");
     history
         .note_rename(renamed, &on_its_way_out)
@@ -235,9 +226,8 @@ fn hidden_rename_and_forget(history: &mut History, home: &Path, renamed: &Path) 
 }
 
 fn non_documents_never_kept(history: &mut History, home: &Path) {
-    // And what is not a document never reaches the store at all. In the same
-    // test because the service resolves the home folder once per process: two
-    // tests with two scratch homes would race for that one answer.
+    // Non-documents never reach the store. Same test because the home folder
+    // is resolved once per process.
     for name in ["filme.mkv", "senhas.txt", "cofre.kdbx", "vazio.odt"] {
         let path = home.join("Documentos").join(name);
         std::fs::write(&path, if name == "vazio.odt" { "" } else { "conteúdo" }).expect("write");

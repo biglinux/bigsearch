@@ -1,6 +1,4 @@
 use super::*;
-use crate::index::{fields, open_or_create};
-
 use crate::test_env::{ENV_LOCK, EnvVarGuard};
 
 #[test]
@@ -17,21 +15,24 @@ fn pending_batch_reports_more_work() {
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
     );
-    let batch = pending_batch(vec![first.clone(), second.clone()], &content_state, 1);
+    let batch = pending_batch_with_byte_limit(
+        vec![first.clone(), second.clone()],
+        &content_state,
+        1,
+        u64::MAX,
+    );
     assert_eq!(batch.files, vec![first]);
     assert!(batch.has_more);
 
-    let batch = pending_batch(vec![second.clone()], &content_state, 2);
+    let batch = pending_batch_with_byte_limit(vec![second.clone()], &content_state, 2, u64::MAX);
     assert_eq!(batch.files, vec![second]);
     assert!(!batch.has_more);
 
     std::fs::remove_dir_all(&base).ok();
 }
 
-/// A tag write changes an extended attribute and nothing else, so the file
-/// looks unchanged and the pass skips it. Forgetting the row is the only
-/// thing that gets the work done, and a tag nobody can search for is a tag
-/// that does not work at all.
+/// A tag write changes an extended attribute and nothing else, so only
+/// forgetting the row makes the pass read the file again.
 #[test]
 fn forgotten_row_is_read_again() {
     let base = std::env::temp_dir().join(format!("lsearch-content-forget-{}", std::process::id()));
@@ -47,7 +48,7 @@ fn forgotten_row_is_read_again() {
     );
     content_state.set(&note, mtime, size);
     assert!(
-        pending_batch(vec![note.clone()], &content_state, 10)
+        pending_batch_with_byte_limit(vec![note.clone()], &content_state, 10, u64::MAX)
             .files
             .is_empty(),
         "the file is unchanged, so the pass has nothing to do"
@@ -55,7 +56,7 @@ fn forgotten_row_is_read_again() {
 
     content_state.remove(&note);
     assert_eq!(
-        pending_batch(vec![note.clone()], &content_state, 10).files,
+        pending_batch_with_byte_limit(vec![note.clone()], &content_state, 10, u64::MAX).files,
         vec![note],
         "forgetting the row is what makes the same bytes worth reading again"
     );
@@ -159,8 +160,7 @@ fn catalog_batch_defers_recent_edits() {
     std::fs::remove_dir_all(&base).ok();
 }
 
-/// The 55.9 %-ghost defect: a deleted file kept answering content searches
-/// because nothing removed its content document.
+/// A deleted file must stop answering content searches.
 #[test]
 fn deleted_files_stop_answering_content_searches() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -262,10 +262,7 @@ fn skipped_entries_become_tombstones() {
     // extraction worker skips it silently and never records a content row,
     // so only the tombstone keeps it from staying pending forever.
     let vanished = base.join("apagado.md");
-    // A directory: extensionless, so the metadata sniffer claims it, but it
-    // has nothing to extract and its mtime moves whenever its contents do.
-    // Left as a candidate it sits inside the edit cooldown forever and the
-    // "still being indexed" hint never clears.
+    // Extension-less, so a sniff candidate, but nothing to extract.
     let folder = base.join("uma-pasta");
     std::fs::write(&movie, b"binario").unwrap();
     std::fs::write(&note, b"texto").unwrap();
@@ -336,9 +333,7 @@ fn symlinks_skip_content_extraction() {
     std::fs::write(&target, b"same target").unwrap();
     symlink(&target, &link).unwrap();
 
-    // The contract is about the pipeline, not a helper: a symlink must not
-    // be extracted, so only the real file ends up with a body. Indexing the
-    // link's own text would duplicate the target under a second path.
+    // Through the pipeline: a link must not duplicate its target's body.
     let index = crate::index::open_content_or_create(&base.join("idx")).unwrap();
     index_content_limited(&index, vec![target.clone(), link.clone()], None).unwrap();
     let hits = crate::query::search_content(&index.reader().unwrap(), "target", 10).unwrap();
@@ -565,34 +560,26 @@ fn body_upsert_keeps_one_document() {
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
     let path = base.join("note.txt");
-    std::fs::write(&path, b"old text").unwrap();
 
-    let index = open_or_create(&base.join("idx")).unwrap();
     let content_index = crate::index::open_content_or_create(&base.join("content-idx")).unwrap();
-    let f = fields(&index).unwrap();
-    let mut writer = crate::index::bulk_writer(&index).unwrap();
-    crate::scan::add_name_only(&writer, &f, &path, None).unwrap();
-    writer.commit().unwrap();
-    drop(writer);
-    assert_eq!(crate::query::count(&index.reader().unwrap()).unwrap(), 1);
-
     let content_fields = crate::index::content_fields(&content_index).unwrap();
-    let mut writer = crate::index::content_writer(&content_index).unwrap();
-    upsert_with_body(&writer, &content_fields, &path, "old text").unwrap();
-    writer.commit().unwrap();
-    drop(writer);
-    assert_eq!(crate::query::count(&index.reader().unwrap()).unwrap(), 1);
-
-    let mut writer = crate::index::content_writer(&content_index).unwrap();
-    upsert_with_body(&writer, &content_fields, &path, "new text").unwrap();
-    writer.commit().unwrap();
-    drop(writer);
-    assert_eq!(crate::query::count(&index.reader().unwrap()).unwrap(), 1);
+    for body in ["old text", "new text"] {
+        let mut writer = crate::index::content_writer(&content_index).unwrap();
+        upsert_with_body(&writer, &content_fields, &path, body).unwrap();
+        writer.commit().unwrap();
+    }
+    let reader = content_index.reader().unwrap();
+    assert_eq!(crate::query::count(&reader).unwrap(), 1);
     assert_eq!(
-        crate::query::search_content(&content_index.reader().unwrap(), "new", 10)
+        crate::query::search_content(&reader, "new", 10)
             .unwrap()
             .len(),
         1
+    );
+    assert!(
+        crate::query::search_content(&reader, "old", 10)
+            .unwrap()
+            .is_empty()
     );
 
     std::fs::remove_dir_all(&base).ok();

@@ -1,5 +1,5 @@
 //! Name search: ngram recall via Tantivy, then exact substring post-filter.
-use super::{Filter, Hit, count_capped};
+use super::{EntryKind, Filter, Hit, count_capped, file_name};
 use crate::index::fields;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -12,10 +12,8 @@ use tantivy::{IndexReader, TantivyDocument, Term};
 /// Substring filename search. Returns up to `limit` paths whose file name contains
 /// `q` (case-insensitive). Queries shorter than 2 chars yield nothing (ngram floor).
 pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
-    // One searcher, taken once: building an `IndexReader` per query re-opens and
-    // mmaps every segment and rebuilds the term dictionaries. Tantivy's own docs
-    // say a project should create at most one reader per index; the daemon now
-    // holds them for its whole life and this only takes a snapshot.
+    // A snapshot of the long-lived reader: a reader per query would re-open and
+    // mmap every segment.
     let searcher = reader.searcher();
     let index = searcher.index();
     let f = fields(index)?;
@@ -43,10 +41,7 @@ pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> R
         if seen_paths.contains(path) {
             continue;
         }
-        let name = Path::new(path)
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = file_name(path);
         // The grams only say the letters are there; this says how.
         let Some(quality) = name_match(&name, &words) else {
             continue;
@@ -249,10 +244,11 @@ pub(super) fn name_match(name: &str, words: &[String]) -> Option<NameMatch> {
     })
 }
 
-/// The index clauses for `filter.under`, `filter.ext` and `filter.mime`, none
-/// for a filter without them: the folder is one term of the `dir` field, the
-/// extensions and types terms of their own fields. `run_query` still checks
-/// them afterwards, for the content modes that do not narrow by them.
+/// The index clauses for `filter.under`, `filter.ext`, `filter.mime` and
+/// `filter.kind`, none for a filter without them: the folder is one term of
+/// the `dir` field, the extensions and types terms of their own fields, and a
+/// folder is its type. `run_query` still checks them afterwards, for the
+/// content modes that do not narrow by them.
 pub(super) fn filter_clauses(
     f: &crate::index::Fields,
     filter: &Filter,
@@ -303,6 +299,19 @@ pub(super) fn filter_clauses(
             })
             .collect();
         clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_mime))));
+    }
+    if let Some(kind) = filter.kind {
+        let occur = match kind {
+            EntryKind::Folder => Occur::Must,
+            EntryKind::File => Occur::MustNot,
+        };
+        clauses.push((
+            occur,
+            Box::new(TermQuery::new(
+                Term::from_field_text(f.mime, crate::mime::DIRECTORY),
+                IndexRecordOption::Basic,
+            )),
+        ));
     }
     clauses
 }

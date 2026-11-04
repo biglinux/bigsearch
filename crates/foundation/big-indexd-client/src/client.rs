@@ -3,8 +3,8 @@
 use crate::{
     ClientError, Filter, IndexedRoot, OriginProvenance, OriginRequest, PROTOCOL_VERSION, Page,
     PathRequest, QueryOutcome, QueryRequest, RegisterCopyRequest, RegisterCreatedRequest,
-    RegisterDerivedRequest, RegisterMoveRequest, ReindexRequest, Reply, Request, RequestBody,
-    Status, Unavailable, VersionsAnswer,
+    RegisterDerivedRequest, RegisterMoveRequest, Reply, Request, RequestBody, Status, Unavailable,
+    VersionsAnswer,
 };
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -108,17 +108,6 @@ impl Client {
         default_socket().map(Client::new)
     }
 
-    /// Whether a daemon appears to be listening (a cheap connect probe).
-    pub fn is_available(&self) -> bool {
-        UnixStream::connect(&self.sock).is_ok()
-    }
-
-    /// Open a reusable session. Existing one-shot methods remain available for
-    /// compatibility; use this when issuing several requests in a row.
-    pub fn session(&self) -> PersistentClient {
-        PersistentClient::new(self.sock.clone())
-    }
-
     fn roundtrip(&self, body: RequestBody) -> Result<Reply, ClientError> {
         let stream = UnixStream::connect(&self.sock)?;
         apply_deadlines(&stream)?;
@@ -148,18 +137,7 @@ impl Client {
         filter: Filter,
         page: Page,
     ) -> Result<QueryOutcome, ClientError> {
-        match self.roundtrip(RequestBody::Query(QueryRequest {
-            q: q.to_string(),
-            mode: mode.to_string(),
-            filter,
-            page,
-            include_origin: false,
-        }))? {
-            Reply::Query { outcome, .. } => Ok(outcome),
-            other => Err(ClientError::Protocol(format!(
-                "expected query reply, got {other:?}"
-            ))),
-        }
+        self.run_query(q, mode, filter, page, false)
     }
 
     /// Run a query and request origin summaries for the visible page.
@@ -170,12 +148,23 @@ impl Client {
         filter: Filter,
         page: Page,
     ) -> Result<QueryOutcome, ClientError> {
+        self.run_query(q, mode, filter, page, true)
+    }
+
+    fn run_query(
+        &self,
+        q: &str,
+        mode: &str,
+        filter: Filter,
+        page: Page,
+        include_origin: bool,
+    ) -> Result<QueryOutcome, ClientError> {
         match self.roundtrip(RequestBody::Query(QueryRequest {
             q: q.to_string(),
             mode: mode.to_string(),
             filter,
             page,
-            include_origin: true,
+            include_origin,
         }))? {
             Reply::Query { outcome, .. } => Ok(outcome),
             other => Err(ClientError::Protocol(format!(
@@ -238,13 +227,11 @@ impl Client {
         src: &str,
         dst: &str,
         app_id: Option<&str>,
-        action: Option<&str>,
     ) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::RegisterDerived(RegisterDerivedRequest {
             src: src.to_string(),
             dst: dst.to_string(),
             app_id: app_id.map(str::to_string),
-            action: action.map(str::to_string),
         }))
     }
 
@@ -378,17 +365,6 @@ impl Client {
         self.expect_ok(RequestBody::Resume)
     }
 
-    /// Ask the daemon to read `path` again.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError`] when the daemon is absent or refuses.
-    pub fn reindex(&self, path: &std::path::Path) -> Result<(), ClientError> {
-        self.expect_ok(RequestBody::Reindex(ReindexRequest {
-            path: path.to_string_lossy().into_owned(),
-        }))
-    }
-
     /// Request a full rebuild of the index from source files.
     ///
     /// # Errors
@@ -467,67 +443,10 @@ impl PersistentClient {
         unreachable!("persistent retry loop always returns");
     }
 
-    /// Run a query; the daemon filters, pages, and attaches metadata server-side.
-    pub fn query(
-        &mut self,
-        q: &str,
-        mode: &str,
-        filter: Filter,
-        page: Page,
-    ) -> Result<QueryOutcome, ClientError> {
-        match self.roundtrip(RequestBody::Query(QueryRequest {
-            q: q.to_string(),
-            mode: mode.to_string(),
-            filter,
-            page,
-            include_origin: false,
-        }))? {
-            Reply::Query { outcome, .. } => Ok(outcome),
-            other => Err(ClientError::Protocol(format!(
-                "expected query reply, got {other:?}"
-            ))),
-        }
-    }
-
-    /// Run a query and request origin summaries for the visible page.
-    pub fn query_with_origin(
-        &mut self,
-        q: &str,
-        mode: &str,
-        filter: Filter,
-        page: Page,
-    ) -> Result<QueryOutcome, ClientError> {
-        match self.roundtrip(RequestBody::Query(QueryRequest {
-            q: q.to_string(),
-            mode: mode.to_string(),
-            filter,
-            page,
-            include_origin: true,
-        }))? {
-            Reply::Query { outcome, .. } => Ok(outcome),
-            other => Err(ClientError::Protocol(format!(
-                "expected query reply, got {other:?}"
-            ))),
-        }
-    }
-
-    /// Fetch full origin/provenance details for one path.
-    pub fn origin(&mut self, path: &str) -> Result<Option<OriginProvenance>, ClientError> {
-        match self.roundtrip(RequestBody::Origin(OriginRequest {
-            path: path.to_string(),
-        }))? {
-            Reply::Origin { origin, .. } => Ok(origin),
-            other => Err(ClientError::Protocol(format!(
-                "expected origin reply, got {other:?}"
-            ))),
-        }
-    }
-
     /// Forget the versions kept for one document.
     ///
-    /// Here as well as on [`Client`] because forgetting comes in runs: emptying
-    /// the Trash asks about every item in it, and a fresh connection per item is
-    /// a connection, a thread in the daemon and a teardown for each.
+    /// Also here because forgetting comes in runs (emptying the Trash), where a
+    /// connection per item costs a daemon thread each.
     ///
     /// # Errors
     ///
@@ -539,41 +458,6 @@ impl PersistentClient {
             Reply::Ok { .. } => Ok(()),
             other => Err(ClientError::Protocol(format!(
                 "expected ok reply, got {other:?}"
-            ))),
-        }
-    }
-
-    /// Cataloged count + paused flag.
-    pub fn status(&mut self) -> Result<Status, ClientError> {
-        match self.roundtrip(RequestBody::Status)? {
-            Reply::Status {
-                indexed,
-                paused,
-                activity,
-                capabilities,
-                pending_content,
-                content_docs,
-                name_index_bytes,
-                content_index_bytes,
-                unwatched_dirs,
-                ..
-            } => Ok(Status {
-                indexed,
-                paused,
-                activity: if activity.is_empty() {
-                    if paused { "paused" } else { "indexing" }.to_string()
-                } else {
-                    activity
-                },
-                capabilities,
-                pending_content,
-                content_docs,
-                name_index_bytes,
-                content_index_bytes,
-                unwatched_dirs,
-            }),
-            other => Err(ClientError::Protocol(format!(
-                "expected status reply, got {other:?}"
             ))),
         }
     }
@@ -619,22 +503,19 @@ mod tests {
         let server_thread = thread::spawn(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
             let mut reader = BufReader::new(stream.try_clone()?);
-            for indexed in [1, 2] {
+            for _ in 0..2 {
                 let mut request_line = String::new();
                 reader.read_line(&mut request_line)?;
-                assert!(request_line.contains("\"cmd\":\"status\""));
-                writeln!(
-                    stream,
-                    "{{\"kind\":\"status\",\"v\":2,\"indexed\":{indexed},\"paused\":false,\"activity\":\"idle\"}}"
-                )?;
+                assert!(request_line.contains("\"cmd\":\"forget_versions\""));
+                writeln!(stream, "{{\"kind\":\"ok\",\"v\":2}}")?;
                 stream.flush()?;
             }
             Ok(())
         });
 
-        let mut client = Client::new(socket_path.clone()).session();
-        assert_eq!(client.status().unwrap().indexed, 1);
-        assert_eq!(client.status().unwrap().indexed, 2);
+        let mut client = PersistentClient::new(socket_path.clone());
+        client.forget_versions("/a").unwrap();
+        client.forget_versions("/b").unwrap();
 
         server_thread.join().unwrap().unwrap();
         std::fs::remove_file(socket_path).ok();

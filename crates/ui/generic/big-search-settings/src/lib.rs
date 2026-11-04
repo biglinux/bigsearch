@@ -14,14 +14,6 @@
 //! big_search_settings::present(None, "bigfiles");
 //! ```
 //!
-//! ## Why a library and not a program of its own
-//!
-//! A separate application would need its own package, icon, desktop entry and
-//! translation catalogue, and every program wanting to offer the setting would
-//! have to launch it and hope it is installed. As a library, the file manager
-//! and the shell open the same window in their own process, and the next
-//! program to want it adds one line.
-//!
 //! ## What it changes, and when
 //!
 //! Every control writes `~/.config/big-search/config.toml` through
@@ -67,9 +59,8 @@ pub struct SearchEntry {
 
 /// What a settings window should offer when somebody searches its own settings.
 ///
-/// Takes the text domain like [`page`] does, and for the same reason: the list
-/// is built before the page exists, so nothing has told this crate which
-/// catalogue to read yet.
+/// Takes the text domain like [`page`] does: the list may be built before the
+/// page exists.
 #[must_use]
 pub fn search_entries(text_domain: &str) -> Vec<SearchEntry> {
     set_text_domain(text_domain);
@@ -101,12 +92,8 @@ pub fn search_entries(text_domain: &str) -> Vec<SearchEntry> {
     ]
 }
 
-/// Names the embedding window can point its own search results at.
-///
-/// A settings window that answers "no matching setting" while the section is
-/// sitting in its sidebar is worse than one with no search: the person
-/// concludes the setting does not exist. The host declares what it wants found
-/// and each name here is on the group it should scroll to.
+/// Widget name of the folders group, for the embedding window's settings
+/// search to scroll to.
 pub const ANCHOR_FOLDERS: &str = "big-search-folders";
 /// The group about how much work the computer does.
 pub const ANCHOR_EFFORT: &str = "big-search-effort";
@@ -196,9 +183,8 @@ pub(crate) struct SearchSettings {
     restart_timer: RefCell<Option<glib::SourceId>>,
     /// The status card, which is also where "applying…" is said.
     status: status::StatusCard,
-    /// The folder list, held here for as long as the window lives. Its rows are
-    /// rebuilt from the file after every change, and the widgets alone would not
-    /// keep the thing that rebuilds them alive.
+    /// Keeps the folder list alive with the window: its rows are rebuilt after
+    /// every change, and the widgets do not own the rebuilder.
     folders: RefCell<Option<Rc<folders::Folders>>>,
     /// The work presets and their advanced rows, held for the same reason.
     effort: RefCell<Option<Rc<effort::Effort>>>,
@@ -377,9 +363,8 @@ fn write_config(pending: Vec<(String, String)>) -> (bool, Result<(), Vec<(String
 
 /// Ask systemd to restart the search service, if it is running at all.
 ///
-/// `try-restart` rather than `restart`: somebody who has the service switched
-/// off asked for a setting to be saved, not for the service to be started behind
-/// their back. Starting it is its own button on the status card.
+/// `try-restart`: a stopped service is not started behind the person's back;
+/// starting it is its own button on the status card.
 fn restart_service() {
     if let Err(error) = systemctl(&["try-restart", "big-search.service"]) {
         log::warn!("the search service could not be restarted: {error}");
@@ -398,13 +383,8 @@ pub(crate) fn systemctl(args: &[&str]) -> Result<(), glib::Error> {
 }
 
 /// The same controls as [`present`], as a page to put inside another program's
-/// settings window.
-///
-/// A window of its own is right when the person is in the middle of searching
-/// and asks "why is this folder slow?"; it is the wrong answer for the person
-/// who opened Preferences looking for the search. Both exist, and both write the
-/// same file. Everything pending is written when the page leaves the screen, so
-/// closing the settings window that holds it loses nothing.
+/// settings window. Everything pending is written when the page leaves the
+/// screen, so closing that window loses nothing.
 pub fn page(text_domain: &str) -> gtk::Widget {
     set_text_domain(text_domain);
     // A plain box, not an `AdwPreferencesPage`: that widget brings its own
@@ -493,9 +473,7 @@ fn build(parent: Option<&gtk::Window>) -> adw::Window {
         window.set_transient_for(Some(parent));
     }
 
-    // Everything pending is written and applied when the window closes: a person
-    // who changes a setting and shuts the window immediately must not lose it,
-    // and the service is restarted once rather than after every switch.
+    // A change made just before closing must not be lost.
     {
         let settings = Rc::clone(&settings);
         window.connect_close_request(move |_| {

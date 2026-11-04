@@ -68,11 +68,8 @@ impl History {
             // version from the watcher, which calls that a save, and that covers
             // most files.
             let first_ever = index == oldest_index;
-            // And neither is the state a document was in just before somebody
-            // asked to go back to an older one. The dialog that asks promises
-            // "o jeito que ele está agora também fica guardado, para você poder
-            // desfazer", and hourly thinning would quietly break that promise:
-            // going back and undoing it happen minutes apart, inside one slot.
+            // Nor the state just before a restore: the restore dialog promises it
+            // stays as the undo, and hourly thinning would drop it.
             let is_the_undo = Reason::parse(&reason) == Reason::BeforeRestore;
             let bucket = time_bucket(now, saved_at);
             let too_old = saved_at < oldest_allowed;
@@ -170,11 +167,8 @@ impl History {
         Ok(total.max(0) as u64)
     }
 
-    /// The oldest superseded versions, enough of them to cover `bytes`.
-    ///
-    /// One query and one walk instead of "take the oldest, measure everything
-    /// again, repeat": the second shape ran a full sum of the table per version
-    /// evicted.
+    /// The oldest superseded versions, enough of them to cover `bytes`, in one
+    /// query rather than a full-table sum per version evicted.
     pub(super) fn oldest_versions_totalling(&self, bytes: u64) -> Result<Vec<(i64, String)>> {
         let Some(conn) = &self.conn else {
             return Ok(Vec::new());
@@ -223,9 +217,7 @@ impl History {
         if self.conn.is_none() {
             return Ok(());
         }
-        // A set, not a list: the walk below asks "is this object known" once per
-        // file on disk, and a linear scan of ten thousand names per file is the
-        // difference between a tidy-up and a stall at every start.
+        // A set: the walk below asks "is this object known" once per file.
         let known: std::collections::HashSet<String> =
             self.all_object_names()?.into_iter().collect();
         let missing_rows: Vec<&String> = known
@@ -283,11 +275,8 @@ fn time_bucket(now: i64, saved_at: i64) -> i64 {
 mod tests {
     use super::*;
 
-    /// Ten saves in five minutes must not push out yesterday's version.
-    ///
-    /// The bucket is what does it: everything inside the last hour shares one
-    /// slot, so only the newest of the burst is kept, and yesterday sits in a
-    /// slot of its own.
+    /// Ten saves in five minutes share one slot, so they cannot push out
+    /// yesterday's version, which sits in a slot of its own.
     #[test]
     fn save_burst_keeps_yesterday() {
         let now = 1_800_000_000;
