@@ -116,8 +116,9 @@ pub fn seed_user_ignore() {
 }
 
 /// Write the effective ignore file: built-in defaults followed by the user's
-/// overrides (so user lines win). Call once before walking.
-pub fn write_effective_ignore() -> Result<()> {
+/// overrides (so user lines win), and return what it wrote. Call once before
+/// walking.
+pub fn write_effective_ignore() -> Result<String> {
     let path = crate::config::effective_ignore();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -127,8 +128,8 @@ pub fn write_effective_ignore() -> Result<()> {
         content.push_str("\n# --- user overrides ---\n");
         content.push_str(&user);
     }
-    std::fs::write(&path, content).context("write effective ignore")?;
-    Ok(())
+    std::fs::write(&path, &content).context("write effective ignore")?;
+    Ok(content)
 }
 
 /// The walker's scope rules, compiled once to answer for a single path.
@@ -171,7 +172,7 @@ impl Scope {
     /// ancestors too, so a file event inside an excluded tree is refused even
     /// when the event names only the file.
     pub fn excluded(&self, path: &Path, is_dir: bool) -> bool {
-        is_hidden(path)
+        is_hidden(below_source(path))
             || self
                 .ignore
                 .matched_path_or_any_parents(path, is_dir)
@@ -179,8 +180,9 @@ impl Scope {
     }
 }
 
-/// Whether a `.gitignore` of the repository holding `path` excludes it, as the
-/// walker would have decided had it come to `path` from the repository's root.
+/// Whether a `.gitignore` of the repository holding `path`, or the global git
+/// ignore file, excludes it, as the walker would have decided had it come to
+/// `path` from the repository's root.
 ///
 /// The walker never tests the root it is given, so a directory its repository
 /// ignores, created again after the scan (`cargo fuzz` recreating
@@ -196,8 +198,14 @@ pub fn repo_ignored(path: &Path, is_dir: bool) -> bool {
             rules.push(ignore::gitignore::Gitignore::new(&file).0);
         }
         // Outside a repository its ignore files do not apply (the walker's
-        // `require_git`).
+        // `require_git`). The global git ignore file, lowest in precedence,
+        // applies relative to the repository.
         if dir.join(".git").exists() {
+            rules.push(
+                ignore::gitignore::GitignoreBuilder::new(dir)
+                    .build_global()
+                    .0,
+            );
             return rules
                 .iter()
                 .map(|rules| rules.matched_path_or_any_parents(path, is_dir))
@@ -206,6 +214,15 @@ pub fn repo_ignored(path: &Path, is_dir: bool) -> bool {
         }
     }
     false
+}
+
+/// `path` below the source that holds it. The walker tests only what lies
+/// below its root, and a source may itself sit in a dot-folder.
+fn below_source(path: &Path) -> &Path {
+    crate::settings::sources()
+        .owner(path)
+        .and_then(|source| path.strip_prefix(&source.path).ok())
+        .unwrap_or(path)
 }
 
 /// A dotfile or any path under a dot-directory: the churny majority the design

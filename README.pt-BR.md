@@ -26,8 +26,9 @@ SQLite.
   escritas do Sudeste Asiático são indexados em bigramas sobrepostos, então
   podem ser buscados sem dicionário.
 - **Índice ao vivo:** inotify em cada pasta visível; um arquivo salvo aparece na
-  busca em segundos. Depois de reiniciar, só o que mudou com o serviço parado é
-  lido de novo.
+  busca em segundos. Ao reiniciar, encontra arquivos criados, renomeados ou
+  apagados com o serviço parado sem reler todos; `big-search rescan` também
+  relê os arquivos editados no lugar.
 - **Versões anteriores:** em sistemas de arquivos com reflink (Btrfs, XFS), uma
   cópia do documento é guardada antes de cada gravação, dentro de um limite de
   espaço.
@@ -71,6 +72,7 @@ big-search contrato --ext pdf --under ~/Documentos
 
 big-search status                       # o que o daemon está fazendo
 big-search pause | resume | rebuild
+big-search rescan                       # mudanças feitas com o serviço parado
 big-search versions ~/notas/tarefas.md  # versões anteriores guardadas
 big-search origin ~/Downloads/arquivo.zip  # de onde o arquivo veio
 ```

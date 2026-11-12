@@ -358,8 +358,20 @@ fn dispatch(
         RequestBody::Status => status_reply(index, content_index, control),
         // Hand the command to the watcher thread over the shared channel; it applies
         // it between batches. Accepted asynchronously (the work may be long).
-        RequestBody::Pause => send_control_command(control, WatchControlCommand::Pause),
-        RequestBody::Resume => send_control_command(control, WatchControlCommand::Resume),
+        // The flag flips here, the moment the command is accepted, so a
+        // request right after it sees the new state; the watcher only reads it.
+        RequestBody::Pause => {
+            control.paused.store(true, Ordering::Relaxed);
+            send_control_command(control, WatchControlCommand::Pause)
+        }
+        RequestBody::Resume => {
+            control.paused.store(false, Ordering::Relaxed);
+            send_control_command(control, WatchControlCommand::Resume)
+        }
+        RequestBody::Rescan if control.paused.load(Ordering::Relaxed) => {
+            err("indexing is paused; `big-search resume` resumes it and rescans")
+        }
+        RequestBody::Rescan => send_control_command(control, WatchControlCommand::Rescan),
         RequestBody::Rebuild => send_control_command(control, WatchControlCommand::Rebuild),
         RequestBody::Reindex(request) => reindex_reply(control, request),
         // Done here so the reply says whether the rows are gone.
@@ -607,6 +619,8 @@ fn daemon_capabilities() -> Vec<String> {
     capabilities.push("mime-filter".to_string());
     // `filter.kind` keeps folders or files.
     capabilities.push("kind-filter".to_string());
+    // The `rescan` command.
+    capabilities.push("rescan".to_string());
     capabilities
 }
 

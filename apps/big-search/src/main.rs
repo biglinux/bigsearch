@@ -144,7 +144,7 @@ fn colored_usage() -> String {
     format!(
         "{title} — busca local rápida por nomes e conteúdo\n\n\
 {usage}:\n  big-search [--color auto|always|never] <consulta>\n  big-search content <consulta>        busca no conteúdo indexado\n  big-search both <consulta>           une nome + conteúdo, sem duplicar\n  big-search config show               mostra perfil efetivo\n  big-search config preset low-memory  aplica perfil para máquina fraca\n  big-search reindex [RAIZ...]         reconstrói o índice\n\n\
-{commands}:\n  count        conta entradas catalogadas; aceita --under DIR\n  list         lista caminhos; aceita --under DIR e -n N\n  daemon       servidor local + watcher incremental\n  status       estado do daemon\n  pause/resume pausa ou retoma indexação de fundo\n  rebuild      pede rebuild ao daemon\n  origin       mostra proveniência registrada de um caminho\n  versions     lista as versões anteriores guardadas de um arquivo\n  forget-versions esquece as versões guardadas de um arquivo\n\n\
+{commands}:\n  count        conta entradas catalogadas; aceita --under DIR\n  list         lista caminhos; aceita --under DIR e -n N\n  daemon       servidor local + watcher incremental\n  status       estado do daemon\n  pause/resume pausa ou retoma indexação de fundo\n  rescan       procura mudanças feitas com o serviço parado\n  rebuild      pede rebuild ao daemon\n  origin       mostra proveniência registrada de um caminho\n  versions     lista as versões anteriores guardadas de um arquivo\n  forget-versions esquece as versões guardadas de um arquivo\n\n\
 {search}:\n  -n, --limit N      limita resultados\n  -a, --all          até 100000 resultados\n  --under DIR        restringe a uma árvore\n  -e, --ext EXT      restringe extensão; pode repetir\n  -p, --pages        tenta mostrar páginas/slides dos hits visíveis\n  --origin           inclui resumo de origem/proveniência\n  --                 encerra flags; o resto vira consulta literal\n\n\
 {config}:\n  config show\n  config path\n  config set names-only true|false\n  config set content-index-mode auto|basic|freqs\n  config set extract-max-mb 0|4|8|16|32\n  config preset names-only|low-memory|balanced|complete\n\n\
 {color}:\n  --color auto|always|never, --no-color. Também respeita NO_COLOR, CLICOLOR_FORCE e CLICOLOR.\n\n\
@@ -227,6 +227,7 @@ fn main() -> Result<()> {
         Some("capabilities") => cmd_capabilities(),
         Some("pause") => cmd_lifecycle("pause"),
         Some("resume") => cmd_lifecycle("resume"),
+        Some("rescan") => cmd_lifecycle("rescan"),
         Some("rebuild") => cmd_lifecycle("rebuild"),
         Some("content") => cmd_search(&args[1..], "content"),
         Some("both") => cmd_search(&args[1..], "both"),
@@ -600,7 +601,7 @@ fn print_origin(path: &str, origin: Option<&big_indexd_client::OriginProvenance>
     }
 }
 
-/// Send a lifecycle command (`pause`/`resume`/`rebuild`) to the running daemon.
+/// Send a lifecycle command (`pause`/`resume`/`rescan`/`rebuild`) to the running daemon.
 /// These need a live daemon: without one there is nothing to control. The daemon
 /// accepts them asynchronously (it replies at once; the work runs in the watcher).
 fn cmd_lifecycle(action: &str) -> Result<()> {
@@ -608,6 +609,7 @@ fn cmd_lifecycle(action: &str) -> Result<()> {
     let result = match action {
         "pause" => client.pause(),
         "resume" => client.resume(),
+        "rescan" => client.rescan(),
         "rebuild" => client.rebuild(),
         _ => unreachable!("unknown lifecycle action {action}"),
     };

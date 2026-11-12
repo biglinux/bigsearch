@@ -24,7 +24,11 @@ pub fn mount_for(path: &Path) -> Option<Mount> {
 /// The deepest mount point above `path`. Among equal points the last wins:
 /// that is the mount stacked on top, the one a lookup actually reaches.
 fn innermost(table: &str, path: &Path) -> Option<Mount> {
-    let mut best: Option<(usize, Mount)> = None;
+    innermost_entry(table, path).map(|(_, mount)| mount)
+}
+
+fn innermost_entry(table: &str, path: &Path) -> Option<(PathBuf, Mount)> {
+    let mut best: Option<(PathBuf, Mount)> = None;
     for line in table.lines() {
         let Some((point, mount)) = parse_line(line) else {
             continue;
@@ -33,11 +37,48 @@ fn innermost(table: &str, path: &Path) -> Option<Mount> {
             continue;
         }
         let depth = point.components().count();
-        if best.as_ref().is_none_or(|(deepest, _)| depth >= *deepest) {
-            best = Some((depth, mount));
+        if best
+            .as_ref()
+            .is_none_or(|(deepest, _)| depth >= deepest.components().count())
+        {
+            best = Some((point, mount));
         }
     }
-    best.map(|(_, mount)| mount)
+    best
+}
+
+/// Whether the tree at `root` may change where this machine does not see it,
+/// so its folder times prove nothing: it lives on, or holds, a disk that comes
+/// and goes or another machine's folder. `true` when the mount table cannot be
+/// read.
+pub fn detachable(root: &Path) -> bool {
+    let (Ok(root), Ok(table)) = (
+        std::fs::canonicalize(root),
+        std::fs::read_to_string("/proc/self/mountinfo"),
+    ) else {
+        return true;
+    };
+    detachable_in(&table, &root)
+}
+
+fn detachable_in(table: &str, root: &Path) -> bool {
+    innermost_entry(table, root).is_some_and(|(point, mount)| detachable_mount(&point, &mount))
+        || table
+            .lines()
+            .filter_map(parse_line)
+            .any(|(point, mount)| point.starts_with(root) && detachable_mount(&point, &mount))
+}
+
+/// FAT and exFAT, written by other systems, keep no folder times worth
+/// trusting nor stable inode numbers; the other paths are where the system
+/// mounts disks that come and go.
+fn detachable_mount(point: &Path, mount: &Mount) -> bool {
+    matches!(mount.fstype.as_str(), "vfat" | "exfat" | "msdos")
+        || crate::scan_roots::classify_fstype(&mount.fstype)
+            == crate::scan_roots::MountKind::Network
+        || ["/run/media", "/media", "/mnt/usb"]
+            .iter()
+            .any(|removable| point.starts_with(removable))
 }
 
 /// `id parent major:minor root mount-point options [optional…] - fstype source super-options`
@@ -144,6 +185,21 @@ mod tests {
         // Component-wise: `/proclaim` is not under `/proc`.
         assert_eq!(at("/proclaim").as_deref(), Some("btrfs"));
         assert_eq!(at("/home/p/stacked/x").as_deref(), Some("tmpfs"));
+    }
+
+    #[test]
+    fn detachable_mounts_are_found() {
+        let table = format!(
+            "{TABLE}50 30 0:50 / /home/p/stick rw - vfat /dev/sdc1 rw\n\
+             51 22 0:51 / /run/media/p/BACKUP rw - ext4 /dev/sdd1 rw\n"
+        );
+        let at = |root: &str| detachable_in(&table, Path::new(root));
+        assert!(!at("/home/p/Documents"));
+        assert!(at("/home/p"), "holds a network share and a FAT disk");
+        assert!(at("/home/p/My Share"));
+        assert!(at("/home/p/stick/photos"));
+        assert!(at("/run/media/p/BACKUP"));
+        assert!(!at("/etc"));
     }
 
     #[test]

@@ -53,8 +53,10 @@ runtime.
 ```text
  daemon (user service, unprivileged)
  +------------------------------------------------------------------------+
- | start    scan (ignore walker) ----> name index      state.sqlite       |
- |            reconciles against the state store                          |
+ | start    watch the folders the last run saved; the first start,        |
+ |            changed sources or ignore rules, or `rescan` walk (ignore   |
+ |            walker) and reconcile with the state store                  |
+ |            ----> name index   state.sqlite                             |
  |                                                                        |
  | running  watcher: one inotify watch per visible folder                 |
  |            250 ms coalescing, then upsert or delete                    |
@@ -118,8 +120,12 @@ never the bottleneck, and cost 104 MB of RSS.
 
 Both indexes and the state store are a cache derived from the filesystem, so
 the daemon never calls `fsync` on the indexes (`nosync_dir.rs`). The worst a
-forced reboot costs is re-indexing the files whose commits did not reach the
-disk, which the startup reconcile does anyway. A torn index fails to open and
+forced reboot costs is documents whose commits did not reach the disk. Each
+start compares the name index with the catalogue and re-adds the name
+documents the catalogue still lists (`index::repair_deflated_against_state`);
+a stale or missing document whose catalogue row is current, a content document
+included, needs `big-search rebuild`, since a rescan compares the disk with
+the catalogue only. A torn index fails to open and
 `index::open_or_create` recreates it. Measured over ten minutes of near-idle
 churn, tantivy's syncs were 145 calls to write a few kilobytes, and 4.07 GB of
 logical writes landed as 17.9 GB at the block layer. The directory also watches
@@ -467,12 +473,45 @@ such as a stalled network mount.
 
 ## 8. State
 
-`catalogue.rs` keeps `namespace, path -> (mtime, size)` in SQLite, a `WITHOUT ROWID`
-table keyed by `(namespace, path)`, with separate `name` and `content`
-namespaces. It drives incremental dedup, delete detection and the reconcile on
-start. Writes are batched in transactions; SQLite runs WAL with `NORMAL` sync.
-Like the indexes, the state is derived from the filesystem, so a crash costs a
-reconcile on the next start.
+`catalogue.rs` keeps `namespace, path -> (mtime, size)` in SQLite, a
+`WITHOUT ROWID` table keyed by `(namespace, path)`, with separate `name` and
+`content` namespaces and a `watch` namespace listing the folders watched. It
+drives incremental dedup, delete detection and the reconcile. Writes are
+batched in transactions; SQLite runs WAL with `NORMAL` sync. Like the indexes,
+the state is derived from the filesystem: rows a crash loses come back with a
+reconcile, which `big-search rescan` runs.
+
+A start walks the sources only when no record vouches for the saved folder list.
+The record (`watch_fingerprint` and `watch_started` in the `meta` table) holds a
+fingerprint of the available sources, the effective ignore rules and the global
+git ignore file, and when that run started. The first start, a changed source
+set or ignore file, a stop while paused, a watch the run could not place, a
+watcher that stopped on an error, a walk or rebuild cut short and `big-search
+reindex` leave no matching record, so the next start walks. It also walks when
+the clock reads earlier than the last run's start (a clock set back during a run
+moves the record's start back with it at the next save), and while a source that
+may change where this machine does not see it is available
+(`settings::is_detachable`): one marked removable or network, or one on or
+holding a FAT, exFAT or network mount or a mount under `/run/media`, `/media` or
+`/mnt/usb`. Folder times there need not move, and FAT inode numbers change
+between mounts. Otherwise it watches the saved folders, each only as a directory
+under a kept folder or as a root, so a symlink put in place of a folder is never
+followed. A saved folder that is no longer the one watched (another folder
+renamed into its place, by its inode, or a file, a symlink or nothing) leaves
+with its tree, and what took its place is indexed. The start then compares again
+the direct entries of every folder modified or changed (`ctime`, which `cp -a`,
+`rsync -a` and `tar` cannot set back) since the last run started: folders and
+files created, renamed or deleted while the daemon was stopped are found that
+way. A catalogued, watched folder among those entries only gets its row
+refreshed, since it has a pass of its own; any other folder is walked whole. A
+folder this user cannot read stays listed without a watch; once made readable,
+by `chmod` or `chown`, its change time puts it in the catch-up, or its
+attribute event reaches the running watcher, and it is watched and walked. A
+file rewritten in place changes no folder, an edited `.gitignore` or `.ignore`
+inside a source changes no fingerprint, and joining a group changes no folder:
+all three wait for the next walk, `big-search rescan`. The saved list
+spares a restart the read of every entry's metadata, the cost that dominates on
+a hard disk.
 
 The settings are conservative for old machines: `cache_size=-2048` (2 MiB),
 file-backed temporary storage (`SQLITE_TMPDIR` points at the data folder), and

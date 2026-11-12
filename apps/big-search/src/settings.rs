@@ -173,6 +173,12 @@ pub fn is_available(source: &Source) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `source` may change where this machine does not see it: marked
+/// removable or network, or on such a mount, or holding one.
+pub fn is_detachable(source: &Source) -> bool {
+    source.retained_when_unavailable() || crate::mounts::detachable(&source.path)
+}
+
 /// Process-wide resolved sources (loaded once: config + device probe).
 pub fn sources() -> &'static Sources {
     static SOURCES: OnceLock<Sources> = OnceLock::new();
