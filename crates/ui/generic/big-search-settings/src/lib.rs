@@ -19,10 +19,10 @@
 //! Every control writes `~/.config/big-search/config.toml` through
 //! [`big_search_config`] two seconds after the last change. The service reads
 //! that file once when it starts, so a change only takes effect on a restart,
-//! and a restart re-reads every catalogued folder and drops the socket for a
-//! moment. That is why this window restarts it once, when it is closed or
-//! after ten seconds of quiet, and only when a setting the service reads
-//! actually changed.
+//! and a restart drops the socket for a moment and walks every source when the
+//! folders or the ignore rules changed. That is why this window restarts it
+//! once, when it is closed or after ten seconds of quiet, and only when a
+//! setting the service reads actually changed.
 
 mod effort;
 mod folders;

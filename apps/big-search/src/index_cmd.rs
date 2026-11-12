@@ -22,6 +22,11 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
     let mut index = index::open_or_create(&config::index_dir())?;
     let mut content_index = index::open_content_or_create(&config::content_index_dir())?;
     scan::write_effective_ignore()?;
+    // The daemon's folder list does not follow this walk; its next start walks.
+    watch::forget_saved_run(&catalogue::State::load(
+        &config::state_db_path(),
+        catalogue::WATCH_NAMESPACE,
+    ))?;
 
     let (scan_roots, mut state, rebuild_content_from_state) = if roots.is_empty() {
         reconcile_plan(&mut index, &mut content_index)?
@@ -300,8 +305,8 @@ pub(super) fn cmd_daemon() -> Result<()> {
     )
 }
 
-/// Start the watcher thread: the startup reconcile, then incremental indexing
-/// for the daemon's life. It ends the process if it ever returns.
+/// Start the watcher thread: the startup sync, then incremental indexing for
+/// the daemon's life. It ends the process if it ever returns.
 fn spawn_watcher(
     index: &tantivy::Index,
     content_index: &tantivy::Index,
@@ -334,7 +339,13 @@ fn spawn_watcher(
             if let Err(e) = watch::run(
                 watch_index,
                 watch_content_index,
-                watch::WatchScope::new(&start.roots, start.initial_dirs, Some(start.walk_started)),
+                watch::WatchScope {
+                    roots: &start.roots,
+                    dirs: start.dirs,
+                    watch_list: start.watch_list,
+                    started: start.started,
+                    fingerprint: start.fingerprint,
+                },
                 start.state,
                 watch::WatchRuntime::new(
                     watch_paused,
@@ -352,41 +363,84 @@ fn spawn_watcher(
     Ok(())
 }
 
-/// What the startup reconcile hands to the incremental watcher.
+/// What the startup sync hands to the incremental watcher.
 struct StartupSync {
     roots: Vec<PathBuf>,
     state: catalogue::State,
-    initial_dirs: Vec<PathBuf>,
-    walk_started: std::time::SystemTime,
+    dirs: watch::StartDirs,
+    watch_list: catalogue::State,
+    started: std::time::SystemTime,
+    fingerprint: Option<i64>,
 }
 
-/// Reconcile the catalogue against the disk, prune stale content and extract
-/// the first content batch. Exits the process when the walk keeps failing.
+/// Find the folders to watch: the list the last run saved when it still
+/// applies, else a walk that reconciles the catalogue with the disk, prunes
+/// stale content and extracts the first content batch. Exits the process when
+/// the walk keeps failing.
 fn startup_sync(
     index: &tantivy::Index,
     content_index: &tantivy::Index,
     pending_content: &std::sync::atomic::AtomicU64,
     activity: &std::sync::atomic::AtomicU8,
 ) -> StartupSync {
-    let sources = settings::sources();
-    let roots: Vec<PathBuf> = sources
+    let started = std::time::SystemTime::now();
+    let available: Vec<&settings::Source> = settings::sources()
         .all()
         .iter()
         .filter(|s| settings::is_available(s))
-        .map(|s| s.path.clone())
         .collect();
+    let roots: Vec<PathBuf> = available.iter().map(|s| s.path.clone()).collect();
+    // A removable disk or a network folder changes on other machines, where
+    // folder times need not move (FAT and exFAT written by Windows).
+    let detachable = available.iter().any(|s| settings::is_detachable(s));
     log::debug!("scan sources: {roots:?}");
-    if let Err(e) = scan::write_effective_ignore() {
-        log::warn!("ignore file: {e:#}");
-    }
-    // Reconcile against the cache: builds a fresh index, or applies only the
-    // deltas accumulated while the daemon was down (crash/offline recovery).
+    let fingerprint = match scan::write_effective_ignore() {
+        Ok(rules) => {
+            // The walker honours the global git ignore file too.
+            let git_excludes = ignore::gitignore::gitconfig_excludes_path()
+                .and_then(|path| std::fs::read(path).ok())
+                .unwrap_or_default();
+            Some(watch::fingerprint(&roots, &rules, &git_excludes))
+        }
+        Err(e) => {
+            log::warn!("ignore file: {e:#}");
+            None
+        }
+    };
     let empty = index
         .reader()
         .map(|r| r.searcher().num_docs() == 0)
         .unwrap_or(true);
     let mut state = startup_name_state(empty, content_index);
-    let walk_started = std::time::SystemTime::now();
+    let mut watch_list =
+        catalogue::State::load(&config::state_db_path(), catalogue::WATCH_NAMESPACE);
+    // The walk reads the metadata of every entry of the sources. An index
+    // whose last run watched every folder, under the same available sources
+    // and ignore rules, watches that list again instead; `big-search rescan`
+    // walks on request. A clock set back since that run makes folder times
+    // useless for the catch-up.
+    if !empty
+        && !detachable
+        && let Some(last_started) =
+            fingerprint.and_then(|fingerprint| watch::saved_run_started(&watch_list, fingerprint))
+        && last_started <= started
+        && let Some(dirs) = saved_watch_dirs(&watch_list)
+    {
+        log::info!("watching {} saved folders; no startup walk", dirs.len());
+        return StartupSync {
+            roots,
+            state,
+            dirs: watch::StartDirs::Saved(dirs, last_started),
+            watch_list,
+            started,
+            fingerprint,
+        };
+    }
+    // A start cut short during the walk must walk again.
+    if let Err(e) = watch::forget_saved_run(&watch_list) {
+        log::warn!("forget the saved folders: {e:#}");
+    }
+    watch_list.clear();
     let initial_watch_dirs = match sync_with_retry(index, &roots, &mut state) {
         Ok(sync_outcome) => {
             log::debug!(
@@ -411,9 +465,37 @@ fn startup_sync(
     StartupSync {
         roots,
         state,
-        initial_dirs: initial_watch_dirs,
-        walk_started,
+        dirs: watch::StartDirs::Walked(initial_watch_dirs),
+        watch_list,
+        started,
+        fingerprint,
     }
+}
+
+/// Every folder of the saved list with its inode, in path order, or None when
+/// the list is empty or unreadable.
+fn saved_watch_dirs(watch_list: &catalogue::State) -> Option<Vec<(PathBuf, u64)>> {
+    const PAGE: usize = 4096;
+    let mut dirs = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = match watch_list.entries_after(after.as_deref(), PAGE) {
+            Ok(page) => page,
+            Err(e) => {
+                log::warn!("read the saved folders: {e:#}");
+                return None;
+            }
+        };
+        let full = page.len() == PAGE;
+        after = page
+            .last()
+            .map(|(path, _, _)| path.to_string_lossy().into_owned());
+        dirs.extend(page.into_iter().map(|(path, _, inode)| (path, inode)));
+        if !full {
+            break;
+        }
+    }
+    (!dirs.is_empty()).then_some(dirs)
 }
 
 /// The name state the startup walk reconciles against.
@@ -533,6 +615,12 @@ struct WatcherExitGuard;
 impl Drop for WatcherExitGuard {
     fn drop(&mut self) {
         log::error!("watcher thread exited; terminating daemon");
+        // The batch it failed on may be lost: the next start walks.
+        let watch_list =
+            catalogue::State::load(&config::state_db_path(), catalogue::WATCH_NAMESPACE);
+        if let Err(e) = watch::forget_saved_run(&watch_list) {
+            log::error!("forget the saved folders: {e:#}");
+        }
         std::process::exit(1);
     }
 }

@@ -365,6 +365,16 @@ impl Client {
         self.expect_ok(RequestBody::Resume)
     }
 
+    /// Reconcile the sources with the catalogue, for changes made while the
+    /// service was stopped. The daemon refuses it while indexing is paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
+    pub fn rescan(&self) -> Result<(), ClientError> {
+        self.expect_ok(RequestBody::Rescan)
+    }
+
     /// Request a full rebuild of the index from source files.
     ///
     /// # Errors

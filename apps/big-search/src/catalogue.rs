@@ -15,6 +15,10 @@ use std::time::UNIX_EPOCH;
 pub const CONTENT_NAMESPACE: &str = "content";
 /// Namespace of the name-catalogue state inside the shared state database.
 pub const NAME_NAMESPACE: &str = "name";
+/// Namespace of the folders the watcher holds a watch on, so a start can watch
+/// them again without walking the sources (see `watch::saved_run_started`).
+/// Rows carry no mtime or size.
+pub const WATCH_NAMESPACE: &str = "watch";
 
 pub struct State {
     db_path: PathBuf,
@@ -546,6 +550,33 @@ impl State {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The value stored under `key` in the database's `meta` table.
+    pub fn meta(&self, key: &str) -> Option<i64> {
+        self.conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    /// Store `value` under `key` in the `meta` table, or remove the key.
+    pub fn set_meta(&self, key: &str, value: Option<i64>) -> Result<()> {
+        match value {
+            Some(value) => self.conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            ),
+            None => self
+                .conn
+                .execute("DELETE FROM meta WHERE key = ?1", params![key]),
+        }
+        .with_context(|| format!("write meta {key}"))?;
+        Ok(())
     }
 
     fn contains_persisted_key(&self, path: &str) -> bool {

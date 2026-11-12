@@ -1,12 +1,14 @@
 //! Tantivy directory that never calls `fsync`.
 //!
 //! Both indexes are a cache derived from the filesystem, so the worst a forced
-//! reboot can cost is re-indexing the files whose commits did not reach the
-//! disk, work the startup reconcile already does. Paying `fsync` to avoid that
-//! costs far more than the work it saves: tantivy issues two per commit (the
-//! `meta.json` temporary at `MmapDirectory::atomic_write`, then the index
-//! directory at `sync_directory`), and on btrfs each one is a log-tree
-//! transaction that amplifies a few kilobytes into many block-layer writes.
+//! reboot can cost is documents whose commits did not reach the disk. The next
+//! start re-adds name documents the catalogue still lists
+//! (`index::repair_deflated_against_state`); `big-search rebuild` re-indexes
+//! everything else. Paying `fsync` to avoid that costs far more than the work
+//! it saves: tantivy issues two per commit (the `meta.json` temporary at
+//! `MmapDirectory::atomic_write`, then the index directory at
+//! `sync_directory`), and on btrfs each one is a log-tree transaction that
+//! amplifies a few kilobytes into many block-layer writes.
 //!
 //! After a power cut the index may be torn rather than merely stale. That is
 //! survivable because a torn index fails to open and

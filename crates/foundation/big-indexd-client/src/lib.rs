@@ -262,6 +262,9 @@ pub enum RequestBody {
     Status,
     Pause,
     Resume,
+    /// Reconcile the sources with the catalogue without resuming: refused
+    /// while indexing is paused.
+    Rescan,
     Rebuild,
     Reindex(ReindexRequest),
     /// Which directories this daemon catalogues. See [`IndexedRoot`].
@@ -637,6 +640,18 @@ mod tests {
             Reply::Status { activity, .. } => assert_eq!(activity, "idle"),
             other => panic!("wrong kind: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rescan_wire_spelling() {
+        let request = Request {
+            v: PROTOCOL_VERSION,
+            body: RequestBody::Rescan,
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"v":2,"cmd":"rescan"}"#
+        );
     }
 
     /// The `sources` command and its reply keep the spelling both ends use.

@@ -398,9 +398,9 @@ fn queue_event(history: &SharedHistory, pending: &mut Pending, event: HistoryEve
             pending.note(to, QUIET_PERIOD);
         }
         // The pass that covers what no event could: the queue overflowed, or
-        // the service was not running when somebody saved. The catalogue
-        // was just reconciled with the disk, so a document whose newest
-        // version it matches is skipped without touching the disk.
+        // somebody saved while the service was not running and a walk or the
+        // start's catch-up recorded it. A document whose newest version
+        // matches its catalogue entry is skipped without touching the disk.
         HistoryEvent::Catalogued(entries) => {
             let unkept = history.lock().expect("versions store lock").unkept(entries);
             for path in unkept {

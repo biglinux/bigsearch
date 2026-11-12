@@ -12,7 +12,7 @@ pub enum SymlinkPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MountKind {
+pub(crate) enum MountKind {
     Local,
     Network,
     Virtual,
@@ -217,7 +217,7 @@ fn mount_kind_for_path(path: &Path) -> MountKind {
         .map_or(MountKind::Unknown, |mount| classify_fstype(&mount.fstype))
 }
 
-fn classify_fstype(fstype: &str) -> MountKind {
+pub(crate) fn classify_fstype(fstype: &str) -> MountKind {
     match fstype {
         "ext2" | "ext3" | "ext4" | "btrfs" | "xfs" | "f2fs" | "bcachefs" | "zfs" | "ntfs"
         | "ntfs3" | "exfat" | "vfat" | "fuseblk" | "hfsplus" | "apfs" => MountKind::Local,

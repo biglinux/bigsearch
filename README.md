@@ -24,8 +24,9 @@ the bookkeeping around it is SQLite.
   South-East Asian scripts are indexed as overlapping bigrams, so they are
   searchable without a dictionary.
 - **Live index:** inotify on every visible folder, so a saved file is
-  searchable within seconds. After a restart only what changed while the
-  service was down is read again.
+  searchable within seconds. A restart finds files created, renamed or deleted
+  while the service was down without reading every file; `big-search rescan`
+  also rereads files edited in place.
 - **Earlier versions:** on filesystems with reflinks (Btrfs, XFS) a copy of a
   document is kept before each save, within a disk budget.
 - **Origin:** where a file came from (a browser download, a copy, a move),
@@ -68,6 +69,7 @@ big-search contract --ext pdf --under ~/Documents
 
 big-search status                       # what the daemon is doing
 big-search pause | resume | rebuild
+big-search rescan                       # changes made while the service was stopped
 big-search versions ~/notes/todo.md     # earlier versions kept of a file
 big-search origin ~/Downloads/file.zip  # where a file came from
 ```

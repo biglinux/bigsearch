@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tantivy::{Index, IndexWriter};
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -61,50 +61,183 @@ pub struct WatchRuntime {
 }
 
 pub struct WatchScope<'a> {
-    roots: &'a [PathBuf],
-    initial_dirs: Vec<PathBuf>,
-    /// When the walk that found `initial_dirs` began. A folder changed since
-    /// then may hold entries the walk missed and no watch reported.
-    walk_started: Option<std::time::SystemTime>,
+    pub roots: &'a [PathBuf],
+    pub dirs: StartDirs,
+    /// The folders watched, as the last run saved them, or cleared after a walk.
+    pub watch_list: State,
+    /// When this start began, recorded for the next one.
+    pub started: SystemTime,
+    /// [`fingerprint`] of the sources and ignore rules; `None` when the rules
+    /// could not be written, and then this run records nothing.
+    pub fingerprint: Option<i64>,
 }
 
-impl<'a> WatchScope<'a> {
-    pub fn new(
-        roots: &'a [PathBuf],
-        initial_dirs: Vec<PathBuf>,
-        walk_started: Option<std::time::SystemTime>,
-    ) -> Self {
-        Self {
-            roots,
-            initial_dirs,
-            walk_started,
-        }
+/// The folders a start watches first.
+pub enum StartDirs {
+    /// What the startup walk found.
+    Walked(Vec<PathBuf>),
+    /// The list the last run saved, each folder with its inode then, in path
+    /// order, and when that run started.
+    Saved(Vec<(PathBuf, u64)>, SystemTime),
+}
+
+/// `meta` keys of the last run's record: the [`fingerprint`] its watches were
+/// placed under and when it started. A start whose fingerprint matches watches
+/// the saved list instead of walking the sources.
+const RUN_FINGERPRINT: &str = "watch_fingerprint";
+const RUN_STARTED: &str = "watch_started";
+
+/// Fingerprint of the sources, the effective ignore rules and the global git
+/// ignore file: when any differs from the last run's, the next start walks. A
+/// toolchain whose hasher differs costs one walk.
+pub fn fingerprint(roots: &[PathBuf], ignore_rules: &str, git_excludes: &[u8]) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    roots.hash(&mut hasher);
+    ignore_rules.hash(&mut hasher);
+    git_excludes.hash(&mut hasher);
+    hasher.finish().cast_signed()
+}
+
+/// When the last run started, if its record in `watch_list` carries
+/// `fingerprint`: every folder it listed was watched from then on.
+pub fn saved_run_started(watch_list: &State, fingerprint: i64) -> Option<SystemTime> {
+    if watch_list.meta(RUN_FINGERPRINT)? != fingerprint {
+        return None;
     }
+    let secs = u64::try_from(watch_list.meta(RUN_STARTED)?).ok()?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(secs))
+}
+
+/// Seconds since 1970 of `time`; 0, which makes every folder look changed,
+/// for an earlier one.
+fn epoch_secs(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since_epoch| i64::try_from(since_epoch.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+/// Drop the last run's record, so the next start walks.
+pub fn forget_saved_run(watch_list: &State) -> Result<()> {
+    watch_list.set_meta(RUN_FINGERPRINT, None)
 }
 
 /// The watcher and how many watches it failed to place, shared with `status`.
 struct Watches {
     watcher: RecommendedWatcher,
     failed: Arc<AtomicU64>,
+    /// Every folder watched, kept in the state database for the next start
+    /// with its inode in the size column.
+    dirs: State,
+    fingerprint: Option<i64>,
+    /// Whether the database may hold a run record.
+    recorded: bool,
+    /// When the run this one recorded started, as written in the record.
+    run_started: Option<SystemTime>,
+    /// Listed folders this user could not read, so no watch is on them: one
+    /// made readable is watched and walked when the catch-up or an event
+    /// reaches it.
+    unreadable: HashSet<PathBuf>,
+    /// Set by the IPC thread; a paused watcher drops events, so no run it
+    /// records would be covered.
+    paused: Arc<AtomicBool>,
 }
 
 impl Watches {
-    /// Watch one folder. The usual failure is the inotify watch limit, which
-    /// leaves every later folder unwatched too, so the first one is logged.
+    /// Watch a folder a walk or an event reached, and list it, also when this
+    /// user cannot read it (see [`Self::unreadable`]).
     fn watch(&mut self, dir: &Path) -> bool {
-        match self.watcher.watch(dir, RecursiveMode::NonRecursive) {
-            Ok(()) => true,
-            Err(error) => {
-                if self.failed.fetch_add(1, Ordering::Relaxed) == 0 {
-                    log::warn!(
-                        "cannot watch {}: {error}; changes in it and in other unwatched \
-                         folders are seen only by the next full reconcile",
-                        dir.display()
-                    );
-                }
-                false
-            }
+        use std::os::unix::fs::MetadataExt;
+        let placed = self.place(dir);
+        if (placed || self.unreadable.contains(dir))
+            && !self.dirs.contains(dir)
+            && let Ok(metadata) = std::fs::symlink_metadata(dir)
+        {
+            self.dirs.set(dir, 0, metadata.ino());
         }
+        placed
+    }
+
+    /// Place the watch on `dir`. A folder that cannot be watched leaves the
+    /// list, unless the inotify watch limit refused it or this user cannot
+    /// read it (the walker cannot read it either). Any failure but those two
+    /// and a vanished folder makes the next start walk (see
+    /// [`Self::persist`]). The limit leaves every later folder unwatched too,
+    /// so only the first failure is logged.
+    fn place(&mut self, dir: &Path) -> bool {
+        let Err(error) = self.watcher.watch(dir, RecursiveMode::NonRecursive) else {
+            self.unreadable.remove(dir);
+            return true;
+        };
+        let unreadable = matches!(&error.kind,
+            notify::ErrorKind::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied);
+        if unreadable {
+            self.unreadable.insert(dir.to_path_buf());
+            return false;
+        }
+        if !matches!(error.kind, notify::ErrorKind::MaxFilesWatch) {
+            self.dirs.remove(dir);
+        }
+        if !matches!(error.kind, notify::ErrorKind::PathNotFound)
+            && self.failed.fetch_add(1, Ordering::Relaxed) == 0
+        {
+            log::warn!(
+                "cannot watch {}: {error}; changes in it and in other unwatched \
+                 folders are seen only by `big-search rescan`",
+                dir.display()
+            );
+        }
+        false
+    }
+
+    /// Save the folder list, before the catalogue at every persist site, two
+    /// transactions a kill can come between. A folder listed but not
+    /// catalogued is walked whole by the next start's catch-up; one catalogued
+    /// but not listed would look known to it and stay unwatched. After a
+    /// failed watch it also drops the run record.
+    fn persist(&mut self) -> Result<()> {
+        self.dirs.persist()?;
+        if self.failed.load(Ordering::Relaxed) > 0 {
+            self.forget_run()?;
+        }
+        // A clock set back since the run started: the record's start moves back
+        // with it, or the next start's catch-up would miss what changes from
+        // now until the clock reaches it again.
+        let now = SystemTime::now();
+        if self.recorded && self.run_started.is_some_and(|started| now < started) {
+            self.dirs.set_meta(RUN_STARTED, Some(epoch_secs(now)))?;
+            self.run_started = Some(now);
+        }
+        Ok(())
+    }
+
+    /// Record for the next start that every folder is watched since `started`,
+    /// unless a watch failed in this run or indexing is paused.
+    fn record_run(&mut self, started: SystemTime) -> Result<()> {
+        let Some(fingerprint) = self.fingerprint else {
+            return Ok(());
+        };
+        if self.failed.load(Ordering::Relaxed) > 0 || self.paused.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        self.dirs.set_meta(RUN_STARTED, Some(epoch_secs(started)))?;
+        self.dirs.set_meta(RUN_FINGERPRINT, Some(fingerprint))?;
+        self.recorded = true;
+        self.run_started = Some(started);
+        Ok(())
+    }
+
+    /// Drop the run record, before a walk too: the walk commits the catalogue
+    /// before the folder list is saved, and a start after a walk cut short
+    /// between the two must walk.
+    fn forget_run(&mut self) -> Result<()> {
+        if self.recorded {
+            forget_saved_run(&self.dirs)?;
+            self.recorded = false;
+            self.run_started = None;
+        }
+        Ok(())
     }
 }
 
@@ -125,11 +258,14 @@ impl WatchRuntime {
 }
 
 /// Index lifecycle command from the IPC thread (the `big-indexd` pause/resume/
-/// rebuild verbs). Carried on the same channel as filesystem events so the watcher
+/// rescan/rebuild verbs). Carried on the same channel as filesystem events so the watcher
 /// reacts immediately and still never wakes when there is nothing to do.
 pub enum WatchControlCommand {
     Pause,
+    /// Unpause and walk the sources against the catalogue.
     Resume,
+    /// Walk the sources against the catalogue; refused while paused.
+    Rescan,
     Rebuild,
     /// Reindex one path whose size and mtime did not change, e.g. after a tag
     /// (extended attribute) write. Requested explicitly by the tagging program,
@@ -176,18 +312,18 @@ pub fn run(
     // uses, so the two cannot disagree about what belongs in the index.
     let path_scope = scan::Scope::compile();
 
-    let (mut watches, queued, overflowed) = start_inotify(tx, &runtime.unwatched_dirs)?;
-    let initial_dirs = watch_initial_dirs(&mut watches, scope.roots, scope.initial_dirs);
-    catch_up_after_walk(
+    let (mut watches, queued, overflowed) =
+        start_inotify(tx, &runtime, scope.watch_list, scope.fingerprint)?;
+    let catch_up = watch_initial_dirs(&mut watches, scope.roots, scope.dirs, scope.started);
+    catch_up_at_start(
         &mut writer,
         &f,
         &mut watches,
         &mut state,
         &path_scope,
-        &initial_dirs,
-        scope.walk_started,
+        catch_up,
     )?;
-    drop(initial_dirs);
+    watches.record_run(scope.started)?;
     let origin_writer = open_origin_writer();
     let history_tx = spawn_history_worker(&history);
 
@@ -224,7 +360,9 @@ pub fn run(
 /// drop one.
 fn start_inotify(
     tx: Sender<WatchMessage>,
-    unwatched_dirs: &Arc<AtomicU64>,
+    runtime: &WatchRuntime,
+    watch_list: State,
+    fingerprint: Option<i64>,
 ) -> Result<(Watches, Arc<AtomicUsize>, Arc<AtomicBool>)> {
     let fs_tx = tx;
     let queued = Arc::new(AtomicUsize::new(0));
@@ -249,30 +387,99 @@ fn start_inotify(
     .context("inotify init")?;
     let watches = Watches {
         watcher,
-        failed: Arc::clone(unwatched_dirs),
+        failed: Arc::clone(&runtime.unwatched_dirs),
+        dirs: watch_list,
+        fingerprint,
+        recorded: true,
+        run_started: None,
+        unreadable: HashSet::new(),
+        paused: Arc::clone(&runtime.paused),
     };
     Ok((watches, queued, overflowed))
 }
 
-/// Watch every folder the startup walk found (every visible folder under
-/// `roots` when it found none) and return that list.
+/// What a start's catch-up compares again.
+struct CatchUp {
+    /// Saved folders that are no longer the folder watched: another folder
+    /// took their place while the daemon was stopped (`mv proj.new proj`), or a
+    /// file, a symlink or nothing did. Their catalogue rows describe the old one.
+    replaced: Vec<PathBuf>,
+    /// Folders whose entries changed since a watch last covered them.
+    changed: Vec<PathBuf>,
+    /// Every folder watched at start; each one that changed has its own pass.
+    watched: HashSet<PathBuf>,
+}
+
+/// Watch the folders a start begins with and say what the catch-up compares:
+/// a folder changed since the walk began, or since the last run started for
+/// the saved list. The walk's folders are every visible folder under `roots`
+/// when it found none.
 fn watch_initial_dirs(
     watches: &mut Watches,
     roots: &[PathBuf],
-    initial_dirs: Vec<PathBuf>,
-) -> Vec<PathBuf> {
-    let mut watched = 0usize;
-    let initial_dirs = if initial_dirs.is_empty() {
-        roots
-            .iter()
-            .flat_map(|root| scan::visible_dirs(root))
-            .collect()
-    } else {
-        initial_dirs
+    dirs: StartDirs,
+    started: SystemTime,
+) -> CatchUp {
+    use std::os::unix::fs::MetadataExt;
+    let mut catch_up = CatchUp {
+        replaced: Vec::new(),
+        changed: Vec::new(),
+        watched: HashSet::new(),
     };
-    for dir in &initial_dirs {
-        if watches.watch(dir) {
-            watched += 1;
+    let mut watched = 0usize;
+    let since = match &dirs {
+        StartDirs::Walked(_) => epoch_secs(started) - 1,
+        StartDirs::Saved(_, last_started) => epoch_secs(*last_started) - 1,
+    };
+    match dirs {
+        StartDirs::Walked(dirs) => {
+            let dirs = if dirs.is_empty() {
+                roots
+                    .iter()
+                    .flat_map(|root| scan::visible_dirs(root))
+                    .collect()
+            } else {
+                dirs
+            };
+            for dir in dirs {
+                watched += usize::from(watches.watch(&dir));
+                // Read after the watch: a change after it is an event.
+                if std::fs::symlink_metadata(&dir).is_ok_and(|m| changed_since(&m, since)) {
+                    catch_up.changed.push(dir.clone());
+                }
+                catch_up.watched.insert(dir);
+            }
+        }
+        StartDirs::Saved(dirs, _) => {
+            // A saved folder stays only while it is a directory, under a kept
+            // folder or as a root: inotify follows a symlink, at the folder or
+            // above it, and the walker never does. The list is in path order,
+            // a parent before its folders, which leave with it.
+            for (dir, saved_inode) in dirs {
+                let in_kept = roots.contains(&dir)
+                    || dir.parent().is_some_and(|p| catch_up.watched.contains(p));
+                if !in_kept {
+                    watches.dirs.remove(&dir);
+                    continue;
+                }
+                // A root is never a catalogue entry, so it is never evicted: one
+                // made anew is a changed folder, its old entries leave by its
+                // pass, and its folders all have new inodes.
+                let same_folder = std::fs::symlink_metadata(&dir)
+                    .is_ok_and(|m| m.is_dir() && (roots.contains(&dir) || m.ino() == saved_inode));
+                if !same_folder {
+                    watches.dirs.remove(&dir);
+                    catch_up.replaced.push(dir);
+                    continue;
+                }
+                // Already listed: no lookup to list it again.
+                watched += usize::from(watches.place(&dir));
+                // Read again after the watch: a change after it is an event.
+                if std::fs::symlink_metadata(&dir).is_ok_and(|m| changed_since(&m, since)) {
+                    catch_up.changed.push(dir.clone());
+                }
+                catch_up.watched.insert(dir);
+            }
         }
     }
     log::info!("watching {watched} visible directories");
@@ -282,53 +489,81 @@ fn watch_initial_dirs(
             "{unwatched} directories could not be watched; raise fs.inotify.max_user_watches"
         );
     }
-    initial_dirs
+    catch_up
 }
 
-/// What changed between the startup walk reaching a folder and its watch:
-/// a folder whose entries changed since the walk began is compared again,
-/// its entries on disk and in the catalogue. Only its direct entries; a new
-/// folder among them is walked whole, a vanished one leaves with its tree.
-fn catch_up_after_walk(
+/// Whether a folder's entries may have changed since `since` (seconds since
+/// 1970). The change time counts too: `cp -a`, `rsync -a`, `tar` and a restore
+/// set the modification time back, and nothing sets the change time back.
+fn changed_since(metadata: &std::fs::Metadata, since: i64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mtime().max(metadata.ctime()) >= since
+}
+
+/// What changed in a folder while it had no watch: its entries on disk and in
+/// the catalogue are compared again, one folder at a time. Only its direct
+/// entries; a new folder among them is walked whole, a vanished one leaves
+/// with its tree. A replaced folder leaves with its tree, and what took its
+/// place is indexed: a folder walked whole. A file rewritten in place changes
+/// no folder and waits for `big-search rescan`.
+fn catch_up_at_start(
     writer: &mut Option<IndexWriter>,
     f: &Fields,
     watches: &mut Watches,
     state: &mut State,
     path_scope: &scan::Scope,
-    initial_dirs: &[PathBuf],
-    walk_started: Option<std::time::SystemTime>,
+    catch_up: CatchUp,
 ) -> Result<()> {
-    let Some(walk_started) = walk_started else {
-        return Ok(());
-    };
-    let since = walk_started - Duration::from_secs(1);
-    let mut missed = HashSet::new();
-    for dir in initial_dirs {
-        let changed = std::fs::symlink_metadata(dir)
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|modified| modified >= since);
-        if changed && let Ok(entries) = std::fs::read_dir(dir) {
-            missed.extend(entries.flatten().map(|entry| entry.path()));
-            missed.extend(state.children(dir)?);
+    let mut outcome = scan::ReconcileOutcome::default();
+    let mut offline_sources = None;
+    for dir in catch_up.replaced {
+        if evict(
+            active_index_writer(writer),
+            f,
+            state,
+            watches,
+            &dir,
+            false,
+            &mut offline_sources,
+        ) {
+            outcome.index_changed = true;
+            outcome.state_changed = true;
+            outcome.deleted = true;
         }
-    }
-    if !missed.is_empty() {
-        let outcome = reconcile(
+        outcome.absorb(reconcile(
             active_index_writer(writer),
             f,
             watches,
             state,
             path_scope,
-            missed,
-        )?;
-        if outcome.index_changed {
-            active_index_writer(writer)
-                .commit()
-                .context("commit startup catch-up")?;
-        }
-        if outcome.any() {
-            state.persist()?;
-        }
+            HashSet::from([dir]),
+            None,
+        )?);
+    }
+    for dir in catch_up.changed {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: HashSet<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        entries.extend(state.children(&dir)?);
+        outcome.absorb(reconcile(
+            active_index_writer(writer),
+            f,
+            watches,
+            state,
+            path_scope,
+            entries,
+            Some(&catch_up.watched),
+        )?);
+    }
+    if outcome.index_changed {
+        active_index_writer(writer)
+            .commit()
+            .context("commit startup catch-up")?;
+    }
+    watches.persist()?;
+    if outcome.any() {
+        state.persist()?;
     }
     Ok(())
 }
@@ -369,8 +604,9 @@ struct WatchLoop<'a> {
     content_backfill: ContentBackfill,
     history_pass_done: bool,
     /// Where the pass over the catalogue has got to. It covers what no event
-    /// could: the moments the service was not running, and the bursts that
-    /// overflowed the kernel's queue.
+    /// could: the bursts that overflowed the kernel's queue, and saves made
+    /// while the service was not running that a walk or the start's catch-up
+    /// recorded in the catalogue.
     history_cursor: Option<String>,
     history_tx: Sender<crate::history::HistoryEvent>,
     origin_writer: origin::OriginWriter,
@@ -492,6 +728,26 @@ impl WatchLoop<'_> {
             WatchMessage::ControlCommand(WatchControlCommand::ReindexPath(path)) => {
                 return self.reindex_path(path);
             }
+            WatchMessage::ControlCommand(WatchControlCommand::Resume) => {
+                // ipc.rs cleared the flag; set again, a pause sent after this
+                // resume is waiting in the queue.
+                if self.runtime.paused.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                log::info!("indexing resumed — reconciling the sources with the catalogue");
+                return self.walk_sources();
+            }
+            WatchMessage::ControlCommand(WatchControlCommand::Rescan) => {
+                // ipc.rs refuses it with an answer; this is the backstop. A
+                // paused watcher drops events, so no walk may record its run
+                // as covered: `resume` walks.
+                if self.runtime.paused.load(Ordering::Relaxed) {
+                    log::warn!("rescan refused: indexing is paused");
+                    return Ok(());
+                }
+                log::info!("rescan requested — reconciling the sources with the catalogue");
+                return self.walk_sources();
+            }
             WatchMessage::ControlCommand(command) => return self.apply_control(command),
             WatchMessage::Fs(watcher_result) => {
                 self.queued.fetch_sub(1, Ordering::Relaxed);
@@ -535,6 +791,7 @@ impl WatchLoop<'_> {
             &mut self.state,
             &self.path_scope,
             forced,
+            None,
         )?;
         if outcome.index_changed {
             active_index_writer(&mut self.writer)
@@ -543,6 +800,7 @@ impl WatchLoop<'_> {
             recycle_background_writer(&self.index, &mut self.writer)
                 .context("recycle index writer")?;
         }
+        self.watches.persist()?;
         if outcome.state_changed {
             self.state.persist()?;
         }
@@ -589,10 +847,7 @@ impl WatchLoop<'_> {
             .activity
             .store(ACTIVITY_IDLE, Ordering::Relaxed);
         if let Some(command) = deferred_control_command {
-            match command {
-                WatchControlCommand::WarmContent => self.content_backfill.warm(),
-                command => self.apply_control(command)?,
-            }
+            self.handle(WatchMessage::ControlCommand(command))?;
         }
         Ok(())
     }
@@ -621,13 +876,12 @@ impl WatchLoop<'_> {
     /// Reconcile one coalesced batch, commit the name index and persist the
     /// catalogue when they changed, and hand the saves it saw to the versions
     /// worker.
-    fn apply_batch(&mut self, mut batch: WatchBatch, mut rescan: bool) -> Result<()> {
+    fn apply_batch(&mut self, mut batch: WatchBatch, rescan: bool) -> Result<()> {
         observe_origin_batch(&self.origin_writer, &batch);
         // Reconciled first, history second: only a file that reached a coherent
         // state is worth a version, and the search never waits on this.
         let history_paths = std::mem::take(&mut batch.history_paths);
         let history_renames = std::mem::take(&mut batch.history_renames);
-        rescan |= self.overflowed.swap(false, Ordering::Relaxed);
         let mut outcome = reconcile(
             active_index_writer(&mut self.writer),
             &self.f,
@@ -635,6 +889,7 @@ impl WatchLoop<'_> {
             &mut self.state,
             &self.path_scope,
             batch.paths,
+            None,
         )?;
         for (from, to) in history_renames {
             let _ = self
@@ -646,9 +901,59 @@ impl WatchLoop<'_> {
                 .history_tx
                 .send(crate::history::HistoryEvent::Changed(path));
         }
-        if rescan {
-            outcome.absorb(self.rescan_after_overflow()?);
-        }
+        let overflowed = self.overflowed.swap(false, Ordering::Relaxed);
+        let walk_started = if rescan || overflowed {
+            log::warn!("inotify overflow — full rescan");
+            Some(self.rescan_sources(&mut outcome)?)
+        } else {
+            None
+        };
+        self.finish_batch(outcome, walk_started)
+    }
+
+    /// Walk every source against the catalogue on request, as one batch.
+    fn walk_sources(&mut self) -> Result<()> {
+        self.runtime
+            .activity
+            .store(ACTIVITY_INDEXING, Ordering::Relaxed);
+        let mut outcome = scan::ReconcileOutcome::default();
+        let started = self.rescan_sources(&mut outcome)?;
+        self.finish_batch(outcome, Some(started))?;
+        self.runtime
+            .activity
+            .store(ACTIVITY_IDLE, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Walk every source against the catalogue into `outcome`: after events
+    /// were dropped, or on request. Returns when the walk began.
+    fn rescan_sources(&mut self, outcome: &mut scan::ReconcileOutcome) -> Result<SystemTime> {
+        let started = SystemTime::now();
+        self.watches.forget_run()?;
+        // The versions worker cannot trust what it heard either, so its pass
+        // over the catalogue starts again from the top.
+        self.history_pass_done = false;
+        self.history_cursor = None;
+        outcome.absorb(scan::reconcile_inline(
+            active_index_writer(&mut self.writer),
+            &self.f,
+            &mut self.state,
+            self.roots,
+            &mut |dir| {
+                self.watches.watch(dir);
+            },
+        )?);
+        Ok(started)
+    }
+
+    /// Commit the name index and persist the catalogue when `outcome` changed
+    /// them, and after a walk of the sources that began at `walk_started`,
+    /// record the run for the next start.
+    fn finish_batch(
+        &mut self,
+        outcome: scan::ReconcileOutcome,
+        walk_started: Option<SystemTime>,
+    ) -> Result<()> {
         if outcome.index_changed {
             active_index_writer(&mut self.writer)
                 .commit()
@@ -659,30 +964,16 @@ impl WatchLoop<'_> {
         if outcome.deleted {
             self.content_backfill.note_deletion();
         }
+        self.watches.persist()?;
         if outcome.any() {
             self.state.persist()?;
             self.content_backfill.request();
             crate::throttle::release_idle_memory();
         }
+        if let Some(started) = walk_started {
+            self.watches.record_run(started)?;
+        }
         Ok(())
-    }
-
-    /// inotify queue overflowed → events were dropped. Re-walk to recover.
-    fn rescan_after_overflow(&mut self) -> Result<scan::ReconcileOutcome> {
-        log::warn!("inotify overflow — full rescan");
-        // The versions worker cannot trust what it heard either, so its pass
-        // over the catalogue starts again from the top.
-        self.history_pass_done = false;
-        self.history_cursor = None;
-        scan::reconcile_inline(
-            active_index_writer(&mut self.writer),
-            &self.f,
-            &mut self.state,
-            self.roots,
-            &mut |dir| {
-                self.watches.watch(dir);
-            },
-        )
     }
 }
 
@@ -716,9 +1007,9 @@ fn open_content_writer<'a>(
     Ok(active_index_writer(writer))
 }
 
-/// Apply a lifecycle command. Pause/Resume flip the shared flag (Resume also
-/// reconciles changes missed while paused); Rebuild wipes the index/cache and
-/// re-indexes names from scratch, then schedules content backfill.
+/// Apply a lifecycle command the run loop leaves to this function: Pause
+/// flips the shared flag; Rebuild wipes the index/cache and re-indexes names
+/// from scratch, then schedules content backfill. Whether the index changed.
 fn apply_control_command(
     command: WatchControlCommand,
     writer: &mut IndexWriter,
@@ -730,30 +1021,21 @@ fn apply_control_command(
     watches: &mut Watches,
 ) -> Result<bool> {
     match command {
-        // Handled by the run loop (needs the backfill state); nothing to do here.
-        WatchControlCommand::WarmContent => Ok(false),
         WatchControlCommand::Pause => {
-            runtime.paused.store(true, Ordering::Relaxed);
+            // ipc.rs set the flag when it accepted the command, so a request
+            // right after it already sees it. Events are dropped while
+            // paused, so the next start must walk.
+            watches.forget_run()?;
             runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
             log::info!("indexing paused");
             Ok(false)
         }
-        WatchControlCommand::Resume => {
-            runtime.paused.store(false, Ordering::Relaxed);
-            runtime.activity.store(ACTIVITY_INDEXING, Ordering::Relaxed);
-            log::info!("indexing resumed — reconciling changes missed while paused");
-            let outcome = scan::reconcile_inline(writer, f, state, roots, &mut |dir| {
-                watches.watch(dir);
-            })?;
-            if outcome.any() {
-                state.persist()?;
-            }
-            runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
-            Ok(outcome.any())
-        }
-        // Handled in the loop, where the reconcile machinery lives; it never
-        // reaches this fallback.
-        WatchControlCommand::ReindexPath(_) => Ok(false),
+        // Handled in the loop, where the reconcile and backfill state live; they
+        // never reach this fallback.
+        WatchControlCommand::WarmContent
+        | WatchControlCommand::Resume
+        | WatchControlCommand::Rescan
+        | WatchControlCommand::ReindexPath(_) => Ok(false),
         WatchControlCommand::Rebuild => rebuild(writer, content, f, state, roots, runtime, watches),
     }
 }
@@ -769,6 +1051,8 @@ fn rebuild(
     runtime: &WatchRuntime,
     watches: &mut Watches,
 ) -> Result<bool> {
+    let started = SystemTime::now();
+    watches.forget_run()?;
     runtime.activity.store(ACTIVITY_INDEXING, Ordering::Relaxed);
     log::info!("rebuild requested — clearing index and re-indexing");
     writer
@@ -788,13 +1072,17 @@ fn rebuild(
     })?;
     // The clear above must reach disk even when the walk found nothing.
     writer.commit().context("commit rebuild")?;
+    watches.persist()?;
     state.persist()?;
+    watches.record_run(started)?;
     runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
     Ok(true)
 }
 
 /// Apply one coalesced batch. The outcome says whether the name index needs a
-/// commit and whether state/content work happened.
+/// commit and whether state/content work happened. A changed catalogued
+/// folder among `watched`, which has a pass of its own, only gets its row
+/// refreshed; any other is walked whole.
 fn reconcile(
     writer: &IndexWriter,
     f: &Fields,
@@ -802,6 +1090,7 @@ fn reconcile(
     state: &mut State,
     scope: &scan::Scope,
     batch: HashSet<PathBuf>,
+    watched: Option<&HashSet<PathBuf>>,
 ) -> Result<scan::ReconcileOutcome> {
     let mut outcome = scan::ReconcileOutcome::default();
     let mut offline_sources = None;
@@ -826,7 +1115,10 @@ fn reconcile(
         // they covered it. Skipping it instead would strand those documents.
         if let Some(metadata) = metadata.filter(|_| !out_of_scope) {
             let (mtime, size) = catalogue::meta_pair(&metadata);
-            if recorded == Some((mtime, size)) {
+            // A listed folder this user could not read may have been made
+            // readable (chmod, chown): only its change time moved.
+            let reopened = metadata.is_dir() && watches.unreadable.contains(&path);
+            if recorded == Some((mtime, size)) && !reopened {
                 continue; // metadata-only event (e.g. ATTRIB) → nothing to reindex
             }
             if scan::name_doc_stale(recorded, mtime) {
@@ -838,7 +1130,9 @@ fn reconcile(
             }
             state.set(&path, mtime, size);
             outcome.state_changed = true;
-            if metadata.is_dir() {
+            let own_pass =
+                recorded.is_some() && watched.is_some_and(|watched| watched.contains(&path));
+            if metadata.is_dir() && !own_pass {
                 // New or moved-in dir: watch it before reading it, and each
                 // subfolder as the walk reaches it, so an entry created during
                 // the walk is either read or reported.
@@ -851,7 +1145,7 @@ fn reconcile(
             }
         } else if recorded.is_some()
             && (gone || out_of_scope)
-            && evict(writer, f, state, &path, gone, &mut offline_sources)
+            && evict(writer, f, state, watches, &path, gone, &mut offline_sources)
         {
             outcome.index_changed = true;
             outcome.state_changed = true;
@@ -869,6 +1163,7 @@ fn evict(
     writer: &IndexWriter,
     f: &Fields,
     state: &mut State,
+    watches: &mut Watches,
     path: &Path,
     gone: bool,
     offline_sources: &mut Option<crate::query::OfflineSources>,
@@ -886,15 +1181,17 @@ fn evict(
     // the folder and none for what it held: its whole tree goes.
     scan::delete_tree(writer, f, path);
     state.remove_tree(path);
+    watches.dirs.remove_tree(path);
     true
 }
 
 /// Offer the versions worker one page of the catalogue.
 ///
-/// Returns whether the pass is finished. This is what covers every save the
-/// watcher could not hear: the service was not running, or the kernel's queue
-/// overflowed. The worker compares each file against its newest version, so a
-/// document that has not changed costs one `stat` and nothing else.
+/// Returns whether the pass is finished. This is what covers the saves the
+/// watcher could not hear: the kernel's queue overflowed, or the service was
+/// not running and a walk or the start's catch-up recorded the change in the
+/// catalogue. The worker compares each catalogue entry against the newest
+/// version, so a document that has not changed costs one lookup.
 fn send_history_page(
     state: &State,
     history: &Sender<crate::history::HistoryEvent>,
