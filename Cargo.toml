@@ -6,10 +6,8 @@ members = [
     "crates/foundation/big-docinfo",
     "crates/foundation/big-indexd-client",
     "crates/foundation/big-search-config",
-    "crates/ui/generic/big-search-settings",
 ]
-# The daemon alone by default: the settings page pulls in GTK, which the
-# service and its package never need.
+# The daemon alone by default: the service and its package need nothing else.
 default-members = ["apps/big-search"]
 exclude = ["apps/big-search/fuzz"]
 

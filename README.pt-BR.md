@@ -45,7 +45,6 @@ SQLite.
 - SQLite 3; poppler (`pdftotext`) para conteúdo de PDF e `antiword` para
   documentos do Word 97-2003.
 - shared-mime-info, que dá o tipo de um arquivo pelo nome.
-- Só para a página de configurações: GTK 4.22 e libadwaita 1.9.
 
 ## Compilar e instalar
 
@@ -108,12 +107,14 @@ gitignore. Uma linha com `!` traz de volta algo que as regras embutidas pulam
 | [`apps/big-search`](apps/big-search) | O daemon e a CLI. O [DESIGN.md](apps/big-search/DESIGN.md) explica a arquitetura e as medições por trás dela. |
 | [`crates/foundation/big-indexd-client`](crates/foundation/big-indexd-client) | Tipos do protocolo do socket e um cliente pequeno para outros programas. |
 | [`crates/foundation/big-search-config`](crates/foundation/big-search-config) | Lê e grava o `config.toml` sem perder os comentários do usuário. |
-| [`crates/ui/generic/big-search-settings`](crates/ui/generic/big-search-settings) | A página de configurações em GTK que outros programas incorporam. |
+
 | [`apps/big-docinfo`](apps/big-docinfo) | O comando `big-docinfo`: sugere um nome para um documento a partir do que ele diz e o renomeia sem sobrescrever. |
 | [`crates/foundation/big-docinfo`](crates/foundation/big-docinfo) | Lê o tipo, a data, o autor e as frases principais de um documento a partir do texto, sem modelo. |
 
-`cargo build` compila só o daemon; use `--workspace` para incluir a página de
-configurações.
+`cargo build` compila só o daemon; use `--workspace` para incluir o
+`big-docinfo` e as bibliotecas. A janela de configurações que edita o
+`config.toml` pertence ao [BigDesktop](https://github.com/biglinux/big),
+que usa as duas bibliotecas acima deste repositório.
 
 ## Contribuir
 
