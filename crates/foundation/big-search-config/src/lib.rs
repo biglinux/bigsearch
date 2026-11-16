@@ -14,8 +14,13 @@
 //! from a tool the person started. The file is theirs and a running service
 //! may read it at any moment, so:
 //!
-//! * Comments and layout survive a change. A setting is rewritten in place, and
-//!   only a setting that was not there yet is appended.
+//! * Comments, layout and line endings survive a change. A setting is
+//!   rewritten in place, and only a setting that was not there yet is appended.
+//! * A file that does not parse is refused, never edited: rewriting it would
+//!   drop the person's folders and settings, and editing lines the parser
+//!   rejects could write a second block for one folder.
+//! * Writers take a lock beside the file, so the settings window and
+//!   `big-search config` writing at once keep both changes.
 //! * The write is atomic (a temporary file beside the real one, then a rename
 //!   over it), so a reader sees the old file or the new one, never half of
 //!   each. A symbolic link is written through to its target, and the file keeps
@@ -42,9 +47,13 @@ use serde::Deserialize;
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct SearchConfig {
+    /// The `[defaults]` block.
     pub defaults: Defaults,
+    /// The `[origin]` block.
     pub origin: Origin,
+    /// The `[history]` block.
     pub history: FileHistory,
+    /// The `[[source]]` blocks, in file order. None means the home folder.
     #[serde(rename = "source")]
     pub sources: Vec<SourceEntry>,
 }
@@ -65,6 +74,7 @@ pub struct Defaults {
     /// Names only, whatever else is set. The one switch that turns off all
     /// reading of file contents.
     pub names_only: bool,
+    /// How much detail the content index keeps per word.
     pub content_index_mode: ContentIndexMode,
     /// Most text kept per file, in MiB. 0 chooses by the size of the machine.
     pub extract_max_mb: u64,
@@ -74,12 +84,14 @@ pub struct Defaults {
     pub office_max_mb: u64,
     /// Largest PDF read, in MiB. 0 reads any size.
     pub pdf_max_mb: u64,
+    /// Longest one PDF may take to read, in seconds, before it is skipped.
     pub pdf_timeout_secs: u64,
     /// How long a changed file is left alone before its text is read again, so
     /// a document being edited is not re-read on every save.
     pub content_cooldown_secs: u64,
     /// Also index the folders a symbolic link in the home folder points at.
     pub follow_symlinks: bool,
+    /// Which link targets `follow_symlinks` follows.
     pub symlink_policy: SymlinkPolicy,
 }
 
@@ -182,16 +194,22 @@ pub fn history_budget_bytes(configured_gib: u64, disk_bytes: u64) -> u64 {
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ContentIndexMode {
-    /// Decide by the size of the machine.
-    #[default]
-    Auto,
     /// Which files hold the word, and nothing else. Smallest index.
     Basic,
     /// How often each word appears too, which ranks results better.
     Freqs,
+    /// Decide by the size of the machine.
+    ///
+    /// Also what a value this build does not know reads as, so a choice another
+    /// build added does not cost the rest of `[defaults]`; serde wants that
+    /// variant last.
+    #[default]
+    #[serde(other)]
+    Auto,
 }
 
 impl ContentIndexMode {
+    /// The value written in the file.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -201,6 +219,8 @@ impl ContentIndexMode {
         }
     }
 
+    /// Reads a value from the file or the command line, ignoring case and
+    /// accepting the aliases. `None` for an unknown one.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -216,20 +236,35 @@ impl ContentIndexMode {
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SymlinkPolicy {
-    #[default]
-    PersonalLocal,
+    /// Follow a link to any local folder. Network and virtual file systems are
+    /// still skipped.
     LocalExact,
+    /// Follow a link only to a local folder that looks like the person's own
+    /// data, such as the documents of another system's user.
+    ///
+    /// Also what a value this build does not know reads as; serde wants that
+    /// variant last.
+    #[default]
+    #[serde(other)]
+    PersonalLocal,
 }
 
 /// One `[[source]]` block: a folder to catalogue, and what to read in it.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SourceEntry {
+    /// The folder.
     pub path: PathBuf,
+    /// The name shown for the folder. Without one, the disk label or the
+    /// folder's own name.
     pub name: Option<String>,
+    /// Overrides [`Defaults::content`] for this folder.
     pub content: Option<bool>,
+    /// Overrides [`Defaults::metadata`] for this folder.
     pub metadata: Option<bool>,
+    /// Overrides [`Defaults::follow_symlinks`] for this folder.
     pub follow_symlinks: Option<bool>,
+    /// Overrides [`Defaults::symlink_policy`] for this folder.
     pub symlink_policy: Option<SymlinkPolicy>,
     /// A disk that comes and goes. Its catalogue is kept while it is unplugged.
     pub removable: bool,
@@ -556,33 +591,43 @@ pub fn set_history(values: &[(&str, &str)]) -> io::Result<()> {
 ///
 /// # Errors
 ///
-/// When the file cannot be written.
+/// When the file cannot be read or written.
 pub fn add_source(source: &SourceEntry) -> io::Result<()> {
-    let existing = read();
-    if existing.sources.iter().any(|kept| kept.path == source.path) {
-        return Ok(());
-    }
     edit(|lines| {
-        // No `[[source]]` means the home folder alone; adding a folder must keep
-        // it, unless the folder is home itself.
-        if existing.sources.is_empty() && source.path != home_dir() {
-            append_source(lines, &SourceEntry::new(home_dir()));
-        }
-        append_source(lines, source);
+        add_source_to(lines, source, &home_dir());
         Ok(())
     })
 }
 
-/// Take a folder out of the catalogue.
+/// Decided on the lines read under the write lock, so a folder another writer
+/// added a moment ago is not added twice.
+fn add_source_to(lines: &mut Vec<String>, source: &SourceEntry, home: &Path) {
+    if find_source(lines, &source.path).is_some() {
+        return;
+    }
+    // No `[[source]]` means the home folder alone; adding a folder must keep
+    // it, unless the folder is home itself.
+    if lists_no_source(lines) && source.path != home {
+        append_source(lines, &SourceEntry::new(home));
+    }
+    append_source(lines, source);
+}
+
+fn lists_no_source(lines: &[String]) -> bool {
+    lines.iter().all(|line| header(line) != Some("[[source]]"))
+}
+
+/// Take a folder out of the catalogue. A folder the file does not list is
+/// out already, so the request holds and the file is left as it was.
 ///
 /// # Errors
 ///
-/// [`io::ErrorKind::NotFound`] when the file has no `[[source]]` for `path`;
-/// otherwise when the file cannot be read or written.
+/// When the file cannot be read or written.
 pub fn remove_source(path: &Path) -> io::Result<()> {
     edit(|lines| {
-        let block = find_source(lines, path).ok_or_else(|| missing_source(path))?;
-        lines.drain(block);
+        if let Some(block) = find_source(lines, path) {
+            lines.drain(block);
+        }
         Ok(())
     })
 }
@@ -597,23 +642,34 @@ pub fn remove_source(path: &Path) -> io::Result<()> {
 /// [`io::ErrorKind::NotFound`] when the file has no `[[source]]` for `path`;
 /// otherwise when the file cannot be read or written.
 pub fn set_source_content(path: &Path, content: bool) -> io::Result<()> {
-    let literal = if content { "true" } else { "false" };
-    let implicit_home = read().sources.is_empty() && path == home_dir();
     edit(|lines| {
-        if implicit_home {
-            append_source(
-                lines,
-                &SourceEntry {
-                    content: Some(content),
-                    ..SourceEntry::new(home_dir())
-                },
-            );
-            return Ok(());
+        if set_content_in(lines, path, &home_dir(), content) {
+            Ok(())
+        } else {
+            Err(missing_source(path))
         }
-        let block = find_source(lines, path).ok_or_else(|| missing_source(path))?;
-        upsert_line(lines, block.start + 1, block.end, "content", literal);
-        Ok(())
     })
+}
+
+/// Set `content` in the block for `path`, reporting whether there was one.
+/// Decided on the lines read under the write lock, like [`add_source`].
+fn set_content_in(lines: &mut Vec<String>, path: &Path, home: &Path, content: bool) -> bool {
+    if let Some(block) = find_source(lines, path) {
+        let literal = if content { "true" } else { "false" };
+        upsert_line(lines, block.start + 1, block.end, "content", literal);
+        return true;
+    }
+    if lists_no_source(lines) && path == home {
+        append_source(
+            lines,
+            &SourceEntry {
+                content: Some(content),
+                ..SourceEntry::new(home)
+            },
+        );
+        return true;
+    }
+    false
 }
 
 fn missing_source(path: &Path) -> io::Error {
@@ -627,17 +683,35 @@ fn missing_source(path: &Path) -> io::Error {
     )
 }
 
-/// A string as TOML writes it.
+/// A string as TOML writes it, on one line: control characters are escaped.
 #[must_use]
 pub fn string_literal(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => literal.push_str("\\\""),
+            '\\' => literal.push_str("\\\\"),
+            control if control.is_control() => {
+                literal.push_str(&format!("\\u{:04X}", u32::from(control)));
+            }
+            other => literal.push(other),
+        }
+    }
+    literal.push('"');
+    literal
 }
 
 /// Read the file, hand its lines to `change`, and put it back atomically.
 ///
 /// Only a missing file reads as empty: any other read error (permissions, bytes
-/// that are not UTF-8) is returned before anything is written, so the person's
-/// file is never replaced by one holding only the new setting.
+/// that are not UTF-8) and a file that does not parse are returned before
+/// anything is written, so the person's file is never replaced by one holding
+/// only the new setting.
+///
+/// The read, the change and the rename happen under a lock on a file beside
+/// the config, so two writers at once keep both changes. The lines keep the
+/// file's own line ending.
 fn edit(change: impl FnOnce(&mut Vec<String>) -> io::Result<()>) -> io::Result<()> {
     edit_file(&path(), change)
 }
@@ -656,14 +730,50 @@ fn edit_file(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path(&path))?;
+    lock.lock()?;
     let (text, permissions) = match std::fs::read_to_string(&path) {
         Ok(text) => (text, Some(std::fs::metadata(&path)?.permissions())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => (String::new(), None),
         Err(error) => return Err(error),
     };
+    if let Err(error) = parse(&text) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, error));
+    }
+    // The rename would replace a file somebody made read-only, so its mode is
+    // the refusal the write itself never meets.
+    if permissions
+        .as_ref()
+        .is_some_and(std::fs::Permissions::readonly)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the search settings file is read-only",
+        ));
+    }
+    let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     change(&mut lines)?;
-    write_atomically(&path, &format!("{}\n", lines.join("\n")), permissions)
+    write_atomically(
+        &path,
+        &format!("{}{ending}", lines.join(ending)),
+        permissions,
+    )
+}
+
+/// The lock beside the file a link points at, so two names for one config
+/// share one lock. It is never removed: a writer waiting on a removed lock
+/// would hold a lock nobody else sees.
+fn lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    path.with_file_name(format!(".{name}.lock"))
 }
 
 /// Write beside the file and rename over it, keeping `permissions` when the
@@ -673,23 +783,36 @@ fn edit_file(
 /// a reader either sees the old configuration or the new one and never half of
 /// each, including the reader that is a running service. There is no fsync:
 /// this is program state, and losing the last change to a power cut costs
-/// repeating it.
+/// repeating it. The temporary name is unique per writer and created new, so
+/// no writer ever writes into another's.
 fn write_atomically(
     path: &Path,
     text: &str,
     permissions: Option<std::fs::Permissions>,
 ) -> io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static WRITES: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().unwrap_or(Path::new("."));
     let temporary = parent.join(format!(
-        ".{}.new",
+        ".{}.{}.{}.new",
         path.file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("config.toml")
+            .unwrap_or("config.toml"),
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
     ));
-    let written = std::fs::write(&temporary, text)
-        .and_then(|()| match permissions {
-            Some(permissions) => std::fs::set_permissions(&temporary, permissions),
-            None => Ok(()),
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            match permissions {
+                Some(permissions) => file.set_permissions(permissions),
+                None => Ok(()),
+            }
         })
         .and_then(|()| std::fs::rename(&temporary, path));
     if written.is_err() {

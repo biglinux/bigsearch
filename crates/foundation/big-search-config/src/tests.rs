@@ -202,3 +202,176 @@ fn the_budget_fits_the_disk() {
     assert_eq!(history_budget_bytes(2, 2000 * GIB), 2 * GIB);
     assert_eq!(history_budget_bytes(0, 20 * GIB), GIB);
 }
+
+/// A choice another build added reads as the default, and leaves the rest of
+/// the file, its folders included, as written.
+#[test]
+fn unknown_choice_keeps_the_rest() {
+    let config = parse(
+        r#"
+        [defaults]
+        names_only = true
+        content_index_mode = "positional"
+
+        [[source]]
+        path = "/srv/fotos"
+        symlink_policy = "everywhere"
+        "#,
+    )
+    .expect("the file reads");
+    assert!(config.defaults.names_only);
+    assert_eq!(
+        config.defaults.content_index_mode,
+        ContentIndexMode::default()
+    );
+    assert_eq!(config.sources[0].path, PathBuf::from("/srv/fotos"));
+    assert_eq!(
+        config.sources[0].symlink_policy,
+        Some(SymlinkPolicy::default())
+    );
+}
+
+/// A folder whose name needs escaping in the file is still found.
+#[test]
+fn an_escaped_folder_path_is_found() {
+    let path = Path::new("/mnt/a \"quoted\" \\ disk");
+    let mut lines = Vec::new();
+    append_source(&mut lines, &SourceEntry::new(path));
+    assert!(find_source(&lines, path).is_some(), "{lines:?}");
+}
+
+/// A line break or another control character in a folder name stays inside
+/// its one line of TOML.
+#[test]
+fn control_characters_stay_valid_toml() {
+    let path = Path::new("/home/u/notes\nold\u{1}\u{7f}\ttab");
+    let mut lines = Vec::new();
+    append_source(&mut lines, &SourceEntry::new(path));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let config = parse(&lines.join("\n")).unwrap();
+    assert_eq!(config.sources[0].path, path);
+    assert!(find_source(&lines, path).is_some());
+}
+
+/// The home folder a file without folders stands for gets its own block.
+#[test]
+fn implicit_home_gets_written() {
+    let mut lines = vec!["[defaults]".to_owned(), "content = true".to_owned()];
+    let home = Path::new("/home/p");
+    assert!(set_content_in(&mut lines, home, home, false));
+    let parsed = read_text(&lines.join("\n"));
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(parsed.sources[0].path, home);
+    assert_eq!(parsed.sources[0].content, Some(false));
+}
+
+/// A folder the file does not list is not added back.
+#[test]
+fn unlisted_folder_is_refused() {
+    let mut lines = vec!["[[source]]".to_owned(), "path = \"/mnt/disk\"".to_owned()];
+    let before = lines.clone();
+    assert!(!set_content_in(
+        &mut lines,
+        Path::new("/home/p"),
+        Path::new("/home/p"),
+        true
+    ));
+    assert_eq!(lines, before);
+}
+
+/// The first folder added brings the home folder with it, once.
+#[test]
+fn first_folder_keeps_home() {
+    let home = Path::new("/home/p");
+    let mut lines = vec!["[defaults]".to_owned()];
+    add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), home);
+    add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), home);
+    let parsed = read_text(&lines.join("\n"));
+    assert_eq!(
+        parsed.sources,
+        vec![SourceEntry::new(home), SourceEntry::new("/mnt/disk")]
+    );
+}
+
+fn scratch_file(name: &str, text: &str) -> (PathBuf, PathBuf) {
+    let dir = scratch(name);
+    let file = dir.join("config.toml");
+    std::fs::write(&file, text).unwrap();
+    (dir, file)
+}
+
+/// A file that does not parse is not edited: a folder added to it could land
+/// as a second block for one folder, or the rewrite could drop the rest.
+#[test]
+fn broken_file_refuses_new_folder() {
+    let original = "[[source]]\npath = \"/home/p\"\ncontent = = true\n";
+    let (dir, file) = scratch_file("broken", original);
+    let result = edit_file(&file, |lines| {
+        add_source_to(lines, &SourceEntry::new("/mnt/new"), Path::new("/home/p"));
+        Ok(())
+    });
+    let left = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert_eq!(left, original);
+}
+
+/// A file somebody made read-only is not replaced by the rename.
+#[test]
+fn read_only_file_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let original = "[defaults]\ncontent = true\n";
+    let (dir, file) = scratch_file("read-only", original);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let result = edit_file(&file, |lines| {
+        set_in_table(lines, "[defaults]", &[("content", "false")]);
+        Ok(())
+    });
+    let left = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(left, original);
+}
+
+/// Two writers at once keep each other's changes.
+#[test]
+fn concurrent_writers_keep_both() {
+    let (dir, file) = scratch_file("concurrent", "[defaults]\n");
+    let writers: Vec<_> = ["a", "b"]
+        .into_iter()
+        .map(|prefix| {
+            let file = file.clone();
+            std::thread::spawn(move || {
+                for index in 0..40 {
+                    let key = format!("{prefix}{index}");
+                    edit_file(&file, |lines| {
+                        set_in_table(lines, "[defaults]", &[(key.as_str(), "1")]);
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let table: toml::Table = toml::from_str(&text).unwrap();
+    assert_eq!(table["defaults"].as_table().unwrap().len(), 80, "{text}");
+}
+
+/// A file written with Windows line endings keeps them.
+#[test]
+fn crlf_file_stays_crlf() {
+    let (dir, file) = scratch_file("crlf", "# mine\r\n[defaults]\r\ncontent = true\r\n");
+    edit_file(&file, |lines| {
+        set_in_table(lines, "[defaults]", &[("content", "false")]);
+        Ok(())
+    })
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(text, "# mine\r\n[defaults]\r\ncontent = false\r\n");
+}
