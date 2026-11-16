@@ -618,7 +618,7 @@ fn daemon_capabilities() -> Vec<String> {
     // `filter.mime` (a type or `major/*`) is answered, and hits carry `mime`.
     capabilities.push("mime-filter".to_string());
     // `filter.kind` keeps folders or files.
-    capabilities.push("kind-filter".to_string());
+    capabilities.push(big_indexd_client::KIND_FILTER.to_string());
     // The `rescan` command.
     capabilities.push("rescan".to_string());
     capabilities

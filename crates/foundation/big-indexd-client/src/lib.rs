@@ -1,9 +1,9 @@
 //! Client and wire types for the big-indexd (big-search) Unix-socket protocol.
 //!
-//! This crate is tiny (`serde` and `std` only, no Tantivy), so GUI
-//! consumers (big-shell, big-filemanager) link a few KB and never pull the index
-//! engine. The daemon (`big-search`) depends on these same types, so the wire
-//! format cannot drift between server and client.
+//! `serde` and `std` only, so graphical clients (the desktop, the file manager)
+//! never link the index engine. The daemon (`big-search`) depends on these same
+//! types, so the wire format cannot drift between server and client; the
+//! crate's `README.md` states the contract.
 //!
 //! ```rust,no_run
 //! # use std::io::{BufRead, BufReader, Write};
@@ -30,6 +30,7 @@
 //! # std::fs::remove_file(socket_path).ok();
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+
 use serde::{Deserialize, Serialize};
 use std::io;
 
@@ -43,13 +44,13 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// How many candidates the daemon considers before filtering and paging.
 ///
 /// Part of the wire contract rather than an implementation detail of the daemon,
-/// because in every mode but `list` and `largest` [`QueryOutcome::total`] is
-/// capped at it, so a caller cannot tell an exact count from a floor without
-/// knowing this number. A total below it is how many matched, within what
-/// [`QueryOutcome::total`] says about paged counts; a total equal to it means
-/// "this many, and possibly far more", and a surface that prints it as an exact
-/// figure is stating something nobody established. A `list` or `largest` page
-/// is also at most this long.
+/// because in every mode but `list` and `largest` [`QueryOutcome::total`] is capped at it,
+/// so a caller cannot tell an exact count from a floor without knowing this
+/// number. A total below it is how many matched, within what
+/// [`QueryOutcome::total`] says about paged counts; a total equal to it means "this
+/// many, and possibly far more", and a surface that prints it as an exact figure
+/// is stating something nobody established. A `list` or `largest` page is also at
+/// most this long.
 pub const CANDIDATE_CEILING: usize = 5_000;
 
 /// Short origin/provenance summary attached to visible hits only when requested.
@@ -64,18 +65,28 @@ pub struct OriginSummary {
 /// Full origin/provenance detail for a single path.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, Eq)]
 pub struct OriginProvenance {
+    /// How the file arrived: `web_download`, `removable_copy`,
+    /// `network_copy`, `local_copy`, `moved_or_renamed`, `app_created` or
+    /// `derived_file`. The service may send others; a reader shows nothing
+    /// for a kind it does not know.
     pub kind: String,
     pub confidence: u8,
     pub label: String,
+    /// When the service first recorded the file, in seconds since 1970; 0
+    /// when unknown.
     pub first_seen_at: i64,
+    /// The program that made the file, for `app_created`.
     #[serde(default)]
     pub source_app: Option<String>,
+    /// The file it was copied, moved or taken out of.
     #[serde(default)]
     pub source_path: Option<String>,
     #[serde(default)]
     pub source_device_id: Option<String>,
+    /// The name of the disk or network computer it was copied from.
     #[serde(default)]
     pub source_device_label: Option<String>,
+    /// The site it was downloaded from, for `web_download`.
     #[serde(default)]
     pub source_domain: Option<String>,
 }
@@ -94,13 +105,14 @@ impl From<OriginProvenance> for OriginSummary {
 /// Which index a hit was found through, so a GUI can explain a result whose
 /// filename does not contain the query at all.
 ///
-/// The daemon learns this while it merges the two searches in `search_both`.
-/// Carrying it costs a single tag on a hit that already exists: no larger
-/// index, no token positions, no stored bodies and no extra query.
+/// The daemon knows this while it merges the two searches in `search_both`.
+/// Passing it on costs no larger
+/// index, no token positions, no stored bodies and no extra query: it is a
+/// single tag on a hit that already exists.
 ///
 /// `Body` does not mean "found in the document text": the content index also
-/// holds extracted metadata and tags, so the claim is that the match came from
-/// inside the file rather than from its name.
+/// holds extracted metadata and tags, so all it claims is that the match came
+/// from inside the file rather than from its name.
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchKind {
@@ -117,7 +129,9 @@ pub enum MatchKind {
 /// One search result, with metadata the daemon resolved so the GUI never stats.
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Hit {
+    /// Absolute path of the file.
     pub path: String,
+    /// The file name, without its folder.
     pub name: String,
     #[serde(default)]
     pub score: f32,
@@ -153,19 +167,24 @@ pub struct Hit {
 /// Server-side result filter. `under`/`ext` are path-only; `mime` takes exact
 /// types or `major/*` groups (daemons with the `mime-filter` capability);
 /// `mtime`/`size` are inclusive `[min, max]` ranges; `kind` keeps folders or
-/// everything else (daemons with the `kind-filter` capability).
+/// everything else (daemons with the [`KIND_FILTER`] capability).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Filter {
     /// Only paths inside this folder, at any depth; the folder itself is not
     /// inside it. `/` holds everything.
     #[serde(default)]
     pub under: Option<String>,
+    /// Only these extensions, lowercase without the dot; empty for any.
     #[serde(default)]
     pub ext: Vec<String>,
+    /// Only these MIME types (`application/pdf`) or groups (`image/*`);
+    /// empty for any.
     #[serde(default)]
     pub mime: Vec<String>,
+    /// Only modification times in `[from, to]`, epoch seconds.
     #[serde(default)]
     pub mtime: Option<[i64; 2]>,
+    /// Only sizes in `[from, to]`, bytes.
     #[serde(default)]
     pub size: Option<[u64; 2]>,
     /// Left out when `None`, so a request without it reads the same to a
@@ -179,16 +198,23 @@ pub struct Filter {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
+    /// A folder.
     Folder,
     /// Anything that is not a folder.
     File,
 }
 
+/// The [`Status::capabilities`] entry of a daemon that answers
+/// [`Filter::kind`].
+pub const KIND_FILTER: &str = "kind-filter";
+
 /// Page window for virtual scrolling.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Page {
+    /// How many results to skip, from the first.
     #[serde(default)]
     pub offset: usize,
+    /// The most results to return; 50 when the field is absent.
     #[serde(default = "default_page_limit")]
     pub limit: usize,
 }
@@ -209,6 +235,7 @@ impl Default for Page {
 /// One page of results plus scrollbar context.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct QueryOutcome {
+    /// The results on this page, at most [`Page::limit`] of them.
     pub hits: Vec<Hit>,
     /// Matches after filtering.
     ///
@@ -222,10 +249,10 @@ pub struct QueryOutcome {
     ///
     /// In the `list` and `largest` modes without a `mime` or `kind` filter it
     /// is the exact number of catalogued files matching the filter, and may
-    /// exceed the ceiling; hits come newest modification (`list`) or largest
-    /// size (`largest`) first, and every match is reachable by paging with
-    /// `next_offset`. A client that reads a total at or above the ceiling as
-    /// "at least this many" is still right. With a `mime` or `kind` filter,
+    /// exceed the ceiling; hits come newest modification (`list`) or largest size
+    /// (`largest`) first and every match is reachable by paging
+    /// with `next_offset`. A client that reads a total at or above the ceiling
+    /// as "at least this many" is still right. With a `mime` or `kind` filter,
     /// both are unordered and capped like the other modes.
     ///
     /// Files deleted since they were indexed are counted in every mode, so a
@@ -236,7 +263,7 @@ pub struct QueryOutcome {
     pub next_offset: Option<usize>,
     /// Approximate number of recently-changed files whose content is not yet
     /// (re-)extracted. `> 0` on a content/both query means results may be
-    /// incomplete; the daemon has already been nudged to extract them, so a
+    /// incomplete: the daemon has already been nudged to extract them, so a
     /// retry shortly will see them ("loading" hint for UIs).
     #[serde(default)]
     pub content_pending: u64,
@@ -250,32 +277,50 @@ pub struct Request {
     pub body: RequestBody,
 }
 
+/// One command and its fields; the variant's name in snake case is `cmd` on
+/// the wire.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum RequestBody {
+    /// Search, or list what a filter keeps.
     Query(QueryRequest),
+    /// The full origin of one file.
     Origin(OriginRequest),
+    /// A program copied a file.
     RegisterCopy(RegisterCopyRequest),
+    /// A program moved or renamed a file.
     RegisterMove(RegisterMoveRequest),
+    /// A program made a new file.
     RegisterCreated(RegisterCreatedRequest),
+    /// A program made a file out of another, as an archive extracted.
     RegisterDerived(RegisterDerivedRequest),
+    /// How big the index is and what the daemon is doing.
     Status,
+    /// Stop indexing; queries keep answering from the current index.
     Pause,
+    /// Index again, catching up on what changed while paused.
     Resume,
     /// Reconcile the sources with the catalogue without resuming: refused
     /// while indexing is paused.
     Rescan,
+    /// Read every catalogued folder from the start.
     Rebuild,
+    /// Index one path again.
     Reindex(ReindexRequest),
     /// Which directories this daemon catalogues. See [`IndexedRoot`].
     Sources,
-    /// Forget every recorded file origin. Done by the daemon because it holds
-    /// the database open; unlinking the file would orphan its writes.
+    /// Forget every recorded file origin.
+    ///
+    /// Done by the daemon rather than by deleting the file: the daemon holds an
+    /// open write-ahead connection to that database, and a client that unlinked
+    /// the file would leave it writing into an inode nobody can read.
     ClearOrigin,
     /// The earlier versions kept for one document.
     Versions(PathRequest),
-    /// Keep the state a document is in right now, e.g. before restoring an
-    /// older version, so the restore can be undone.
+    /// Keep the state a document is in right now.
+    ///
+    /// What a file manager asks for just before putting an older version back,
+    /// so changing one's mind about that is possible too.
     SaveVersion(PathRequest),
     /// Forget the versions of one document.
     ForgetVersions(PathRequest),
@@ -295,6 +340,7 @@ pub struct FileVersion {
     pub id: i64,
     /// When it was kept, in seconds since 1970.
     pub saved_at: i64,
+    /// Its size in bytes.
     pub size: u64,
     /// `baseline`, `saved` or `before_restore`.
     pub reason: String,
@@ -312,6 +358,7 @@ pub struct ReindexRequest {
     pub path: String,
 }
 
+/// The fields of [`RequestBody::Query`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryRequest {
     pub q: String,
@@ -334,11 +381,13 @@ fn default_mode() -> String {
     "name".to_string()
 }
 
+/// The fields of [`RequestBody::Origin`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OriginRequest {
     pub path: String,
 }
 
+/// The fields of [`RequestBody::RegisterCopy`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterCopyRequest {
     pub src: String,
@@ -347,6 +396,7 @@ pub struct RegisterCopyRequest {
     pub app_id: Option<String>,
 }
 
+/// The fields of [`RequestBody::RegisterMove`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterMoveRequest {
     pub src: String,
@@ -355,6 +405,7 @@ pub struct RegisterMoveRequest {
     pub app_id: Option<String>,
 }
 
+/// The fields of [`RequestBody::RegisterCreated`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterCreatedRequest {
     pub path: String,
@@ -362,6 +413,7 @@ pub struct RegisterCreatedRequest {
     pub app_id: Option<String>,
 }
 
+/// The fields of [`RequestBody::RegisterDerived`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterDerivedRequest {
     pub src: String,
@@ -370,51 +422,82 @@ pub struct RegisterDerivedRequest {
     pub app_id: Option<String>,
 }
 
-/// A versioned reply; `kind` discriminates.
+/// A versioned reply; `kind` discriminates. Each carries `v`, the protocol
+/// version the daemon speaks.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reply {
+    /// The answer to [`RequestBody::Query`].
     Query {
+        /// Protocol version.
         v: u32,
+        /// The page of results.
         #[serde(flatten)]
         outcome: QueryOutcome,
     },
+    /// The answer to [`RequestBody::Status`]; [`Status`] says what each field
+    /// holds.
     Status {
+        /// Protocol version.
         v: u32,
+        /// Entries in the catalogue.
         indexed: u64,
+        /// Indexing is paused.
         paused: bool,
+        /// What the daemon is doing; empty from a daemon that does not say.
         #[serde(default)]
         activity: String,
+        /// Optional features this daemon answers, such as [`KIND_FILTER`].
         #[serde(default)]
         capabilities: Vec<String>,
+        /// Files whose content is still waiting to be read.
         #[serde(default)]
         pending_content: u64,
+        /// Documents in the content index.
         #[serde(default)]
         content_docs: u64,
+        /// Bytes the name index takes on disk.
         #[serde(default)]
         name_index_bytes: u64,
+        /// Bytes the content index takes on disk.
         #[serde(default)]
         content_index_bytes: u64,
+        /// Folders the daemon could not watch.
         #[serde(default)]
         unwatched_dirs: u64,
     },
+    /// The answer to [`RequestBody::Origin`].
     Origin {
+        /// Protocol version.
         v: u32,
+        /// The file's origin; `None` when none is recorded.
         origin: Option<OriginProvenance>,
     },
+    /// A command that returns nothing was carried out.
     Ok {
+        /// Protocol version.
         v: u32,
     },
+    /// The daemon refused the request; the client returns
+    /// [`ClientError::Daemon`].
     Error {
+        /// Protocol version.
         v: u32,
+        /// Why, in the daemon's words.
         message: String,
     },
+    /// The answer to [`RequestBody::Sources`].
     Sources {
+        /// Protocol version.
         v: u32,
+        /// Every catalogued directory.
         roots: Vec<IndexedRoot>,
     },
+    /// The answer to [`RequestBody::Versions`].
     Versions {
+        /// Protocol version.
         v: u32,
+        /// The versions kept, newest first.
         versions: Vec<FileVersion>,
         /// Why this machine keeps no versions, when it keeps none: `disabled`,
         /// `no_reflink`, `old_kernel`, `live_session`. Empty when it does.
@@ -429,8 +512,11 @@ pub enum Reply {
 
 /// Why a machine keeps no earlier versions of documents, when it keeps none.
 ///
-/// An enum shared by daemon and clients so a new reason is a compile error in
-/// every screen that explains it, not a silent catch-all.
+/// An enum shared by daemon and clients because each value is a different
+/// sentence on three screens: the file manager's history tab, the search
+/// settings, and the command line. As a bare string those three all ended in a
+/// catch-all arm, so a reason added later showed up as "not kept on this
+/// computer" everywhere; a variant added here is a compile error in all three.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unavailable {
     /// The person turned it off.
@@ -479,13 +565,16 @@ impl Unavailable {
 /// What the daemon knows about one document's earlier versions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionsAnswer {
+    /// The versions kept, newest first.
     pub versions: Vec<FileVersion>,
     /// Why nothing is kept on this machine. `None` when versions are kept.
     pub unavailable: Option<Unavailable>,
+    /// The disk got too full, so new versions are not being kept.
     pub paused_for_space: bool,
 }
 
-/// One directory the daemon catalogues.
+/// One directory the daemon catalogues, as a caller standing in a folder needs
+/// to hear it.
 ///
 /// This exists so a file manager can tell "the index has nothing matching here"
 /// apart from "the index has never looked here": two states that produce the
@@ -515,9 +604,15 @@ pub struct IndexedRoot {
 /// Index daemon status: catalog size plus current background activity.
 #[derive(Clone, Debug)]
 pub struct Status {
+    /// Entries in the catalogue: files and folders.
     pub indexed: u64,
+    /// Indexing is paused; queries still answer.
     pub paused: bool,
+    /// What the daemon is doing, in its own words; `paused` or `indexing`
+    /// from a daemon that does not say.
     pub activity: String,
+    /// Optional features this daemon answers, such as [`KIND_FILTER`]: a
+    /// request field it does not list is ignored by it.
     pub capabilities: Vec<String>,
     /// Recently-changed files whose content extraction is still deferred.
     pub pending_content: u64,
