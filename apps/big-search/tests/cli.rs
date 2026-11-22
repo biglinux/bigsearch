@@ -161,3 +161,34 @@ fn file_names_print_without_control_characters() {
     }
     fs::remove_dir_all(&base).ok();
 }
+
+/// An error exits 1; a search with no hits is no error.
+#[test]
+fn exit_status_tells_error_from_empty() {
+    let base = scratch::scratch_dir("bs-cli-exit");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&xdg_storage_home).unwrap();
+    run(
+        &home,
+        &xdg_storage_home,
+        &["reindex", home.to_str().unwrap()],
+    );
+    let status = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_big-search"))
+            .args(args)
+            .env("RUST_LOG", "off")
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", &xdg_storage_home)
+            .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
+            .env("XDG_RUNTIME_DIR", xdg_storage_home.join("run"))
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    assert_eq!(status(&["nothing-matches-this"]), Some(0));
+    assert_eq!(status(&["config", "set", "no-such-key", "1"]), Some(1));
+    fs::remove_dir_all(&base).ok();
+}

@@ -74,7 +74,8 @@ big-search origin ~/Downloads/file.zip  # where a file came from
 ```
 
 Queries go to the daemon when it is running and read the index directly
-otherwise. `big-search --help` lists every command. Output is colored on a
+otherwise. The exit status is 0 on success, a search with no hits included, and
+1 on any error. `big-search --help` lists every command. Output is colored on a
 terminal; `--color never`, `NO_COLOR` and `CLICOLOR` are honored.
 
 ## Configuration

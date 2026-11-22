@@ -148,3 +148,9 @@ fn report_escapes_control_characters() {
     assert!(!text.contains(['\u{1b}', '\u{7}']), "{text:?}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Arguments that name no command exit 2, as the README's table says.
+#[test]
+fn usage_error_exits_two() {
+    assert_eq!(run(&["--bogus", "x", "y"]).status.code(), Some(2));
+}
