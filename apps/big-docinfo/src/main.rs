@@ -97,8 +97,12 @@ fn describe(path: &Path, output: Output) -> Result<()> {
         }
         Output::Name => println!("{free}"),
         Output::Text => {
-            let show =
-                |label: &str, value: Option<&str>| println!("{label}: {}", value.unwrap_or("—"));
+            let show = |label: &str, value: Option<&str>| {
+                println!(
+                    "{label}: {}",
+                    big_search::terminal_text(value.unwrap_or("—"))
+                );
+            };
             show("Tipo", analysis.kind.map(kind_label));
             show("Data", analysis.date.as_deref());
             show("Entidade", analysis.entity.as_deref());

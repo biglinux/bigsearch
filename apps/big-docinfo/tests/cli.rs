@@ -134,3 +134,17 @@ fn uninformative_document_keeps_its_name() {
     assert_eq!(json["free_name"], "Planilha de horas.txt");
     fs::remove_dir_all(dir).expect("cleanup");
 }
+
+/// What a document says reaches the terminal with its control characters
+/// escaped.
+#[test]
+fn report_escapes_control_characters() {
+    let dir = scratch("escape");
+    let doc = dir.join("scan0002.txt");
+    fs::write(&doc, format!("\u{1b}]0;x\u{7}{CONTRACT}")).expect("write");
+    let out = run(&[arg(&doc)]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(!text.contains(['\u{1b}', '\u{7}']), "{text:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
