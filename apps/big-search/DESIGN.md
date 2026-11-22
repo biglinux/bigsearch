@@ -345,7 +345,8 @@ a wall-clock deadline (`extract_pdf::run_capped`). The text kept per file is
 capped by `extract_max_mb`; at 0, the default, the cap follows the memory the
 service may use, from 4 MiB under 3 GiB to 32 MiB from 12 GiB. Office archives
 are refused past `office_max_mb` (0 chooses 64 or 256 MiB by machine), 4096
-entries or 512 slides or sheets, and each part's decompressed size is capped.
+entries or 512 slides or sheets; each part's decompressed size is capped,
+and so is the markup read from one archive (four extraction caps).
 Plain text and PDF have optional size limits (`text_max_mb`, `pdf_max_mb`, 0 by
 default) and PDF a deadline (`pdf_timeout_secs`, 5 s).
 

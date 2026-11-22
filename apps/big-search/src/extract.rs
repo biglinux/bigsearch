@@ -397,6 +397,9 @@ fn exceeds_input_cap(path: &Path) -> bool {
 /// real documents (a heavy pptx is a few hundred), tight against a bomb.
 pub(crate) const MAX_ZIP_ENTRIES: usize = 4_096;
 
+/// Markup read from one office archive, in extraction caps.
+const ARCHIVE_MARKUP_CAPS: usize = 4;
+
 /// An office or EPUB archive, refused past [`MAX_ZIP_ENTRIES`]: `ZipArchive::new`
 /// reads the whole central directory, which a crafted file inflates to hundreds
 /// of megabytes before any per-part cap applies.
@@ -456,18 +459,24 @@ pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
     };
 
     let cap = max_extract_bytes();
+    // Markup decompressed across all parts: parts of markup with no text would
+    // otherwise each cost a full cap of parsing.
+    let mut budget = cap.saturating_mul(ARCHIVE_MARKUP_CAPS);
     let mut out = String::new();
     for part in parts {
+        if budget == 0 {
+            break;
+        }
         let Ok(mut entry) = zip_entry(&mut zip, &part) else {
             continue;
         };
         let mut xml = Vec::new();
-        if entry
+        let read = entry
             .by_ref()
-            .take(cap as u64)
-            .read_to_end(&mut xml)
-            .is_err()
-        {
+            .take(cap.min(budget) as u64)
+            .read_to_end(&mut xml);
+        budget = budget.saturating_sub(xml.len());
+        if read.is_err() {
             continue;
         }
         if part.starts_with(XLSX_SHEET_PREFIX) {

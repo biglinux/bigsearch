@@ -297,6 +297,31 @@ fn zip_entry_cap_refuses_one_more() {
     assert_eq!(docx(MAX_ZIP_ENTRIES + 1), None);
 }
 
+/// Parts are read until the archive's markup budget, four extraction caps, is
+/// spent: a part past it is not read.
+#[test]
+fn archive_markup_budget_stops_reading() {
+    let _lock = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _cap = crate::test_env::EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
+    let empty_rows = format!("<worksheet>{}</worksheet>", "<row/>".repeat(1 << 18));
+    let last = r#"<worksheet><row><c t="inlineStr"><is><t>fim</t></is></c></row></worksheet>"#;
+    let names: Vec<String> = (1..=6)
+        .map(|n| format!("xl/worksheets/sheet{n}.xml"))
+        .collect();
+    let mut parts: Vec<(&str, &str)> = names[..5]
+        .iter()
+        .map(|n| (n.as_str(), empty_rows.as_str()))
+        .collect();
+    parts.push((names[5].as_str(), last));
+    assert_eq!(
+        office_text_from_reader(office_zip(&parts[4..]), "xlsx").as_deref(),
+        Some("fim\n")
+    );
+    assert_eq!(office_text_from_reader(office_zip(&parts), "xlsx"), None);
+}
+
 #[test]
 fn docx_zip_xml_extraction() {
     let dir = temporary_extract_dir("docx");
