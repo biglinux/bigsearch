@@ -5,7 +5,7 @@
 //! the worker in `super::worker` enforces the budget and gives space back
 //! during housekeeping.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::params;
 
 use super::store::now_secs;
@@ -212,40 +212,45 @@ impl History {
     /// Throw away objects nobody claims and rows whose object is gone.
     ///
     /// A crash between the clone and the row leaves a file holding disk space
-    /// that nothing else would ever free.
+    /// that nothing else would ever free. The shards' listings answer both
+    /// questions: a lookup per version costs seconds of a cold disk at every
+    /// start. A shard that cannot be listed stops the sweep, since its versions
+    /// would otherwise read as gone.
     pub fn sweep_orphans(&mut self) -> Result<()> {
-        if self.conn.is_none() {
-            return Ok(());
-        }
-        // A set: the walk below asks "is this object known" once per file.
-        let known: std::collections::HashSet<String> =
-            self.all_object_names()?.into_iter().collect();
-        let missing_rows: Vec<&String> = known
-            .iter()
-            .filter(|name| !self.objects.join(name).exists())
-            .collect();
-        if let Some(conn) = &self.conn {
-            for name in &missing_rows {
-                conn.execute("DELETE FROM versions WHERE object = ?1", params![name])?;
-            }
-        }
-        let Ok(entries) = std::fs::read_dir(&self.objects) else {
+        let Some(conn) = &self.conn else {
             return Ok(());
         };
-        for shard in entries.flatten() {
-            let Ok(files) = std::fs::read_dir(shard.path()) else {
+        let mut known: std::collections::HashSet<String> =
+            self.all_object_names()?.into_iter().collect();
+        let shards = match std::fs::read_dir(&self.objects) {
+            Ok(shards) => Some(shards),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("list {}", self.objects.display()));
+            }
+        };
+        for shard in shards.into_iter().flatten() {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
                 continue;
-            };
-            for object in files.flatten() {
+            }
+            let objects = std::fs::read_dir(shard.path())
+                .with_context(|| format!("list {}", shard.path().display()))?;
+            for object in objects {
+                let object = object?;
                 let name = format!(
                     "{}/{}",
                     shard.file_name().to_string_lossy(),
                     object.file_name().to_string_lossy()
                 );
-                if !known.contains(name.as_str()) {
+                if !known.remove(&name) {
                     let _ = std::fs::remove_file(object.path());
                 }
             }
+        }
+        // What is left has no object on disk.
+        for name in &known {
+            conn.execute("DELETE FROM versions WHERE object = ?1", params![name])?;
         }
         Ok(())
     }

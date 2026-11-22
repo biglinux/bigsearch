@@ -173,3 +173,67 @@ fn every_object_gets_its_own_name() {
     assert_eq!(first.len(), 33, "{first}");
     assert_eq!(&first[2..3], "/");
 }
+
+fn store_with_versions(name: &str, objects: &[&str]) -> (PathBuf, History) {
+    let dir = crate::test_env::scratch_dir(name);
+    let conn = open_store(&dir.join("history.sqlite")).unwrap();
+    conn.execute(
+        "INSERT INTO files(id, current_path, created_at) VALUES (1, '/d/a.md', 0)",
+        [],
+    )
+    .unwrap();
+    for object in objects {
+        conn.execute(
+            "INSERT INTO versions(file_id, saved_at, mtime_s, mtime_ns, size, object, reason)
+             VALUES (1, 0, 0, 0, 1, ?1, 'saved')",
+            params![object],
+        )
+        .unwrap();
+    }
+    let store = store_with(conn, &dir);
+    (dir, store)
+}
+
+fn kept_objects(store: &History) -> Vec<String> {
+    let mut objects = store.all_object_names().unwrap();
+    objects.sort();
+    objects
+}
+
+/// The sweep removes what a crash left, an object without a row and a row
+/// without an object, and keeps every version whose object is in place.
+#[test]
+fn sweep_drops_only_orphans() {
+    let (dir, mut store) = store_with_versions("bs-history-sweep", &["aa/kept", "aa/lost"]);
+    let shard = dir.join("objects/aa");
+    std::fs::create_dir_all(&shard).unwrap();
+    std::fs::write(shard.join("kept"), "v1").unwrap();
+    std::fs::write(shard.join("stray"), "v0").unwrap();
+    std::fs::write(dir.join("objects/notes.txt"), "not a shard").unwrap();
+
+    store.sweep_orphans().unwrap();
+    assert_eq!(kept_objects(&store), ["aa/kept"]);
+    assert!(shard.join("kept").exists());
+    assert!(!shard.join("stray").exists());
+    assert!(dir.join("objects/notes.txt").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A shard the sweep cannot list is an error, never proof that its versions
+/// are gone: taking it for one would drop the rows, then the objects.
+#[test]
+fn unreadable_shard_keeps_versions() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, mut store) = store_with_versions("bs-history-sweep-denied", &["bb/one"]);
+    let shard = dir.join("objects/bb");
+    std::fs::create_dir_all(&shard).unwrap();
+    std::fs::write(shard.join("one"), "v1").unwrap();
+    std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let swept = store.sweep_orphans();
+    std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(swept.is_err());
+    assert_eq!(kept_objects(&store), ["bb/one"]);
+    assert!(shard.join("one").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
