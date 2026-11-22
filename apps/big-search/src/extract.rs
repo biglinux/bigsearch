@@ -826,19 +826,7 @@ fn office_xml_pages(
                 page.clear();
             }
             Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, page),
-            Ok(Event::End(e)) => match e.name().as_ref() {
-                // `si` is one string of a spreadsheet's shared string table.
-                "w:p" | "text:p" | "text:h" | "a:p" | "si" => page.push('\n'),
-                "w:tc" | "table:table-cell" => page.push('\t'),
-                _ => {}
-            },
-            Ok(Event::Empty(e)) => match e.name().as_ref() {
-                "w:br" | "w:cr" | "text:line-break" => page.push('\n'),
-                "w:tab" | "text:tab" => page.push('\t'),
-                "text:s" => page.push(' '),
-                "w:p" | "text:p" | "text:h" => page.push('\n'),
-                _ => {}
-            },
+            Ok(e @ (Event::End(_) | Event::Empty(_))) => page.extend(layout_char(&e)),
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -847,11 +835,30 @@ fn office_xml_pages(
     breaks
 }
 
-/// The strings a worksheet holds itself rather than in the shared string table:
-/// inline strings and the text results of formulas, a tab after each cell and a
-/// line per row. Numbers, booleans, errors and shared-string indexes are no
-/// text, and neither are formulas and phonetic readings. Element names are
-/// matched without their prefix, which some writers add (`x:c`).
+/// The character an element's end, or an empty element, stands for in the
+/// laid-out text: a line, a tab or a space.
+fn layout_char(event: &quick_xml::events::Event<'_>) -> Option<char> {
+    use quick_xml::events::Event;
+    match event {
+        Event::End(e) => match e.name().as_ref() {
+            // `si` is one string of a spreadsheet's shared string table.
+            "w:p" | "text:p" | "text:h" | "a:p" | "si" => Some('\n'),
+            "w:tc" | "table:table-cell" => Some('\t'),
+            _ => None,
+        },
+        Event::Empty(e) => match e.name().as_ref() {
+            "w:br" | "w:cr" | "text:line-break" | "w:p" | "text:p" | "text:h" => Some('\n'),
+            "w:tab" | "text:tab" => Some('\t'),
+            "text:s" => Some(' '),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The strings a worksheet holds itself (inline strings, text results of
+/// formulas), a tab after each cell and a line per row. Element names are
+/// matched without the prefix some writers add (`x:c`).
 fn xlsx_sheet_text(xml: &[u8], out: &mut String) {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_reader(xml);
