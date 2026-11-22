@@ -43,7 +43,7 @@ echo "  size: $(du -h "$HOME_D/docs/huge.txt" | cut -f1)"
 capped reindex "$HOME_D" >/dev/null 2>&1 && echo "  PASS (read_text stops at the extraction cap)" || echo "  FAIL exit=$? (OOM)"
 
 echo "== 4. IPC oversized line (100 MiB, no newline) =="
-env HOME="$HOME_D" XDG_DATA_HOME="$DATA_D" XDG_CONFIG_HOME="$CFG_D" XDG_RUNTIME_DIR="$RUN_D" RUST_LOG=off "$BIN" daemon >/dev/null 2>&1 &
+env HOME="$HOME_D" XDG_DATA_HOME="$DATA_D" XDG_CONFIG_HOME="$CFG_D" XDG_RUNTIME_DIR="$RUN_D" RUST_LOG=warn "$BIN" daemon >"$T/daemon.log" 2>&1 &
 DPID=$!
 SOCK="$RUN_D/biglinux/indexd.sock"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
@@ -59,5 +59,24 @@ sleep 1
 peak=$(awk '/VmHWM/{print $2}' "/proc/$DPID/status" 2>/dev/null || echo DEAD)
 echo "  daemon RSS before=${rss0} kB  peak(VmHWM) after 100MiB-no-newline=${peak} kB"
 echo "  (requests are capped at 64 KiB; a peak near 100 MB means the cap is gone)"
+
+echo "== 5. a peer of another uid (SO_PEERCRED) =="
+status='{"v":2,"cmd":"status"}'
+own=$(printf '%s\n' "$status" | timeout 5 socat - "UNIX-CONNECT:$SOCK" 2>/dev/null)
+[[ $own == *'"kind":"status"'* ]] || echo "  FAIL: the daemon does not answer its own uid"
+# Root passes the directory's 0700, so only the uid check stands in its way.
+if sudo -n true 2>/dev/null; then
+  other=$(printf '%s\n' "$status" | sudo -n timeout 5 socat - "UNIX-CONNECT:$SOCK" 2>/dev/null)
+  # The log line proves the connection reached the check, not a failed connect.
+  if [[ $other == *'"kind"'* ]]; then
+    echo "  FAIL: answered uid 0"
+  elif grep -q "rejected connection from a different uid" "$T/daemon.log"; then
+    echo "  PASS (uid 0 refused)"
+  else
+    echo "  FAIL: root's connection never reached the daemon"
+  fi
+else
+  echo "  SKIP: needs sudo without a password prompt (run sudo -v first)"
+fi
 kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 echo "DONE"
