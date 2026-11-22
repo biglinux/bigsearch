@@ -130,22 +130,6 @@ pub fn content(path: &Path) -> Option<String> {
     }
 }
 
-/// Like [`content`], but office documents keep their paragraphs as lines and their
-/// words whole. For readers that need the document's layout (`big-docinfo` looks
-/// for a title line); the search index keeps using [`content`].
-pub fn content_with_lines(path: &Path) -> Option<String> {
-    let ext = ext_of(path)?;
-    if is_office_ext(&ext) {
-        if exceeds_input_cap(path) {
-            return None;
-        }
-        let file = std::fs::File::open(path).ok()?;
-        office_text_with(std::io::BufReader::new(file), &ext, xml_text_lines)
-    } else {
-        content(path)
-    }
-}
-
 /// What `big-docinfo` reads from a file: its text with paragraphs as lines, the
 /// title its metadata declares, and the lines it sets in large type.
 pub struct Described {
@@ -155,8 +139,8 @@ pub struct Described {
     pub prominent: Vec<String>,
 }
 
-/// [`content_with_lines`] (a PDF's opening pages only), with what the file says
-/// about its own title.
+/// [`content`] (a PDF's opening pages only), with what the file says about its
+/// own title.
 pub fn described(path: &Path) -> Option<Described> {
     let ext = ext_of(path)?;
     let (text, declared_title) = match ext.as_str() {
@@ -166,7 +150,7 @@ pub fn described(path: &Path) -> Option<Described> {
             (html_text(&html), html_element(&html, "title"))
         }
         e if is_titled_ext(e) => read_titled(path, e)?,
-        _ => (content_with_lines(path)?, office_declared_title(path, &ext)),
+        _ => (content(path)?, office_declared_title(path, &ext)),
     };
     let prominent = match ext.as_str() {
         "md" | "markdown" => markdown_headings(&text),
@@ -372,8 +356,8 @@ pub(crate) fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
     text.truncate(end);
 }
 
-/// Extract text from an OOXML/ODF zip by reading its body XML part(s) and
-/// concatenating all character data. Capped + entry-scoped (zip-bomb safe).
+/// Extract text from an OOXML/ODF zip by reading its body XML part(s) as
+/// [`xml_text_lines`] lays them out. Capped + entry-scoped (zip-bomb safe).
 fn read_office(path: &Path, ext: &str) -> Option<String> {
     if exceeds_input_cap(path) {
         return None;
@@ -397,22 +381,12 @@ pub(crate) const MAX_ZIP_ENTRIES: usize = 4_096;
 /// Slides read from one pptx. Bounds both the name `Vec` and the read loop.
 const MAX_PPTX_SLIDES: usize = 512;
 
-/// Reader-based core of `read_office`: extract concatenated body text from an
-/// OOXML/ODF zip. Public so fuzz targets can drive it with arbitrary bytes
-/// (`Cursor<&[u8]>`): this is the untrusted-document parsing surface.
+/// Reader-based core of `read_office`: extract body text from an OOXML/ODF zip.
+/// Public so fuzz targets can drive it with arbitrary bytes (`Cursor<&[u8]>`):
+/// this is the untrusted-document parsing surface.
 pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
     reader: R,
     ext: &str,
-) -> Option<String> {
-    office_text_with(reader, ext, xml_text)
-}
-
-/// The capped, entry-scoped zip walk shared by both text shapes; `walk` turns one
-/// XML part into text.
-fn office_text_with<R: std::io::Read + std::io::Seek>(
-    reader: R,
-    ext: &str,
-    walk: fn(&[u8], &mut String),
 ) -> Option<String> {
     let mut zip = zip::ZipArchive::new(reader).ok()?;
 
@@ -452,7 +426,7 @@ fn office_text_with<R: std::io::Read + std::io::Seek>(
         {
             continue;
         }
-        walk(&xml, &mut out);
+        xml_text_lines(&xml, &mut out);
         if out.len() >= cap {
             truncate_to_char_boundary(&mut out, cap);
             break;
@@ -664,7 +638,7 @@ fn for_each_pptx_slide(path: &Path, on_page: &mut dyn FnMut(&str)) {
                 .read_to_end(&mut xml)
                 .is_ok()
             {
-                xml_text(&xml, &mut text);
+                xml_text_lines(&xml, &mut text);
             }
         }
         on_page(&text);
@@ -683,33 +657,13 @@ fn for_each_office_page(
     break_tag: &str,
     on_page: &mut dyn FnMut(&str),
 ) -> bool {
-    use quick_xml::events::Event;
     let Some(xml) = zip_entry_bytes(path, part) else {
         return false;
     };
-    let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
-    let mut buf = Vec::new();
     let mut page = String::new();
-    let mut run = String::new();
-    let mut breaks = 0usize;
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e) | Event::Start(e)) if is_page_break(&e, break_tag) => {
-                breaks += 1;
-                end_run(&mut run, &mut page);
-                on_page(&page);
-                page.clear();
-            }
-            Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, &mut run),
-            Ok(Event::Eof) | Err(_) => break,
-            Ok(_) => end_run(&mut run, &mut page),
-        }
-        buf.clear();
-    }
-    if breaks == 0 {
+    if office_xml_pages(&xml, Some(break_tag), &mut page, on_page) == 0 {
         return false;
     }
-    end_run(&mut run, &mut page);
     on_page(&page);
     true
 }
@@ -779,53 +733,68 @@ fn is_page_break(e: &quick_xml::events::BytesStart, break_tag: &str) -> bool {
     false
 }
 
-/// Append all XML character data from `xml` to `out`, a space between elements.
-pub fn xml_text(xml: &[u8], out: &mut String) {
-    use quick_xml::events::Event;
-    let mut reader = quick_xml::Reader::from_reader(xml);
-    let mut buf = Vec::new();
-    let mut run = String::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, &mut run),
-            Ok(Event::Eof) | Err(_) => break,
-            Ok(_) => end_run(&mut run, out),
-        }
-        buf.clear();
-    }
-    end_run(&mut run, out);
-}
-
 /// Text of an OOXML/ODF part as the document lays it out: a line per paragraph or
 /// heading, line breaks and tabs kept, and the runs of a paragraph joined as
 /// written: Word splits words across runs, so a space between runs would break
 /// them. Character and predefined entity references are decoded. Field codes,
-/// text deleted under change tracking and comments are not the document's text.
+/// text deleted under change tracking, comments and the phonetic readings of a
+/// spreadsheet's strings are not the document's text.
 pub fn xml_text_lines(xml: &[u8], out: &mut String) {
+    office_xml_pages(xml, None, out, &mut |_| {});
+}
+
+/// [`xml_text_lines`], cut into pages at `break_tag` and at `w:br w:type="page"`
+/// when a tag is given: `on_page` gets the text of each page before a break, and
+/// `page` keeps the text after the last one. Returns how many breaks there were.
+fn office_xml_pages(
+    xml: &[u8],
+    break_tag: Option<&str>,
+    page: &mut String,
+    on_page: &mut dyn FnMut(&str),
+) -> usize {
     use quick_xml::events::Event;
-    let hidden = |name: &str| matches!(name, "w:instrText" | "w:delText" | "office:annotation");
+    let hidden = |name: &str| {
+        matches!(
+            name,
+            "w:instrText" | "w:delText" | "office:annotation" | "rPh"
+        )
+    };
     let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut hidden_depth = 0usize;
+    let mut breaks = 0;
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) if hidden(e.name().as_ref()) => hidden_depth += 1,
             Ok(Event::End(e)) if hidden(e.name().as_ref()) => {
                 hidden_depth = hidden_depth.saturating_sub(1)
             }
-            Ok(Event::Text(_) | Event::GeneralRef(_) | Event::End(_) | Event::Empty(_))
-                if hidden_depth > 0 => {}
-            Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, out),
+            Ok(
+                Event::Text(_)
+                | Event::GeneralRef(_)
+                | Event::Start(_)
+                | Event::End(_)
+                | Event::Empty(_),
+            ) if hidden_depth > 0 => {}
+            Ok(Event::Empty(e) | Event::Start(e))
+                if break_tag.is_some_and(|tag| is_page_break(&e, tag)) =>
+            {
+                breaks += 1;
+                on_page(page);
+                page.clear();
+            }
+            Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, page),
             Ok(Event::End(e)) => match e.name().as_ref() {
-                "w:p" | "text:p" | "text:h" | "a:p" => out.push('\n'),
-                "w:tc" | "table:table-cell" => out.push('\t'),
+                // `si` is one string of a spreadsheet's shared string table.
+                "w:p" | "text:p" | "text:h" | "a:p" | "si" => page.push('\n'),
+                "w:tc" | "table:table-cell" => page.push('\t'),
                 _ => {}
             },
             Ok(Event::Empty(e)) => match e.name().as_ref() {
-                "w:br" | "w:cr" | "text:line-break" => out.push('\n'),
-                "w:tab" | "text:tab" => out.push('\t'),
-                "text:s" => out.push(' '),
-                "w:p" | "text:p" | "text:h" => out.push('\n'),
+                "w:br" | "w:cr" | "text:line-break" => page.push('\n'),
+                "w:tab" | "text:tab" => page.push('\t'),
+                "text:s" => page.push(' '),
+                "w:p" | "text:p" | "text:h" => page.push('\n'),
                 _ => {}
             },
             Ok(Event::Eof) | Err(_) => break,
@@ -833,6 +802,7 @@ pub fn xml_text_lines(xml: &[u8], out: &mut String) {
         }
         buf.clear();
     }
+    breaks
 }
 
 /// The text of a text event or an entity reference, appended as written.
@@ -861,17 +831,6 @@ fn push_xml_text(event: &quick_xml::events::Event<'_>, out: &mut String) {
         }
         _ => {}
     }
-}
-
-/// Move the text gathered inside one element to `out`, trimmed and followed by
-/// a space.
-fn end_run(run: &mut String, out: &mut String) {
-    let text = run.trim();
-    if !text.is_empty() {
-        out.push_str(text);
-        out.push(' ');
-    }
-    run.clear();
 }
 
 #[cfg(test)]

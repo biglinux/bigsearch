@@ -27,15 +27,6 @@ fn unclosed_script_hides_the_rest() {
     assert_eq!(html_text("<p>kept<script>a<script>b<style>c"), "\nkept");
 }
 
-/// References are part of the word around them; elements separate words.
-#[test]
-fn office_text_keeps_references_in_words() {
-    let docx = br#"<w:p><w:r><w:t>relat&#243;rio</w:t></w:r></w:p><w:p><w:r><w:t>Lopes &amp; Filhos</w:t></w:r></w:p>"#;
-    let mut out = String::new();
-    xml_text(docx, &mut out);
-    assert_eq!(out, "relatório Lopes & Filhos ");
-}
-
 #[test]
 fn composed_text_stops_at_extraction_cap() {
     let _lock = crate::test_env::ENV_LOCK
@@ -150,6 +141,36 @@ fn text_skips_oversized_input() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// An office archive in memory holding `parts`.
+fn office_zip(parts: &[(&str, &str)]) -> std::io::Cursor<Vec<u8>> {
+    let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, body) in parts {
+        zw.start_file(*name, stored_zip_options()).unwrap();
+        zw.write_all(body.as_bytes()).unwrap();
+    }
+    let mut zip = zw.finish().unwrap();
+    zip.set_position(0);
+    zip
+}
+
+/// What the index reads from an office file, per ECMA-376: the runs of a
+/// paragraph are one text, deleted text and field codes are not the document's,
+/// each `si` is one shared string and `rPh` only its phonetic reading.
+#[test]
+fn office_index_text_as_written() {
+    let docx = r#"<w:document><w:body><w:p><w:r><w:instrText> HYPERLINK "x" </w:instrText></w:r><w:r><w:t>Re</w:t></w:r><w:r><w:delText>xx</w:delText></w:r><w:r><w:t>lat&#243;rio</w:t></w:r></w:p></w:body></w:document>"#;
+    let xlsx = r#"<sst><si><t>Alfa</t></si><si><r><t>Be</t></r><r><t>ta</t></r></si><si><t>漢字</t><rPh sb="0" eb="2"><t>カンジ</t></rPh></si></sst>"#;
+    let pptx = r#"<p:sld><a:p><a:r><a:t>Re</a:t></a:r><a:r><a:t>latório</a:t></a:r></a:p></p:sld>"#;
+    for (ext, part, xml, expected) in [
+        ("docx", "word/document.xml", docx, "Relatório\n"),
+        ("xlsx", "xl/sharedStrings.xml", xlsx, "Alfa\nBeta\n漢字\n"),
+        ("pptx", "ppt/slides/slide1.xml", pptx, "Relatório\n"),
+    ] {
+        let text = office_text_from_reader(office_zip(&[(part, xml)]), ext);
+        assert_eq!(text.as_deref(), Some(expected), "{ext}");
+    }
+}
+
 #[test]
 fn docx_zip_xml_extraction() {
     let dir = temporary_extract_dir("docx");
@@ -236,7 +257,7 @@ fn docx_page_split_by_rendered_break() {
             br#"<w:document><w:body>
                     <w:p><w:r><w:t>alphaword first</w:t></w:r></w:p>
                     <w:r><w:lastRenderedPageBreak/></w:r>
-                    <w:p><w:r><w:t>betaword relat&#243;rio</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>beta</w:t></w:r><w:r><w:t>word relat&#243;rio</w:t></w:r></w:p>
                 </w:body></w:document>"#,
         )
         .unwrap();
