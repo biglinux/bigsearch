@@ -77,7 +77,9 @@ big-search origin ~/Downloads/arquivo.zip  # de onde o arquivo veio
 ```
 
 As consultas vão para o daemon quando ele está rodando e, se não estiver, leem o
-índice direto. `big-search --help` lista todos os comandos. A saída é colorida
+índice direto. O código de saída é 0 em caso de sucesso, inclusive numa busca
+sem resultados, e 1 em qualquer erro. `big-search --help` lista todos os
+comandos (a saída da CLI é em inglês). A saída é colorida
 no terminal; `--color never`, `NO_COLOR` e `CLICOLOR` são respeitados.
 
 ## Configuração
@@ -93,6 +95,9 @@ big-search config preset low-memory     # names-only | low-memory | balanced | c
 big-search config set extract-max-mb 16
 ```
 
+O serviço lê o arquivo quando inicia: depois de uma mudança, rode
+`systemctl --user restart big-search`.
+
 Exclusões extras vão em `~/.config/big-search/ignore`, na sintaxe do
 gitignore. Uma linha com `!` traz de volta algo que as regras embutidas pulam
 (`node_modules/`, `target/`, arquivos minificados e afins).
@@ -107,7 +112,6 @@ gitignore. Uma linha com `!` traz de volta algo que as regras embutidas pulam
 | [`apps/big-search`](apps/big-search) | O daemon e a CLI. O [DESIGN.md](apps/big-search/DESIGN.md) explica a arquitetura e as medições por trás dela. |
 | [`crates/foundation/big-indexd-client`](crates/foundation/big-indexd-client) | Tipos do protocolo do socket e um cliente pequeno para outros programas. |
 | [`crates/foundation/big-search-config`](crates/foundation/big-search-config) | Lê e grava o `config.toml` sem perder os comentários do usuário. |
-
 | [`apps/big-docinfo`](apps/big-docinfo) | O comando `big-docinfo`: sugere um nome para um documento a partir do que ele diz e o renomeia sem sobrescrever. |
 | [`crates/foundation/big-docinfo`](crates/foundation/big-docinfo) | Lê o tipo, a data, o autor e as frases principais de um documento a partir do texto, sem modelo. |
 
