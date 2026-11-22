@@ -511,8 +511,7 @@ pub fn pending_catalog_batch_after(
 }
 
 fn catalog_content_batch_limit() -> usize {
-    std::env::var("BIG_SEARCH_CATALOG_CONTENT_BATCH")
-        .ok()
+    crate::settings::test_seam("BIG_SEARCH_CATALOG_CONTENT_BATCH")
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|limit| *limit > 0)
         .unwrap_or(DEFAULT_CATALOG_CONTENT_BATCH)
@@ -553,16 +552,14 @@ pub fn clear_content_state() -> Result<()> {
 }
 
 pub fn daemon_batch_limit() -> usize {
-    std::env::var("BIG_SEARCH_DAEMON_CONTENT_BATCH")
-        .ok()
+    crate::settings::test_seam("BIG_SEARCH_DAEMON_CONTENT_BATCH")
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|limit| *limit > 0)
         .unwrap_or(250)
 }
 
 pub fn daemon_batch_byte_limit() -> u64 {
-    std::env::var("BIG_SEARCH_DAEMON_CONTENT_BATCH_MB")
-        .ok()
+    crate::settings::test_seam("BIG_SEARCH_DAEMON_CONTENT_BATCH_MB")
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|megabytes| *megabytes > 0)
         .unwrap_or_else(|| {
@@ -576,8 +573,7 @@ pub fn daemon_batch_byte_limit() -> u64 {
 }
 
 pub fn daemon_idle_delay() -> Duration {
-    std::env::var("BIG_SEARCH_DAEMON_CONTENT_IDLE_MS")
-        .ok()
+    crate::settings::test_seam("BIG_SEARCH_DAEMON_CONTENT_IDLE_MS")
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|milliseconds| *milliseconds > 0)
         .map(Duration::from_millis)

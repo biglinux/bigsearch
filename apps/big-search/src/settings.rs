@@ -382,6 +382,18 @@ pub fn content_cooldown() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// A variable the tests set to shrink batches and waits. Release builds ignore
+/// it; the unit tests a release package runs still read it.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn test_seam(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+#[cfg(not(any(test, debug_assertions)))]
+pub(crate) fn test_seam(_name: &str) -> Option<String> {
+    None
+}
+
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name)
         .ok()
@@ -432,11 +444,13 @@ fn resolve_follow(defaults: &Defaults) -> bool {
     env_bool("BIG_SEARCH_FOLLOW_LINKS").unwrap_or(defaults.follow_symlinks)
 }
 
-fn env_bool(name: &str) -> Option<bool> {
-    match std::env::var(name).ok().as_deref() {
-        Some("1" | "true" | "yes" | "on") => Some(true),
-        Some("0" | "false" | "no" | "off") => Some(false),
-        Some(_) | None => None,
+/// A boolean variable, in any case; `None` when unset or not a boolean.
+pub(crate) fn env_bool(name: &str) -> Option<bool> {
+    let value = std::env::var(name).ok()?.to_ascii_lowercase();
+    match value.as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -707,7 +721,12 @@ mod tests {
         // sees extraction turned off.
         const NAME: &str = "BIG_SEARCH_TEST_BOOL";
         let _lock = crate::test_env::ENV_LOCK.lock().unwrap();
-        for (value, expected) in [("0", Some(false)), ("yes", Some(true)), ("maybe", None)] {
+        for (value, expected) in [
+            ("0", Some(false)),
+            ("yes", Some(true)),
+            ("False", Some(false)),
+            ("maybe", None),
+        ] {
             let _value = crate::test_env::EnvVarGuard::set(NAME, value);
             assert_eq!(env_bool(NAME), expected, "{value}");
         }

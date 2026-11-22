@@ -563,6 +563,32 @@ only the rows up to the requested page, where a size index would cost every
 catalogue write. A `mime` or `kind` filter still goes to the name index, which
 alone knows types and folders, unordered and capped.
 
+### Environment
+
+These variables override the configuration, for one run or a unit drop-in; the
+running service reads them at start. A boolean is `1`, `true`, `yes` or `on`,
+or `0`, `false`, `no` or `off`, in any case; any other value is ignored.
+
+| Variable | Overrides |
+|---|---|
+| `BIG_SEARCH_NAMES_ONLY`, `BIG_SEARCH_CONTENT`, `BIG_SEARCH_META` | `names_only`, `content`, `metadata` |
+| `BIG_SEARCH_CONTENT_INDEX_MODE` | `content_index_mode` |
+| `BIG_SEARCH_EXTRACT_MAX_MB`, `BIG_SEARCH_TEXT_MAX_MB`, `BIG_SEARCH_PDF_MAX_MB` | `extract_max_mb`, `text_max_mb`, `pdf_max_mb` |
+| `BIG_SEARCH_OFFICE_MAX_MB`, `BIG_SEARCH_CONTENT_MAX_MB` (wins) | `office_max_mb` |
+| `BIG_SEARCH_PDF_TIMEOUT_SECS`, `BIG_SEARCH_CONTENT_COOLDOWN_SECS` | `pdf_timeout_secs`, `content_cooldown_secs` |
+| `BIG_SEARCH_FOLLOW_LINKS` | `follow_symlinks` |
+| `BIG_SEARCH_ORIGIN`, `BIG_SEARCH_ORIGIN_WATCH`, `BIG_SEARCH_ORIGIN_BROWSER_HISTORY` | `[origin]` `enabled` (and the watch it starts), `browser_history` |
+| `BIG_SEARCH_ORIGIN_XATTR`, `BIG_SEARCH_ORIGIN_QUERY`, `BIG_SEARCH_ORIGIN_MAX_BATCH` | origin from extended attributes, origin in query results, origin paths gathered before a write |
+| `BIG_SEARCH_META_SNIFF`, `_AUDIO`, `_VIDEO`, `_IMAGE`, `BIG_SEARCH_META_MAX_MB` | metadata by content type and its read cap (`meta.rs`) |
+| `BIG_SEARCH_CONTENT_WORKERS`, `BIG_SEARCH_DEDUP_CONTENT` | extraction workers (up to 4), reading reflinked copies once |
+| `BIG_SEARCH_BACKGROUND_WRITER_MB`, `BIG_SEARCH_BULK_WRITER_MB`, `BIG_SEARCH_CONTENT_WRITER_MB` | tantivy writer memory |
+| `BIG_SEARCH_BENCH` | prints timings from `reindex` |
+
+Debug builds and tests also read `BIG_SEARCH_CATALOG_CONTENT_BATCH`,
+`BIG_SEARCH_DAEMON_CONTENT_BATCH`, `BIG_SEARCH_DAEMON_CONTENT_BATCH_MB` and
+`BIG_SEARCH_DAEMON_CONTENT_IDLE_MS`, which shrink batches and waits; a release
+build ignores them.
+
 ## 10. Dependencies
 
 `apps/big-search/Cargo.toml` is the list: tantivy, `rusqlite` for the state,

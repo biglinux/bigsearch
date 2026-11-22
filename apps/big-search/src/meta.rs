@@ -33,13 +33,7 @@ pub struct MetaConfig {
 
 impl MetaConfig {
     fn from_env() -> Self {
-        let on = |key: &str, default: bool| match std::env::var(key) {
-            Ok(v) => !matches!(
-                v.to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            ),
-            Err(_) => default,
-        };
+        let on = |key: &str, default: bool| crate::settings::env_bool(key).unwrap_or(default);
         let master = on("BIG_SEARCH_META", true);
         let sniff_type = master && on("BIG_SEARCH_META_SNIFF", true);
         let audio = master && on("BIG_SEARCH_META_AUDIO", true);

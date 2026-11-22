@@ -141,11 +141,7 @@ pub fn capabilities() -> Vec<String> {
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name).ok().as_deref() {
-        Some("1" | "true" | "yes" | "on") => true,
-        Some("0" | "false" | "no" | "off") => false,
-        Some(_) | None => default,
-    }
+    crate::settings::env_bool(name).unwrap_or(default)
 }
 
 pub struct OriginWriter {
