@@ -162,7 +162,7 @@ fn search_by_mode(
     };
     let base = match mode {
         "content" => search_content(content_reader()?, q, fetch)?,
-        "both" => search_both(indexes.name, content_reader()?, q, fetch)?,
+        "both" => search_both(indexes.name, content_reader()?, q, filter, fetch)?,
         // Everything the index holds, for a caller that is narrowing by
         // filter rather than by words: "every PDF under my home folder" has
         // no text to search for, and the name search refuses a query shorter

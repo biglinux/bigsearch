@@ -64,9 +64,12 @@ pub fn search_both(
     reader: &IndexReader,
     content_reader: &IndexReader,
     q: &str,
+    filter: &Filter,
     limit: usize,
 ) -> Result<Vec<Hit>> {
-    let names = search(reader, q, &Filter::default(), limit)?;
+    // The content index knows no folder or type, but the name index does:
+    // narrowed there, the names spend the limit on files the filter keeps.
+    let names = search(reader, q, filter, limit)?;
     let contents = search_content(content_reader, q, limit)?;
 
     let mut candidates = merge_by_path(names, contents, q);

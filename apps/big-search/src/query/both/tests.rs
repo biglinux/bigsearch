@@ -15,7 +15,7 @@ fn both_ranks_name_and_content_highest() {
             ("/z/alpha_notes.md", "an alpha note"),
         ],
     );
-    let hits = search_both(&index, &content_index, "alpha", 10).unwrap();
+    let hits = search_both(&index, &content_index, "alpha", &Filter::default(), 10).unwrap();
     let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
     // both-match ranks first; name-only above content-only.
     assert_eq!(paths[0], "/z/alpha_notes.md");
@@ -49,7 +49,7 @@ fn both_keeps_relevance_inside_each_band() {
             ("/r/many.md", "alpha alpha alpha alpha alpha alpha"),
         ],
     );
-    let hits = search_both(&index, &content_index, "alpha", 10).unwrap();
+    let hits = search_both(&index, &content_index, "alpha", &Filter::default(), 10).unwrap();
 
     // The band is on the wire, and it is right for each kind.
     let kind_of = |path: &str| {
@@ -151,7 +151,7 @@ fn filename_leads_between_both_matches() {
             ("/b/omega.md", "omega omega omega omega omega omega"),
         ],
     );
-    let hits = search_both(&index, &content_index, "omega", 10).unwrap();
+    let hits = search_both(&index, &content_index, "omega", &Filter::default(), 10).unwrap();
     assert_eq!(hits.len(), 2);
     assert!(hits.iter().all(|hit| hit.match_kind == MatchKind::Both));
     // The name scores tie, so the body score decides, in the right
@@ -183,7 +183,7 @@ fn basic_content_keeps_band_relevance() {
         ],
         tantivy::schema::IndexRecordOption::Basic,
     );
-    let hits = search_both(&names, &bodies, "alpha", 10).unwrap();
+    let hits = search_both(&names, &bodies, "alpha", &Filter::default(), 10).unwrap();
     assert_eq!(hits.len(), 4);
     assert_eq!(hits[0].path, "/a/alpha.md");
     assert_eq!(hits[0].match_kind, MatchKind::Both);
@@ -212,7 +212,7 @@ fn basic_content_ties_follow_path() {
         tantivy::schema::IndexRecordOption::Basic,
     );
     for _ in 0..8 {
-        let hits = search_both(&names, &bodies, "omega", 10).unwrap();
+        let hits = search_both(&names, &bodies, "omega", &Filter::default(), 10).unwrap();
         assert_eq!(
             hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
             ["/a/omega.md", "/b/omega.md"]
@@ -232,7 +232,7 @@ fn both_orders_ties_stably() {
     let content_index = content_index_with("tie", &[("/unrelated/x.md", "nothing")]);
 
     let order_of = || -> Vec<String> {
-        search_both(&index, &content_index, "tie", 10)
+        search_both(&index, &content_index, "tie", &Filter::default(), 10)
             .unwrap()
             .into_iter()
             .map(|hit| hit.path)
@@ -257,12 +257,12 @@ fn both_never_lists_one_file_twice() {
     let content_index =
         content_index_with("once", &[("/n/projeto alpha beta.md", "alpha beta gamma")]);
 
-    let hits = search_both(&index, &content_index, "alpha", 10).unwrap();
+    let hits = search_both(&index, &content_index, "alpha", &Filter::default(), 10).unwrap();
     assert_eq!(hits.len(), 1, "the same file came back twice: {hits:?}");
     assert_eq!(hits[0].match_kind, MatchKind::Both);
 
     // Two terms, both present in the name and the body.
-    let hits = search_both(&index, &content_index, "alpha beta", 10).unwrap();
+    let hits = search_both(&index, &content_index, "alpha beta", &Filter::default(), 10).unwrap();
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!(hits[0].match_kind, MatchKind::Both);
 }
@@ -275,7 +275,7 @@ fn both_folds_accents_on_each_side() {
         content_index_with("acc-both", &[("/n/outro.md", "um relatório de Gonçalves")]);
 
     // Typed without accents, matching a name with them and a body with them.
-    let hits = search_both(&index, &content_index, "relatorio", 10).unwrap();
+    let hits = search_both(&index, &content_index, "relatorio", &Filter::default(), 10).unwrap();
     let kind_of = |path: &str| {
         hits.iter()
             .find(|hit| hit.path == path)
@@ -298,11 +298,29 @@ fn both_stays_within_its_limit() {
     let content_index = content_index_with("wide", &bodies);
 
     for limit in [1, 5, 12] {
-        let hits = search_both(&index, &content_index, "wide", limit).unwrap();
+        let hits = search_both(&index, &content_index, "wide", &Filter::default(), limit).unwrap();
         assert!(
             hits.len() <= limit,
             "asked for {limit} and got {}",
             hits.len()
         );
     }
+}
+
+/// A folder filter narrows the name search itself: with more names outside
+/// the folder than the limit reads, the one inside is still found.
+#[test]
+fn both_filters_names_by_folder() {
+    let mut owned: Vec<String> = (0..60).map(|n| format!("/a/report-{n:02}.md")).collect();
+    owned.push("/keep/report-final-2026.md".to_string());
+    let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let index = index_with("both-under", &refs);
+    let content_index = content_index_with("both-under", &[]);
+    let filter = Filter {
+        under: Some("/keep".into()),
+        ..Default::default()
+    };
+    let hits = search_both(&index, &content_index, "report", &filter, 5).unwrap();
+    let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(paths, ["/keep/report-final-2026.md"]);
 }
