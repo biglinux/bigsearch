@@ -140,7 +140,10 @@ fn register_created_then_query_origin() {
         origin_reply.contains(r#""kind":"app_created""#),
         "{origin_reply}"
     );
-    assert!(origin_reply.contains("Editor de Textos"), "{origin_reply}");
+    assert!(
+        origin_reply.contains("Created by Text Editor"),
+        "{origin_reply}"
+    );
 
     let query = r#"{"v":2,"cmd":"query","q":"note","mode":"name","include_origin":true,"page":{"limit":5}}"#;
     let query_reply = send_daemon_request(&sock, query);
@@ -178,18 +181,12 @@ fn cli_exposes_origin_commands() {
 
     let origin = run_stdout(&["origin", note_path], &home, &xdg_storage_home, &run);
     assert!(origin.contains("kind: app_created"), "{origin}");
-    assert!(
-        origin.contains("label: Criado por Editor de Textos"),
-        "{origin}"
-    );
+    assert!(origin.contains("label: Created by Text Editor"), "{origin}");
     assert!(origin.contains("source_app: big-text-editor"), "{origin}");
 
     let query = run_stdout(&["--origin", "note"], &home, &xdg_storage_home, &run);
     assert!(query.contains("note.txt"), "{query}");
-    assert!(
-        query.contains("origin: Criado por Editor de Textos"),
-        "{query}"
-    );
+    assert!(query.contains("origin: Created by Text Editor"), "{query}");
 
     let capabilities = run_stdout(&["capabilities"], &home, &xdg_storage_home, &run);
     assert!(capabilities.contains("file_origin"), "{capabilities}");

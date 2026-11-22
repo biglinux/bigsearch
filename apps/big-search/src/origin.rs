@@ -61,7 +61,6 @@ struct OriginRecord {
     ino: Option<i64>,
     kind: OriginKind,
     confidence: OriginConfidence,
-    label: String,
     source_app: Option<String>,
     source_path: Option<String>,
     source_device_id: Option<String>,
@@ -72,11 +71,45 @@ struct OriginRecord {
 }
 
 impl OriginRecord {
+    /// The sentence the command line prints, built when the record is read so
+    /// that nothing in one language is stored. The desktop builds its own,
+    /// translated, from `kind` and the fields.
+    fn label(&self) -> String {
+        let device = self.source_device_label.as_deref();
+        match self.kind {
+            OriginKind::WebDownload => match &self.source_domain {
+                Some(domain) => format!("Downloaded from {domain}"),
+                None => "Downloaded from the internet".to_owned(),
+            },
+            OriginKind::RemovableCopy => match device {
+                Some(name) => format!("Copied from the removable drive {name}"),
+                None => "Copied from a removable drive".to_owned(),
+            },
+            OriginKind::NetworkCopy => match device {
+                Some(name) => format!("Copied from the network share {name}"),
+                None => "Copied from a network share".to_owned(),
+            },
+            OriginKind::LocalCopy => "Copied on this computer".to_owned(),
+            OriginKind::AppCreated => {
+                format!("Created by {}", app_label(self.source_app.as_deref()))
+            }
+            OriginKind::DerivedFile => {
+                let source = self.source_path.as_deref().unwrap_or_default();
+                let name = Path::new(source)
+                    .file_name()
+                    .map_or_else(|| source.to_owned(), |n| n.to_string_lossy().into_owned());
+                format!("Made from {name}")
+            }
+            OriginKind::MovedOrRenamed => "Moved or renamed on this computer".to_owned(),
+            OriginKind::Unknown => "Origin unknown".to_owned(),
+        }
+    }
+
     fn into_provenance(self) -> OriginProvenance {
         OriginProvenance {
             kind: self.kind.as_str().to_string(),
             confidence: self.confidence as u8,
-            label: self.label,
+            label: self.label(),
             first_seen_at: self.first_seen_at,
             source_app: self.source_app,
             source_path: self.source_path,
@@ -176,7 +209,6 @@ impl OriginWriter {
             ino,
             kind: OriginKind::AppCreated,
             confidence: OriginConfidence::High,
-            label: format!("Criado por {}", app_label(app_id)),
             source_app: app,
             source_path: None,
             source_device_id: None,
@@ -196,25 +228,18 @@ impl OriginWriter {
         let now = now_secs();
         let (dev, ino) = dev_ino(dst);
         let source = crate::settings::sources().owner(src);
-        let (kind, label, source_device_id, source_device_label) = match source {
+        let (kind, source_device_id, source_device_label) = match source {
             Some(source) if source.removable() => (
                 OriginKind::RemovableCopy,
-                format!("Copiado do pendrive {}", source.name),
                 Some(source.id.clone()),
                 Some(source.name.clone()),
             ),
             Some(source) if source.network() => (
                 OriginKind::NetworkCopy,
-                format!("Copiado da rede {}", source.name),
                 Some(source.id.clone()),
                 Some(source.name.clone()),
             ),
-            _ => (
-                OriginKind::LocalCopy,
-                "Copiado neste computador".to_string(),
-                None,
-                None,
-            ),
+            _ => (OriginKind::LocalCopy, None, None),
         };
         let record = OriginRecord {
             path: path_key(dst),
@@ -222,7 +247,6 @@ impl OriginWriter {
             ino,
             kind,
             confidence: OriginConfidence::High,
-            label,
             source_app: app_id.map(str::to_string),
             source_path: Some(path_key(src)),
             source_device_id,
@@ -262,7 +286,6 @@ impl OriginWriter {
             ino,
             kind: OriginKind::MovedOrRenamed,
             confidence: OriginConfidence::Medium,
-            label: "Movido ou renomeado neste computador".to_string(),
             source_app: app_id.map(str::to_string),
             source_path: Some(path_key(src)),
             source_device_id: None,
@@ -281,18 +304,12 @@ impl OriginWriter {
         ensure_path_under_source(dst)?;
         let now = now_secs();
         let (dev, ino) = dev_ino(dst);
-        let source_name = src
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path_key(src));
-        let label = format!("Gerado a partir de {source_name}");
         let record = OriginRecord {
             path: path_key(dst),
             dev,
             ino,
             kind: OriginKind::DerivedFile,
             confidence: OriginConfidence::High,
-            label,
             source_app: app_id.map(str::to_string),
             source_path: Some(path_key(src)),
             source_device_id: None,
@@ -311,10 +328,6 @@ impl OriginWriter {
     /// The same, for a download whose date is known: from the list a browser
     /// keeps, where the file may have arrived months ago.
     ///
-    /// The stored `label` stays what the rest of this file writes, for the
-    /// command line that prints it. The desktop ignores it and builds its own
-    /// sentence from `kind` and the fields, because only the desktop has a
-    /// translation catalogue.
     pub fn register_web_download_at(
         &self,
         path: &Path,
@@ -332,7 +345,6 @@ impl OriginWriter {
             ino,
             kind: OriginKind::WebDownload,
             confidence: OriginConfidence::High,
-            label: "Baixado da internet".to_string(),
             source_app: None,
             source_path: None,
             source_device_id: None,
@@ -584,7 +596,8 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
             record.ino,
             record.kind.as_str(),
             record.confidence as u8,
-            record.label,
+            // The column predates labels built on read; rows keep it empty.
+            "",
             record.source_app,
             record.source_path,
             record.source_device_id,
@@ -734,7 +747,6 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OriginRecord> {
         ino: row.get(2)?,
         kind: parse_kind(&kind_text),
         confidence: parse_confidence(confidence),
-        label: row.get(5)?,
         source_app: row.get(6)?,
         source_path: row.get(7)?,
         source_device_id: row.get(8)?,
@@ -781,11 +793,11 @@ fn ensure_path_under_source(path: &Path) -> Result<()> {
 
 fn app_label(app_id: Option<&str>) -> String {
     match app_id {
-        Some("big-text-editor") => "Editor de Textos".to_string(),
-        Some("big-filemanager") => "Gerenciador de Arquivos".to_string(),
-        Some("big-video-converter") => "Conversor de Vídeo".to_string(),
+        Some("big-text-editor") => "Text Editor".to_string(),
+        Some("big-filemanager") => "File Manager".to_string(),
+        Some("big-video-converter") => "Video Converter".to_string(),
         Some(id) => id.to_string(),
-        None => "aplicativo".to_string(),
+        None => "an application".to_string(),
     }
 }
 
@@ -888,7 +900,6 @@ mod tests {
             ino: None,
             kind,
             confidence: OriginConfidence::High,
-            label: String::new(),
             source_app: None,
             source_path: None,
             source_device_id: None,
@@ -906,6 +917,36 @@ mod tests {
         upsert_record(&conn, &record(OriginKind::WebDownload, Some("c.example"))).unwrap();
         assert_eq!(stored().kind, OriginKind::AppCreated);
         assert_eq!(stored().source_domain, None);
+        std::fs::remove_dir_all(db.parent().unwrap()).ok();
+    }
+
+    /// The label is built from the fields when read; the database keeps no
+    /// sentence in any language.
+    #[test]
+    fn label_built_on_read() {
+        let db = temporary_origin_path("label");
+        let conn = open_writer(&db).unwrap();
+        let record = OriginRecord {
+            path: "/d/copy.pdf".to_string(),
+            dev: None,
+            ino: None,
+            kind: OriginKind::RemovableCopy,
+            confidence: OriginConfidence::High,
+            source_app: None,
+            source_path: Some("/media/stick/copy.pdf".to_string()),
+            source_device_id: Some("stick".to_string()),
+            source_device_label: Some("KINGSTON".to_string()),
+            source_domain: None,
+            first_seen_at: 1,
+            updated_at: 1,
+        };
+        upsert_record(&conn, &record).unwrap();
+        let stored: String = conn
+            .query_row("SELECT label FROM file_origin", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, "");
+        let read = select_record(&conn, "/d/copy.pdf").unwrap().unwrap();
+        assert_eq!(read.label(), "Copied from the removable drive KINGSTON");
         std::fs::remove_dir_all(db.parent().unwrap()).ok();
     }
 }
