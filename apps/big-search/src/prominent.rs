@@ -110,33 +110,11 @@ fn attr(e: &BytesStart<'_>, name: &str) -> Option<String> {
         .map(|a| a.value.into_owned())
 }
 
-/// Text of a text event or an entity reference, decoded.
-fn push_event_text(event: &Event<'_>, out: &mut String) {
-    match event {
-        Event::Text(t) => out.push_str(t),
-        Event::GeneralRef(r) => {
-            if let Ok(Some(c)) = r.resolve_char_ref() {
-                out.push(c);
-            } else {
-                out.push_str(match &**r {
-                    "amp" => "&",
-                    "lt" => "<",
-                    "gt" => ">",
-                    "quot" => "\"",
-                    "apos" => "'",
-                    _ => "",
-                });
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Appends a text event to a paragraph; visible text raises the paragraph's
 /// `largest` size to the `size` it is set in.
 fn push_sized_text(event: &Event<'_>, text: &mut String, largest: &mut f32, size: f32) {
     let before = text.len();
-    push_event_text(event, text);
+    crate::extract::push_xml_text(event, text);
     if text[before..].chars().any(|c| !c.is_whitespace()) {
         *largest = largest.max(size);
     }
@@ -177,7 +155,7 @@ fn pdf_lines(xhtml: &[u8]) -> Vec<(String, f32)> {
                 text.push(' ');
             }
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) if in_word => {
-                push_event_text(ev, &mut text);
+                crate::extract::push_xml_text(ev, &mut text);
             }
             Ok(Event::End(e)) if e.name().as_ref() == "line" => {
                 if let Some((height, width)) = line.take()
@@ -506,11 +484,7 @@ fn docx_opening_paragraphs(xml: &[u8], styles: &DocxStyles, default: f32) -> Vec
 
 /// The text of the first slide's title placeholder.
 fn pptx_title(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let zip = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
-    if zip.len() > crate::extract::MAX_ZIP_ENTRIES {
-        return None;
-    }
+    let zip = crate::extract::open_archive(path)?;
     let first = crate::extract::slide_names(&zip).into_iter().next()?;
     let xml = crate::extract::zip_entry_bytes(path, &first)?;
     let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
@@ -536,7 +510,7 @@ fn pptx_title(path: &Path) -> Option<String> {
                 is_title |= matches!(attr(e, "type").as_deref(), Some("title" | "ctrTitle"));
             }
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) if in_text => {
-                push_event_text(ev, &mut text)
+                crate::extract::push_xml_text(ev, &mut text)
             }
             Ok(Event::End(e)) => {
                 match e.name().as_ref() {
@@ -579,7 +553,7 @@ fn odp_title(path: &Path) -> Option<String> {
                 in_title = attr(e, "presentation:class").as_deref() == Some("title");
             }
             Ok(ev @ (Event::Text(_) | Event::GeneralRef(_))) if in_title => {
-                push_event_text(ev, &mut text)
+                crate::extract::push_xml_text(ev, &mut text)
             }
             Ok(Event::End(e)) if in_title && e.name().as_ref() == "text:p" => text.push(' '),
             Ok(Event::End(e)) if e.name().as_ref() == "draw:frame" && in_title => {

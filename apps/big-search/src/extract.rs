@@ -106,6 +106,7 @@ pub fn rtf_text(bytes: &[u8]) -> Option<(String, Option<String>)> {
 fn read_capped_bytes(path: &Path) -> Option<Vec<u8>> {
     let size = text_input_size(path)?;
     let cap = max_extract_bytes();
+    // Sized up front: a text file is read whole, and growth copies it.
     let mut buf = Vec::with_capacity(size.min(cap as u64) as usize);
     std::fs::File::open(path)
         .ok()?
@@ -311,17 +312,8 @@ pub fn content_for_mime(path: &Path, mime: &str) -> Option<String> {
 
 /// Read a text file up to the adaptive extraction cap; reject binary NULs.
 fn read_text(path: &Path) -> Option<String> {
-    let size = text_input_size(path)?;
-    let cap = max_extract_bytes();
-    // Sized up front: a text file is read whole, and growth copies it.
-    let mut buf = Vec::with_capacity(size.min(cap as u64) as usize);
-    std::fs::File::open(path)
-        .ok()?
-        .take(cap as u64)
-        .read_to_end(&mut buf)
-        .ok()?;
-    text_from_bytes(buf).map(|mut text| {
-        truncate_to_char_boundary(&mut text, cap);
+    text_from_bytes(read_capped_bytes(path)?).map(|mut text| {
+        truncate_to_char_boundary(&mut text, max_extract_bytes());
         text
     })
 }
@@ -389,6 +381,27 @@ fn exceeds_input_cap(path: &Path) -> bool {
 /// real documents (a heavy pptx is a few hundred), tight against a bomb.
 pub(crate) const MAX_ZIP_ENTRIES: usize = 4_096;
 
+/// An office or EPUB archive, refused past [`MAX_ZIP_ENTRIES`]: `ZipArchive::new`
+/// reads the whole central directory, which a crafted file inflates to hundreds
+/// of megabytes before any per-part cap applies.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the owner of opening an archive with its entry cap"
+)]
+pub(crate) fn capped_zip<R: std::io::Read + std::io::Seek>(
+    reader: R,
+) -> Option<zip::ZipArchive<R>> {
+    let zip = zip::ZipArchive::new(reader).ok()?;
+    (zip.len() <= MAX_ZIP_ENTRIES).then_some(zip)
+}
+
+/// The archive at `path`, as [`capped_zip`] accepts it.
+pub(crate) fn open_archive(
+    path: &Path,
+) -> Option<zip::ZipArchive<std::io::BufReader<std::fs::File>>> {
+    capped_zip(std::io::BufReader::new(std::fs::File::open(path).ok()?))
+}
+
 /// Slides, worksheets, speaker notes, headers or footers read from one archive,
 /// each kind on its own. Bounds both the name `Vec` and the read loop.
 const MAX_NUMBERED_PARTS: usize = 512;
@@ -400,19 +413,7 @@ pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
     reader: R,
     ext: &str,
 ) -> Option<String> {
-    let mut zip = zip::ZipArchive::new(reader).ok()?;
-
-    // Per-part decompressed size is capped below, but the central directory is
-    // read whole by `ZipArchive::new` before any of that: at the default 256 MiB
-    // input cap an archive can declare millions of entries and cost hundreds of
-    // megabytes in directory alone. Inside a 768 MiB cgroup that is an OOM kill,
-    // and since the content-state row is only written after the batch completes,
-    // the same file is retried on every restart. A real document has tens.
-    if zip.len() > MAX_ZIP_ENTRIES {
-        log::debug!("skipping office file: {} zip entries", zip.len());
-        return None;
-    }
-
+    let mut zip = capped_zip(reader)?;
     let parts: Vec<String> = match ext {
         "docx" => {
             let mut parts = vec!["word/document.xml".to_string()];
@@ -644,15 +645,9 @@ impl PageMatcher<'_> {
 /// Hand each pptx slide's text to `on_page`, one slide at a time.
 fn for_each_pptx_slide(path: &Path, on_page: &mut dyn FnMut(&str)) {
     let cap = max_extract_bytes();
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some(mut zip) = open_archive(path) else {
         return;
     };
-    let Ok(mut zip) = zip::ZipArchive::new(std::io::BufReader::new(file)) else {
-        return;
-    };
-    if zip.len() > MAX_ZIP_ENTRIES {
-        return;
-    }
     let names = slide_names(&zip);
     let mut xml = Vec::new();
     let mut text = String::new();
@@ -749,11 +744,7 @@ fn zip_entry<'a, R: std::io::Read + std::io::Seek>(
 /// Bytes of a zip entry (capped), or `None`.
 pub(crate) fn zip_entry_bytes(path: &Path, name: &str) -> Option<Vec<u8>> {
     let cap = max_extract_bytes();
-    let file = std::fs::File::open(path).ok()?;
-    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
-    if zip.len() > MAX_ZIP_ENTRIES {
-        return None;
-    }
+    let mut zip = open_archive(path)?;
     let mut entry = zip_entry(&mut zip, name).ok()?;
     let mut xml = Vec::new();
     entry.by_ref().take(cap as u64).read_to_end(&mut xml).ok()?;
@@ -914,7 +905,7 @@ fn xlsx_sheet_text(xml: &[u8], out: &mut String) {
 /// text around them. The reader stops at bytes that are not valid UTF-8; an
 /// office part is UTF-8 by specification, so only a damaged file loses the text
 /// after the damage.
-fn push_xml_text(event: &quick_xml::events::Event<'_>, out: &mut String) {
+pub(crate) fn push_xml_text(event: &quick_xml::events::Event<'_>, out: &mut String) {
     use quick_xml::events::Event;
     match event {
         Event::Text(t) => out.push_str(t),

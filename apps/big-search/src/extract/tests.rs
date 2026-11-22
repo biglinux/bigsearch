@@ -245,6 +245,23 @@ fn office_text_outside_body_indexed() {
     assert_eq!(text.as_deref(), Some("Slide\nFala\n"));
 }
 
+/// An archive declaring more entries than [`MAX_ZIP_ENTRIES`] is refused before
+/// any part is read; one at the cap is read.
+#[test]
+fn zip_entry_cap_refuses_one_more() {
+    let docx = |entries: usize| {
+        let mut parts = vec![(
+            "word/document.xml".to_string(),
+            "<w:p><w:t>dentro</w:t></w:p>",
+        )];
+        parts.extend((1..entries).map(|n| (format!("pad/{n}"), "")));
+        let parts: Vec<(&str, &str)> = parts.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+        office_text_from_reader(office_zip(&parts), "docx")
+    };
+    assert_eq!(docx(MAX_ZIP_ENTRIES).as_deref(), Some("dentro\n"));
+    assert_eq!(docx(MAX_ZIP_ENTRIES + 1), None);
+}
+
 #[test]
 fn docx_zip_xml_extraction() {
     let dir = temporary_extract_dir("docx");
@@ -374,7 +391,7 @@ fn pptx_slides_sort_by_number() {
     ] {
         zw.start_file(name, stored_zip_options()).unwrap();
     }
-    let zip = zip::ZipArchive::new(zw.finish().unwrap()).unwrap();
+    let zip = capped_zip(zw.finish().unwrap()).unwrap();
     assert_eq!(
         slide_names(&zip),
         [
@@ -398,7 +415,7 @@ fn zip_entries_match_stored_bytes() {
             bytes[at..at + 2].copy_from_slice(&[0x80, 0x81]);
         }
     }
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut zip = capped_zip(std::io::Cursor::new(bytes)).unwrap();
     assert!(zip.by_name("Çü.xml").is_ok());
     assert!(zip_entry(&mut zip, "Çü.xml").is_err());
     assert!(zip_entry(&mut zip, "plain.xml").is_ok());
