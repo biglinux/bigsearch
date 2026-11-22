@@ -1,6 +1,7 @@
 //! big-search: lean unprivileged search of file names and contents, kept current by watching the disk.
 use big_search::{
-    catalogue, config, content, extract, index, ipc, origin, query, scan, settings, throttle, watch,
+    catalogue, config, content, extract, index, ipc, origin, query, scan, settings, terminal_text,
+    throttle, watch,
 };
 
 use anyhow::{Context, Result};
@@ -315,7 +316,7 @@ fn cmd_list(tokens: &[String]) -> Result<()> {
     let s = parse_query(tokens);
     let index = index::open_read_only(&config::index_dir())?;
     for path in query::list_paths(&index.reader()?, s.limit, s.under.as_deref())? {
-        println!("{path}");
+        println!("{}", terminal_text(&path));
     }
     Ok(())
 }
@@ -567,19 +568,8 @@ fn two_paths_and_optional_app<'a>(
 
 fn print_origin(path: &str, origin: Option<&big_indexd_client::OriginProvenance>) {
     // Every field but the numbers comes from file names, extended attributes or
-    // other programs' databases: control characters would reach the terminal
-    // as escape sequences.
-    let shown = |text: &str| -> String {
-        text.chars()
-            .flat_map(|c| {
-                if c.is_control() {
-                    c.escape_default().collect::<Vec<_>>()
-                } else {
-                    vec![c]
-                }
-            })
-            .collect()
-    };
+    // other programs' databases.
+    let shown = terminal_text;
     let Some(origin) = origin else {
         println!("{}: no origin", shown(path));
         return;
@@ -721,7 +711,7 @@ fn print_hits(s: &Search, outcome: &big_indexd_client::QueryOutcome) {
             let pp = extract::pages_with(std::path::Path::new(&h.path), &terms);
             if !pp.is_empty() {
                 let list: Vec<String> = pp.iter().map(usize::to_string).collect();
-                println!("{}  (p. {})", h.path, list.join(", "));
+                println!("{}  (p. {})", terminal_text(&h.path), list.join(", "));
                 continue;
             }
         }
@@ -752,9 +742,11 @@ fn format_hit_path(
     if include_origin && let Some(origin) = &hit.origin {
         notes.push(format!("origin: {}", origin.label));
     }
+    let path = terminal_text(&hit.path);
     if notes.is_empty() {
-        hit.path.clone()
+        path.into_owned()
     } else {
-        format!("{}  {}", hit.path, dim(&format!("[{}]", notes.join("; "))))
+        let notes = terminal_text(&notes.join("; ")).into_owned();
+        format!("{path}  {}", dim(&format!("[{notes}]")))
     }
 }

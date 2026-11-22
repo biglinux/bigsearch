@@ -132,3 +132,28 @@ fn config_change_names_the_restart() {
     fs::remove_dir_all(&base).ok();
 }
 
+/// A file name is outside text: its control characters reach the terminal
+/// escaped, never as an escape sequence.
+#[test]
+fn file_names_print_without_control_characters() {
+    let base = scratch::scratch_dir("bs-cli-escape");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&xdg_storage_home).unwrap();
+    fs::write(home.join("rel\u{1b}]0;title\u{7}.txt"), "corpo").unwrap();
+    run(
+        &home,
+        &xdg_storage_home,
+        &["reindex", home.to_str().unwrap()],
+    );
+    for args in [&["rel"][..], &["list"][..], &["both", "rel"][..]] {
+        let out = run(&home, &xdg_storage_home, args);
+        assert!(
+            out.contains("rel\\u{1b}]0;title\\u{7}.txt"),
+            "{args:?}: {out:?}"
+        );
+        assert!(!out.contains(['\u{1b}', '\u{7}']), "{args:?}: {out:?}");
+    }
+    fs::remove_dir_all(&base).ok();
+}

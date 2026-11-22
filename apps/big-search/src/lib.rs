@@ -29,3 +29,22 @@ mod simplified_chinese;
 mod test_env;
 pub mod throttle;
 pub mod watch;
+
+/// `text` for a terminal, its control characters written as escapes (`\u{1b}`):
+/// a file name or a document can hold a sequence that retitles the window or
+/// sets the clipboard.
+#[must_use]
+pub fn terminal_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(char::is_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut shown = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        if c.is_control() {
+            shown.extend(c.escape_default());
+        } else {
+            shown.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(shown)
+}
