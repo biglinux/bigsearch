@@ -293,6 +293,7 @@ pub(super) fn cmd_daemon() -> Result<()> {
         None => log::info!("indexing shares the service's cgroup (no cgroup delegated)"),
     }
     spawn_watcher(&index, &content_index, &control, rx, &history)?;
+    spawn_mount_watch(control.commands.clone());
 
     let (name_reader, content_reader) = open_query_readers()?;
     ipc::serve(
@@ -304,6 +305,71 @@ pub(super) fn cmd_daemon() -> Result<()> {
         config::state_db_path(),
         history,
     )
+}
+
+/// Exit status asking systemd for a restart (`RestartForceExitStatus=`).
+const EXIT_RESTART: i32 = 75;
+
+/// Follow the mount table. A disk mounted or unmounted inside a source asks the
+/// watcher for a rescan, since inotify reports neither. A source that comes or
+/// goes (a removable disk plugged in) changes the roots the daemon started
+/// with, so it exits for systemd to start it again with the new set.
+fn spawn_mount_watch(commands: std::sync::mpsc::Sender<watch::WatchMessage>) {
+    let available = || -> Vec<PathBuf> {
+        settings::sources()
+            .all()
+            .iter()
+            .filter(|s| settings::is_available(s))
+            .map(|s| s.path.clone())
+            .collect()
+    };
+    let spawned = std::thread::Builder::new()
+        .name("mounts".into())
+        .spawn(move || {
+            let started = available();
+            let mut table = match mounts::MountTable::open() {
+                Ok(table) => table,
+                Err(e) => return log::warn!("mounts are not followed: {e}"),
+            };
+            let mut before = table.points().unwrap_or_default();
+            loop {
+                let now = match table.wait().and_then(|()| table.points()) {
+                    Ok(now) => now,
+                    Err(e) => return log::warn!("mounts are no longer followed: {e}"),
+                };
+                if available() != started {
+                    log::info!("a source came or went; restarting to follow it");
+                    #[expect(
+                        clippy::exit,
+                        reason = "systemd restarts the unit with the new sources"
+                    )]
+                    std::process::exit(EXIT_RESTART);
+                }
+                let moved = now
+                    .iter()
+                    .filter(|point| before.binary_search(point).is_err())
+                    .chain(
+                        before
+                            .iter()
+                            .filter(|point| now.binary_search(point).is_err()),
+                    );
+                let inside = moved
+                    .into_iter()
+                    .any(|point| started.iter().any(|root| point.starts_with(root)));
+                if inside {
+                    log::info!("a disk was mounted or unmounted inside a source; rescanning");
+                    let rescan =
+                        watch::WatchMessage::ControlCommand(watch::WatchControlCommand::Rescan);
+                    if commands.send(rescan).is_err() {
+                        return;
+                    }
+                }
+                before = now;
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("mounts are not followed: {e}");
+    }
 }
 
 /// Start the watcher thread: the startup sync, then incremental indexing for

@@ -517,7 +517,12 @@ by `chmod` or `chown`, its change time puts it in the catch-up, or its
 attribute event reaches the running watcher, and it is watched and walked. A
 file rewritten in place changes no folder, an edited `.gitignore` or `.ignore`
 inside a source changes no fingerprint, and joining a group changes no folder:
-all three wait for the next walk, `big-search rescan`. The saved list
+all three wait for the next walk, `big-search rescan`. A disk mounted or unmounted
+inside a source changes no folder either: the daemon holds
+`/proc/self/mountinfo` open and wakes only when the kernel flags a change on it,
+then rescans. A source that comes or goes (a removable disk plugged in) changes
+the roots the daemon started with, so it exits with status 75 and the unit
+starts it again (`RestartForceExitStatus=75`). The saved list
 spares a restart the read of every entry's metadata, the cost that dominates on
 a hard disk.
 

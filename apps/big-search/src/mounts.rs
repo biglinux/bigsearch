@@ -81,6 +81,67 @@ fn detachable_mount(point: &Path, mount: &Mount) -> bool {
             .any(|removable| point.starts_with(removable))
 }
 
+/// This mount namespace's table, held open to learn when it changes.
+pub struct MountTable {
+    file: std::fs::File,
+}
+
+impl MountTable {
+    /// # Errors
+    ///
+    /// `/proc/self/mountinfo` cannot be opened.
+    pub fn open() -> std::io::Result<Self> {
+        Ok(Self {
+            file: std::fs::File::open("/proc/self/mountinfo")?,
+        })
+    }
+
+    /// The mount points now, sorted. Reading through this handle is also what
+    /// clears the change the kernel flagged on it.
+    ///
+    /// # Errors
+    ///
+    /// The table cannot be read.
+    pub fn points(&mut self) -> std::io::Result<Vec<PathBuf>> {
+        use std::io::{Read, Seek};
+        let mut table = String::new();
+        self.file.rewind()?;
+        self.file.read_to_string(&mut table)?;
+        let mut points: Vec<PathBuf> = table
+            .lines()
+            .filter_map(parse_line)
+            .map(|(point, _)| point)
+            .collect();
+        points.sort_unstable();
+        Ok(points)
+    }
+
+    /// Block until something is mounted or unmounted: the kernel raises
+    /// `POLLPRI` on the table, so the wait costs nothing.
+    ///
+    /// # Errors
+    ///
+    /// `poll` fails for a reason other than a signal.
+    pub fn wait(&self) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let mut table = libc::pollfd {
+            fd: self.file.as_raw_fd(),
+            events: libc::POLLPRI,
+            revents: 0,
+        };
+        loop {
+            // SAFETY: one pollfd, valid for the call; `self.file` keeps its fd open.
+            if unsafe { libc::poll(&mut table, 1, -1) } > 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
 /// `id parent major:minor root mount-point options [optional…] - fstype source super-options`
 fn parse_line(line: &str) -> Option<(PathBuf, Mount)> {
     let (left, right) = line.split_once(" - ")?;
