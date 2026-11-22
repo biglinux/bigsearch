@@ -104,7 +104,6 @@ The indexes and state live in `~/.local/share/big-search/`; the socket is
 | [`apps/big-search`](apps/big-search) | The daemon and the CLI. [DESIGN.md](apps/big-search/DESIGN.md) covers the architecture and the measurements behind it. |
 | [`crates/foundation/big-indexd-client`](crates/foundation/big-indexd-client) | Socket protocol types and a small client for other programs. |
 | [`crates/foundation/big-search-config`](crates/foundation/big-search-config) | Reads and writes `config.toml` without losing the user's comments. |
-
 | [`apps/big-docinfo`](apps/big-docinfo) | The `big-docinfo` command: suggests a file name for a document from what it says, and renames it without overwriting. |
 | [`crates/foundation/big-docinfo`](crates/foundation/big-docinfo) | Reads a document's kind, date, author and key sentences from its text, without a model. |
 
