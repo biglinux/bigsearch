@@ -23,7 +23,7 @@ imagesize = { version = "0.15" }
 libc = { version = "0.2.186" }
 log = { version = "0.4.33" }
 notify = { version = "9.0.0" }
-quick-xml = { version = "0.42.0" }
+quick-xml = { version = "0.42.0", features = ["escape-html"] }
 rusqlite = { version = "0.43.0", default-features = false, features = ["cache"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150" }

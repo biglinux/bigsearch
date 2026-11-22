@@ -217,8 +217,14 @@ fn html_element(html: &str, tag: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// Elements that sit inside a line of text: the others separate words.
+const INLINE_TAGS: &[&str] = &[
+    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "dfn", "em", "font", "i", "kbd",
+    "mark", "q", "s", "samp", "small", "span", "strong", "sub", "sup", "time", "u", "var", "wbr",
+];
+
 /// The readable text of HTML: scripts and styles dropped, block elements as
-/// line breaks, the common entities decoded. Enough to read a saved page's
+/// line breaks, entities decoded. Enough to read a saved page's
 /// title and dates, not a renderer.
 pub fn html_text(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
@@ -242,8 +248,16 @@ pub fn html_text(html: &str) -> String {
         ]
         .iter()
         .any(|b| tag.starts_with(b));
+        let name = tag
+            .trim_start_matches(['<', '/'])
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .unwrap_or_default();
         if block {
             out.push('\n');
+        } else if skip_to.is_none() && !name.is_empty() && !INLINE_TAGS.contains(&name) {
+            // A table cell, a list or any other box ends the word before it.
+            out.push(' ');
         }
         at = skip_to.unwrap_or(tag_end).min(html.len());
     }
@@ -258,30 +272,32 @@ fn decode_entities(s: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        // Only the next 11 bytes: a search to the end for every `&` is quadratic.
-        // `;` is ASCII, so its index is a char boundary.
+        // Only as far as the longest HTML5 name: a search to the end for every
+        // `&` is quadratic. `;` is ASCII, so its index is a char boundary.
         let entity = rest.as_bytes()[1..]
             .iter()
-            .take(11)
+            .take(33)
             .position(|&b| b == b';')
             .map(|end| &rest[1..=end]);
-        let decoded = entity.and_then(|e| match e {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            "nbsp" => Some(' '),
-            _ => e
-                .strip_prefix("#x")
-                .or_else(|| e.strip_prefix("#X"))
-                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                .or_else(|| e.strip_prefix('#').and_then(|dec| dec.parse().ok()))
-                .and_then(char::from_u32),
-        });
-        match (entity, decoded) {
-            (Some(e), Some(c)) => {
-                out.push(c);
+        let decoded = |e: &str| -> Option<std::borrow::Cow<'static, str>> {
+            if e == "nbsp" {
+                return Some(" ".into());
+            }
+            match e.strip_prefix('#') {
+                Some(number) => number
+                    .strip_prefix(['x', 'X'])
+                    .map_or_else(
+                        || number.parse().ok(),
+                        |hex| u32::from_str_radix(hex, 16).ok(),
+                    )
+                    .and_then(char::from_u32)
+                    .map(|c| c.to_string().into()),
+                None => quick_xml::escape::resolve_html5_entity(e).map(Into::into),
+            }
+        };
+        match entity.and_then(|e| Some((e, decoded(e)?))) {
+            Some((e, text)) => {
+                out.push_str(&text);
                 rest = &rest[e.len() + 2..];
             }
             _ => {
