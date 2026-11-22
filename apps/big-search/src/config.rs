@@ -135,6 +135,20 @@ mod tests {
     use super::*;
     use crate::test_env::{ENV_LOCK, EnvVarGuard};
 
+    /// The data dir lists every private file; one left readable is tightened.
+    #[test]
+    fn readable_data_dir_becomes_private() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("bs-private-{}", std::process::id()));
+        let _data = EnvVarGuard::set("XDG_DATA_HOME", base.to_str().unwrap());
+        std::fs::create_dir_all(data_dir()).unwrap();
+        std::fs::set_permissions(data_dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_data_dir().unwrap();
+        let mode = std::fs::metadata(data_dir()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn relative_data_home_is_ignored() {
         let _lock = ENV_LOCK.lock().unwrap();

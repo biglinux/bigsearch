@@ -658,3 +658,6 @@ fn history_reply(
         Err(error) => err(error.to_string()),
     }
 }
+
+#[cfg(all(test, not(miri)))]
+mod tests;
