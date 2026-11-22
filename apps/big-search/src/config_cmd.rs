@@ -56,7 +56,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
 pub(super) fn print_config_help() {
     let title = bold("big-search config");
     println!(
-        "{title}\n\n{}\n  config show\n  config path\n  config set names-only true|false\n  config set content-index-mode auto|basic|freqs\n  config set extract-max-mb 0|4|8|16|32\n  config preset names-only|low-memory|balanced|complete\n\n{}\n  names-only     menor índice: só nomes/caminhos\n  low-memory     conteúdo ligado, postings Basic, caps conservadores\n  balanced       automático: Basic abaixo de 6 GiB RAM, Freqs acima\n  complete       Freqs + limite maior de extração\n",
+        "{title}\n\n{}\n  config show\n  config path\n  config set names-only|content|metadata|follow-symlinks true|false\n  config set content-index-mode auto|basic|freqs   (também content-mode)\n  config set extract-max-mb N   (0 = automático)\n  config set text-max-mb|pdf-max-mb N   (0 = sem limite)\n  config set office-max-mb N   (0 = automático; também content-max-mb)\n  config set pdf-timeout-secs N\n  config set content-cooldown-secs N   (também cooldown-secs)\n  config set symlink-policy personal-local|local-exact\n  config preset names-only|low-memory|balanced|complete\n\n{}\n  names-only     menor índice: só nomes/caminhos\n  low-memory     conteúdo ligado, postings Basic, caps conservadores\n  balanced       automático: Basic abaixo de 6 GiB RAM, Freqs acima\n  complete       Freqs + limite maior de extração\n",
         cyan("Uso:"),
         cyan("Perfis:"),
     );
