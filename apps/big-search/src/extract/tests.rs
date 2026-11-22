@@ -161,12 +161,31 @@ fn office_index_text_as_written() {
     let docx = r#"<w:document><w:body><w:p><w:r><w:instrText> HYPERLINK "x" </w:instrText></w:r><w:r><w:t>Re</w:t></w:r><w:r><w:delText>xx</w:delText></w:r><w:r><w:t>lat&#243;rio</w:t></w:r></w:p></w:body></w:document>"#;
     let xlsx = r#"<sst><si><t>Alfa</t></si><si><r><t>Be</t></r><r><t>ta</t></r></si><si><t>漢字</t><rPh sb="0" eb="2"><t>カンジ</t></rPh></si></sst>"#;
     let pptx = r#"<p:sld><a:p><a:r><a:t>Re</a:t></a:r><a:r><a:t>latório</a:t></a:r></a:p></p:sld>"#;
-    for (ext, part, xml, expected) in [
-        ("docx", "word/document.xml", docx, "Relatório\n"),
-        ("xlsx", "xl/sharedStrings.xml", xlsx, "Alfa\nBeta\n漢字\n"),
-        ("pptx", "ppt/slides/slide1.xml", pptx, "Relatório\n"),
+    // ECMA-376 18.3.1.4: `t` is the cell's type. `s` indexes the shared table,
+    // `n`, `b` and `e` hold no text; `inlineStr` and a formula's `str` do.
+    let sheet = r#"<x:worksheet><x:sheetData>
+        <x:row><x:c t="inlineStr"><x:is><x:r><x:t>Re</x:t></x:r><x:r><x:t>lat&#243;rio</x:t></x:r><x:rPh><x:t>xx</x:t></x:rPh></x:is></x:c><x:c t="s"><x:v>0</x:v></x:c><x:c><x:v>45000</x:v></x:c><x:c t="str"><x:f>A1&amp;"!"</x:f><x:v>Total geral</x:v></x:c></x:row>
+        <x:row><x:c t="b"><x:v>1</x:v></x:c><x:c t="e"><x:v>#REF!</x:v></x:c><x:c t="inlineStr"><x:is><x:t>Fim</x:t></x:is></x:c></x:row>
+    </x:sheetData></x:worksheet>"#;
+    for (ext, parts, expected) in [
+        ("docx", &[("word/document.xml", docx)][..], "Relatório\n"),
+        (
+            "xlsx",
+            &[("xl/sharedStrings.xml", xlsx)][..],
+            "Alfa\nBeta\n漢字\n",
+        ),
+        (
+            "xlsx",
+            &[("xl/worksheets/sheet1.xml", sheet)][..],
+            "Relatório\tTotal geral\nFim\n",
+        ),
+        (
+            "pptx",
+            &[("ppt/slides/slide1.xml", pptx)][..],
+            "Relatório\n",
+        ),
     ] {
-        let text = office_text_from_reader(office_zip(&[(part, xml)]), ext);
+        let text = office_text_from_reader(office_zip(parts), ext);
         assert_eq!(text.as_deref(), Some(expected), "{ext}");
     }
 }

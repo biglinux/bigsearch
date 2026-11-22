@@ -378,8 +378,9 @@ fn exceeds_input_cap(path: &Path) -> bool {
 /// real documents (a heavy pptx is a few hundred), tight against a bomb.
 pub(crate) const MAX_ZIP_ENTRIES: usize = 4_096;
 
-/// Slides read from one pptx. Bounds both the name `Vec` and the read loop.
-const MAX_PPTX_SLIDES: usize = 512;
+/// Slides, or worksheets, read from one archive. Bounds both the name `Vec` and
+/// the read loop.
+const MAX_NUMBERED_PARTS: usize = 512;
 
 /// Reader-based core of `read_office`: extract body text from an OOXML/ODF zip.
 /// Public so fuzz targets can drive it with arbitrary bytes (`Cursor<&[u8]>`):
@@ -404,7 +405,11 @@ pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
     let parts: Vec<String> = match ext {
         "docx" => vec!["word/document.xml".to_string()],
         "odt" | "ods" | "odp" => vec!["content.xml".to_string()],
-        "xlsx" => vec!["xl/sharedStrings.xml".to_string()],
+        // Most strings sit in the shared table; a sheet written by a streaming
+        // writer holds its own.
+        "xlsx" => std::iter::once("xl/sharedStrings.xml".to_string())
+            .chain(numbered_parts(&zip, XLSX_SHEET_PREFIX))
+            .collect(),
         // Numeric order, the same order `for_each_pptx_slide` reads them in: a
         // deck's text and its page numbers must describe the same slides.
         "pptx" => slide_names(&zip),
@@ -426,7 +431,11 @@ pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
         {
             continue;
         }
-        xml_text_lines(&xml, &mut out);
+        if part.starts_with(XLSX_SHEET_PREFIX) {
+            xlsx_sheet_text(&xml, &mut out);
+        } else {
+            xml_text_lines(&xml, &mut out);
+        }
         if out.len() >= cap {
             truncate_to_char_boundary(&mut out, cap);
             break;
@@ -672,21 +681,32 @@ fn for_each_office_page(
 pub(crate) fn slide_names<R: std::io::Read + std::io::Seek>(
     zip: &zip::ZipArchive<R>,
 ) -> Vec<String> {
-    // A name the archive cannot decode is no slide of ours: they are ASCII.
+    numbered_parts(zip, "ppt/slides/slide")
+}
+
+const XLSX_SHEET_PREFIX: &str = "xl/worksheets/sheet";
+
+/// The parts named `{prefix}N.xml`, in the order of N, at most
+/// [`MAX_NUMBERED_PARTS`].
+fn numbered_parts<R: std::io::Read + std::io::Seek>(
+    zip: &zip::ZipArchive<R>,
+    prefix: &str,
+) -> Vec<String> {
+    // A name the archive cannot decode is no part of ours: they are ASCII.
     let mut names: Vec<String> = zip
         .file_names()
         .filter_map(Result::ok)
-        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+        .filter(|n| n.starts_with(prefix) && n.ends_with(".xml"))
         .map(String::from)
         .collect();
     // Numerically: `slide10.xml` sorts before `slide2.xml` as text.
     names.sort_by_key(|n| {
-        n.trim_start_matches("ppt/slides/slide")
+        n.trim_start_matches(prefix)
             .trim_end_matches(".xml")
             .parse::<u32>()
             .unwrap_or(0)
     });
-    names.truncate(MAX_PPTX_SLIDES);
+    names.truncate(MAX_NUMBERED_PARTS);
     names
 }
 
@@ -803,6 +823,60 @@ fn office_xml_pages(
         buf.clear();
     }
     breaks
+}
+
+/// The strings a worksheet holds itself rather than in the shared string table:
+/// inline strings and the text results of formulas, a tab after each cell and a
+/// line per row. Numbers, booleans, errors and shared-string indexes are no
+/// text, and neither are formulas and phonetic readings. Element names are
+/// matched without their prefix, which some writers add (`x:c`).
+fn xlsx_sheet_text(xml: &[u8], out: &mut String) {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    // The open cell's type says it holds a string of its own.
+    let mut text_cell = false;
+    // Inside that string's `<t>` or `<v>`.
+    let mut reading = false;
+    let mut phonetic_depth = 0usize;
+    let mut cell_start = out.len();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match e.local_name().as_ref() {
+                "c" => {
+                    text_cell = e.attributes().flatten().any(|a| {
+                        a.key.local_name().as_ref() == "t"
+                            && matches!(a.value.as_ref(), "inlineStr" | "str")
+                    });
+                    cell_start = out.len();
+                }
+                "rPh" => phonetic_depth += 1,
+                "t" | "v" => reading = text_cell && phonetic_depth == 0,
+                _ => {}
+            },
+            Ok(Event::End(e)) => match e.local_name().as_ref() {
+                "c" => {
+                    if out.len() > cell_start {
+                        out.push('\t');
+                    }
+                    text_cell = false;
+                }
+                "row" => {
+                    if out.ends_with('\t') {
+                        out.pop();
+                        out.push('\n');
+                    }
+                }
+                "rPh" => phonetic_depth = phonetic_depth.saturating_sub(1),
+                "t" | "v" => reading = false,
+                _ => {}
+            },
+            Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) if reading => push_xml_text(&e, out),
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// The text of a text event or an entity reference, appended as written.
