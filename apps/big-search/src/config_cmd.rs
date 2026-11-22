@@ -56,9 +56,9 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
 pub(super) fn print_config_help() {
     let title = bold("big-search config");
     println!(
-        "{title}\n\n{}\n  config show\n  config path\n  config set names-only|content|metadata|follow-symlinks true|false\n  config set content-index-mode auto|basic|freqs   (também content-mode)\n  config set extract-max-mb N   (0 = automático)\n  config set text-max-mb|pdf-max-mb N   (0 = sem limite)\n  config set office-max-mb N   (0 = automático; também content-max-mb)\n  config set pdf-timeout-secs N\n  config set content-cooldown-secs N   (também cooldown-secs)\n  config set symlink-policy personal-local|local-exact\n  config preset names-only|low-memory|balanced|complete\n\n{}\n  names-only     menor índice: só nomes/caminhos\n  low-memory     conteúdo ligado, postings Basic, caps conservadores\n  balanced       automático: Basic abaixo de 6 GiB RAM, Freqs acima\n  complete       Freqs + limite maior de extração\n",
-        cyan("Uso:"),
-        cyan("Perfis:"),
+        "{title}\n\n{}\n  config show\n  config path\n  config set names-only|content|metadata|follow-symlinks true|false\n  config set content-index-mode auto|basic|freqs   (also content-mode)\n  config set extract-max-mb N   (0 = automatic)\n  config set text-max-mb|pdf-max-mb N   (0 = no limit)\n  config set office-max-mb N   (0 = automatic; also content-max-mb)\n  config set pdf-timeout-secs N\n  config set content-cooldown-secs N   (also cooldown-secs)\n  config set symlink-policy personal-local|local-exact\n  config preset names-only|low-memory|balanced|complete\n\n{}\n  names-only     smallest index: names and paths only\n  low-memory     content on, Basic postings, conservative caps\n  balanced       automatic: Basic below 6 GiB of RAM, Freqs above\n  complete       Freqs and a larger extraction cap\n",
+        cyan("Usage:"),
+        cyan("Profiles:"),
     );
 }
 
@@ -67,60 +67,53 @@ pub(super) fn cmd_config_show() -> Result<()> {
     let resolved = settings::resolved_content_index_mode().as_str();
     let ram = settings::total_memory_bytes()
         .map(format_bytes)
-        .unwrap_or_else(|| "desconhecida".to_string());
+        .unwrap_or_else(|| "unknown".to_string());
     let profile = if settings::names_only() {
-        yellow("só nomes")
+        yellow("names only")
     } else {
-        green("nomes + conteúdo")
+        green("names and content")
     };
     println!(
         "{} {}",
-        bold("Arquivo de configuração:"),
+        bold("Configuration file:"),
         config::config_file().display()
     );
-    println!("{} {ram}", bold("RAM total:"));
+    println!("{} {ram}", bold("Total RAM:"));
     let capacity = settings::effective_memory_bytes()
         .map(format_bytes)
-        .unwrap_or_else(|| "desconhecida (limites conservadores)".to_owned());
+        .unwrap_or_else(|| "unknown (conservative limits)".to_owned());
+    println!("{} {capacity}", bold("Memory sized for:"));
+    println!("{} {profile}", bold("Effective profile:"));
     println!(
-        "{} {capacity}",
-        bold("Capacidade observada para dimensionamento:")
-    );
-    println!("{} {profile}", bold("Perfil efetivo:"));
-    println!(
-        "{} pedido={}, efetivo={}",
-        bold("Modo de índice de conteúdo:"),
+        "{} requested={}, effective={}",
+        bold("Content index mode:"),
         requested,
         resolved,
     );
     println!(
         "{} {}",
-        bold("Limite de extração por arquivo:"),
+        bold("Text kept per file:"),
         settings::extract_max_mb_label()
     );
     println!(
         "{} {}",
-        bold("Limite de entrada de texto:"),
+        bold("Text input limit:"),
         input_cap_label(settings::text_max_input_bytes())
     );
     println!(
         "{} {}",
-        bold("Limite de entrada Office:"),
+        bold("Office input limit:"),
         input_cap_label(settings::office_max_input_bytes())
     );
     println!(
         "{} {}",
-        bold("Limite de entrada PDF:"),
+        bold("PDF input limit:"),
         input_cap_label(settings::pdf_max_input_bytes())
     );
+    println!("{} {}s", bold("PDF timeout:"), settings::pdf_timeout_secs());
     println!(
-        "{} {}s",
-        bold("Tempo limite de PDF:"),
-        settings::pdf_timeout_secs()
-    );
-    println!(
-        "{} BIG_SEARCH_NAMES_ONLY, BIG_SEARCH_CONTENT_INDEX_MODE, BIG_SEARCH_EXTRACT_MAX_MB, BIG_SEARCH_TEXT_MAX_MB, BIG_SEARCH_OFFICE_MAX_MB, BIG_SEARCH_PDF_MAX_MB",
-        bold("Variáveis de ambiente:"),
+        "{} BIG_SEARCH_* variables override these; DESIGN.md lists them",
+        bold("Environment:"),
     );
     Ok(())
 }
@@ -137,7 +130,7 @@ pub(super) fn format_bytes(bytes: u64) -> String {
 
 pub(super) fn input_cap_label(bytes: u64) -> String {
     if bytes == 0 {
-        "sem limite de entrada".to_string()
+        "no input limit".to_string()
     } else {
         format!("{} MiB", bytes / (1 << 20))
     }
