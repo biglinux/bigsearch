@@ -20,3 +20,6 @@ big-docinfo = { path = "../../crates/foundation/big-docinfo", version = "0.1.0" 
 big-search = { path = "../big-search", version = "0.1.0" }
 libc = { version = "0.2.186" }
 serde_json = { version = "1.0.150" }
+
+[lints]
+workspace = true

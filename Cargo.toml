@@ -11,6 +11,17 @@ members = [
 default-members = ["apps/big-search"]
 exclude = ["apps/big-search/fuzz"]
 
+[workspace.lints.rust]
+deprecated = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+exit = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "deny"
+
 [workspace.package]
 edition = "2024"
 rust-version = "1.98.1"

@@ -344,5 +344,6 @@ pub(super) fn indexed_mime(
         .unwrap_or_default()
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests;

@@ -2,6 +2,10 @@
 //! binary against a throwaway index so the thin `cmd_*` wrappers (which only wire
 //! stdout to the query layer) are exercised, not just the query functions beneath.
 #![cfg(not(miri))]
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] functions panic on setup failure"
+)]
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,

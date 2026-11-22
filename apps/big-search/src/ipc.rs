@@ -235,6 +235,8 @@ fn peer_is_self(stream: &UnixStream) -> bool {
     // SAFETY: getsockopt on a valid connected Unix socket fd; ucred is POD.
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the fd is the stream's, alive for the call; `cred` and `len` are
+    // valid for writes of the size `len` states.
     let rc = unsafe {
         libc::getsockopt(
             stream.as_raw_fd(),
@@ -659,5 +661,6 @@ fn history_reply(
     }
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests;

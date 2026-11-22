@@ -205,6 +205,7 @@ fn peak_rss_kb() -> i64 {
 fn self_cpu_ms() -> f64 {
     // SAFETY: getrusage on a zeroed rusage with RUSAGE_SELF is always valid.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `usage` is valid for writes of a whole rusage.
     unsafe {
         libc::getrusage(libc::RUSAGE_SELF, &mut usage);
     }
@@ -459,6 +460,10 @@ fn startup_sync(
             // a near-empty index silently is worse than dying: exit so
             // systemd restarts the unit (visible failure, fresh attempt).
             log::error!("sync failed after retries — exiting for restart: {e:#}");
+            #[expect(
+                clippy::exit,
+                reason = "systemd restarts the unit; nothing above owns a cleanup"
+            )]
             std::process::exit(1);
         }
     };

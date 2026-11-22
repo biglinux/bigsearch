@@ -1,6 +1,10 @@
 //! Origin/provenance IPC contract: apps can register a file origin and later ask
 //! for it directly or as an opt-in query enrichment.
 #![cfg(not(miri))]
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] functions panic on setup failure"
+)]
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,

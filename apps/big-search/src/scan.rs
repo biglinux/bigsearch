@@ -599,7 +599,8 @@ fn persist_state_if_needed(state: &mut State) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
     use crate::index::{fields, open_or_create};

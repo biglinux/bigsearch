@@ -312,6 +312,7 @@ fn topology() -> (f64, bool) {
         // SAFETY: a zeroed cpu_set_t is a valid empty set; sched_getaffinity
         // writes at most size_of::<cpu_set_t>() bytes into it.
         let mut allowed: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: pid 0 is this thread; `allowed` is valid for the size passed.
         let read = unsafe {
             libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut allowed)
         } == 0;

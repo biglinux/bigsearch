@@ -347,5 +347,6 @@ pub(super) fn count_content(reader: &IndexReader, q: &str, cap: usize) -> Result
     }
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests;

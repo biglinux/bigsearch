@@ -1,4 +1,6 @@
 msrv = "1.98.1"
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
 
 # ── Complexity thresholds ──────────────────────────────────────────
 cognitive-complexity-threshold = 25

@@ -2,6 +2,10 @@
 //! refuse (exit 0) without stealing the socket or colliding on the Tantivy writer
 //! lock. Regression guard for the "two daemons" bug.
 #![cfg(not(miri))]
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] functions panic on setup failure"
+)]
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,

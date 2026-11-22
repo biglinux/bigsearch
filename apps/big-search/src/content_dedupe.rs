@@ -357,7 +357,8 @@ struct FiemapExtent {
     fe_reserved: [u32; 3],
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
 

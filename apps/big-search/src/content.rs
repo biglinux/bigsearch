@@ -828,5 +828,6 @@ fn upsert_with_body(
     Ok(())
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests;

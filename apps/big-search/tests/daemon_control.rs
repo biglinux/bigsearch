@@ -1,6 +1,10 @@
 //! Lifecycle commands over the v2 protocol: pause flips the reported state, resume
 //! clears it, rebuild walks the disk again.
 #![cfg(not(miri))]
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] functions panic on setup failure"
+)]
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,

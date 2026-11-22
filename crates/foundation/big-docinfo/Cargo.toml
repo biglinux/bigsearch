@@ -13,3 +13,6 @@ regex = { version = "1.13.2" }
 
 [dev-dependencies]
 serde_json = { version = "1.0.150" }
+
+[lints]
+workspace = true

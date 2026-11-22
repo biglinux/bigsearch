@@ -248,7 +248,8 @@ fn prune_nested(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
     kept
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
 

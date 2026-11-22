@@ -138,5 +138,6 @@ fn merge_by_path(names: Vec<Hit>, contents: Vec<Hit>, q: &str) -> Vec<Candidate>
     merged.into_values().collect()
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests;

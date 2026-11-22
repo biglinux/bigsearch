@@ -11,7 +11,8 @@ mod both;
 mod content;
 mod listing;
 mod names;
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests;
 
 pub use both::search_both;

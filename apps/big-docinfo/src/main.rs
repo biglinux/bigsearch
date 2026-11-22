@@ -18,6 +18,7 @@
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use big_docinfo::{Hints, analyze};
@@ -26,16 +27,19 @@ const USAGE: &str = "usage: big-docinfo [--json | --name] FILE | big-docinfo ren
 /// Longest file name most Linux file systems accept, in bytes.
 const NAME_MAX: usize = 255;
 
-fn main() {
+fn main() -> ExitCode {
     // Messages are written for the person reading the dialog: one sentence with
     // the cause and what to do, no paths or error chains.
-    if let Err(err) = run() {
-        eprintln!("{err}");
-        std::process::exit(1);
+    match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::FAILURE
+        }
     }
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<ExitCode> {
     // A file name is bytes: one from an old FAT stick may not be UTF-8.
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match args.as_slice() {
@@ -43,16 +47,19 @@ fn run() -> Result<()> {
             let Some(name) = name.to_str() else {
                 bail!("Esse nome tem caracteres inválidos. Use outro nome.");
             };
-            rename(Path::new(file), name)
+            rename(Path::new(file), name)?;
         }
-        [flag, file] if flag == "--json" => describe(Path::new(file), Output::Json),
-        [flag, file] if flag == "--name" => describe(Path::new(file), Output::Name),
-        [file] if file.as_bytes().first() != Some(&b'-') => describe(Path::new(file), Output::Text),
+        [flag, file] if flag == "--json" => describe(Path::new(file), Output::Json)?,
+        [flag, file] if flag == "--name" => describe(Path::new(file), Output::Name)?,
+        [file] if file.as_bytes().first() != Some(&b'-') => {
+            describe(Path::new(file), Output::Text)?;
+        }
         _ => {
             eprintln!("{USAGE}");
-            std::process::exit(2);
+            return Ok(ExitCode::from(2));
         }
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 enum Output {
