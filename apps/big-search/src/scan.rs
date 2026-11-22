@@ -100,7 +100,7 @@ const USER_IGNORE_TEMPLATE: &str = "\
 #   big-search config set follow-symlinks true # index top-level symlinked dirs
 ";
 
-/// Seed [`USER_IGNORE_TEMPLATE`] at the user ignore path if it does not exist
+/// Seed `USER_IGNORE_TEMPLATE` at the user ignore path if it does not exist
 /// yet. Never overwrites: the user's edits are kept. Called from the CLI only:
 /// the service never writes under `$XDG_CONFIG_HOME`.
 pub fn seed_user_ignore() {

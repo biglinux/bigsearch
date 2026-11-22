@@ -523,7 +523,7 @@ fn catalog_content_batch_limit() -> usize {
 ///
 /// This is the whole shape of a tag write. A tag lives in the `user.xdg.tags`
 /// extended attribute, and writing an extended attribute leaves size and
-/// modification time exactly as they were, so [`pending_batch_with_byte_limit`] calls the file
+/// modification time exactly as they were, so `pending_batch_with_byte_limit` calls the file
 /// unchanged and skips it. Forgetting the catalogue row alone does not help:
 /// the content index keeps its own record, and the tag token lives there.
 /// Without this, the forced reindex commits a name-index document with nothing

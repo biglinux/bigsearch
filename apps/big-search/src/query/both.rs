@@ -55,7 +55,7 @@ impl Candidate {
 /// The final tie-break is the path, raw rather than folded: determinism is all
 /// it has to provide, and folding would allocate a second string per candidate.
 /// That tie-break carries more weight than it looks: the name field is indexed
-/// as ngrams with [`IndexRecordOption::Basic`], which stores no term
+/// as ngrams with [`tantivy::schema::IndexRecordOption::Basic`], which stores no term
 /// frequencies, so BM25 over it gives every document matching the same grams
 /// the same score (`alpha.md` and `alpha_alpha.md` tie for `alpha`). The name
 /// band is therefore mostly one big tie, and the path is what actually orders

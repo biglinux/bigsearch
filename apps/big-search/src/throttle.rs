@@ -35,7 +35,7 @@ pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
 ///   its cgroup, though: without the indexer's cgroup it only puts the indexer
 ///   behind the query thread, and a program sharing a core with the indexer
 ///   still loses a large share of it.
-/// - The utilization clamp ([`INDEXER_UTIL_MAX`]) holds the clock down where
+/// - The utilization clamp (`INDEXER_UTIL_MAX`) holds the clock down where
 ///   the frequency driver follows the scheduler (`schedutil`); drivers that pick
 ///   frequencies in hardware (`intel_pstate`/`amd-pstate` active) ignore it.
 /// - nice 19 for kernels that refuse `SCHED_IDLE`, and idle I/O priority, which

@@ -14,7 +14,7 @@ use tantivy::tokenizer::{
 };
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
-/// Registered analyzer for the `name` field: [`NameGrams`] of [`name_text`].
+/// Registered analyzer for the `name` field: `NameGrams` of [`name_text`].
 /// Its name changes with what it emits (last: `name_grams`, before NFKC and
 /// single CJK characters), so the on-disk schema differs and the name index
 /// rebuilds.
@@ -264,7 +264,7 @@ fn register_body_tokenizer(index: &Index) {
     }
 }
 
-/// The folding of [`crate::extract::fold_script_into`] for content words, so a
+/// The folding of `extract::fold_script_into` for content words, so a
 /// word is indexed and queried the way names are compared: "отчет" finds
 /// "Отчёт", "αναφορα" "Αναφορά", "احمد" "أحمد", a decomposed accent its
 /// precomposed twin. An Arabic word also loses its article (ال, وال, بال,
@@ -396,10 +396,8 @@ pub fn open_read_only(dir: &Path) -> Result<Index> {
 }
 
 /// [`open_read_only`] for searching: mapped for small random reads (see
-/// [`NoFsyncDirectory::open_for_queries`]). Commands that walk every document
+/// `NoFsyncDirectory::open_for_queries`). Commands that walk every document
 /// (`count`, `list`) keep [`open_read_only`] and the kernel's read-ahead.
-///
-/// [`NoFsyncDirectory::open_for_queries`]: crate::nosync_dir::NoFsyncDirectory::open_for_queries
 pub fn open_for_queries(dir: &Path) -> Result<Index> {
     open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open_for_queries)
 }
