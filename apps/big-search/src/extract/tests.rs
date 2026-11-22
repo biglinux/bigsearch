@@ -22,6 +22,29 @@ fn pages_and_markdown_name_titles() {
     );
 }
 
+/// A saved page is indexed by what a reader sees, and still tells big-docinfo
+/// its title and heading.
+#[test]
+fn html_page_indexed_as_text() {
+    let dir = temporary_extract_dir("html");
+    let path = dir.join("page.html");
+    std::fs::write(
+        &path,
+        r#"<html><head><title>Ata</title><style>.destaque{}</style></head><body><h1>Reuni&#227;o</h1><p class="destaque">Relat&#243;rio</p><script>var contador</script></body></html>"#,
+    )
+    .unwrap();
+    let text = content(&path).unwrap();
+    assert!(text.contains("Relatório"), "{text:?}");
+    for markup in ["destaque", "contador", "class", "<p"] {
+        assert!(!text.contains(markup), "{markup} in {text:?}");
+    }
+    let page = described(&path).unwrap();
+    assert_eq!(page.declared_title.as_deref(), Some("Ata"));
+    assert_eq!(page.prominent, ["Reunião"]);
+    assert!(page.text.contains("Relatório"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn unclosed_script_hides_the_rest() {
     assert_eq!(html_text("<p>kept<script>a<script>b<style>c"), "\nkept");

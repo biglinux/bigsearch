@@ -35,6 +35,11 @@ fn is_text_ext(ext: &str) -> bool {
     )
 }
 
+/// Pages indexed by their readable text, not their markup.
+fn is_html_ext(ext: &str) -> bool {
+    matches!(ext, "html" | "htm" | "xhtml")
+}
+
 fn is_office_ext(ext: &str) -> bool {
     matches!(ext, "docx" | "odt" | "ods" | "odp" | "pptx" | "xlsx")
 }
@@ -117,7 +122,9 @@ fn ext_of(path: &Path) -> Option<String> {
 /// Extracted text for `path`, or `None` if not eligible / not extractable.
 pub fn content(path: &Path) -> Option<String> {
     let ext = ext_of(path)?;
-    if is_text_ext(&ext) {
+    if is_html_ext(&ext) {
+        read_text(path).map(|html| html_text(&html))
+    } else if is_text_ext(&ext) {
         read_text(path)
     } else if ext == "pdf" {
         read_pdf(path)
@@ -143,20 +150,21 @@ pub struct Described {
 /// own title.
 pub fn described(path: &Path) -> Option<Described> {
     let ext = ext_of(path)?;
+    if is_html_ext(&ext) {
+        let html = read_text(path)?;
+        return Some(Described {
+            text: html_text(&html),
+            declared_title: html_element(&html, "title"),
+            prominent: html_element(&html, "h1").into_iter().collect(),
+        });
+    }
     let (text, declared_title) = match ext.as_str() {
         "pdf" => crate::extract_pdf::read_pdf_titled(path)?,
-        "html" | "htm" | "xhtml" => {
-            let html = content(path)?;
-            (html_text(&html), html_element(&html, "title"))
-        }
         e if is_titled_ext(e) => read_titled(path, e)?,
         _ => (content(path)?, office_declared_title(path, &ext)),
     };
     let prominent = match ext.as_str() {
         "md" | "markdown" => markdown_headings(&text),
-        "html" | "htm" | "xhtml" => content(path)
-            .map(|html| html_element(&html, "h1").into_iter().collect())
-            .unwrap_or_default(),
         _ => crate::prominent::prominent_lines(path, &ext),
     };
     Some(Described {
@@ -286,11 +294,14 @@ fn decode_entities(s: &str) -> String {
 }
 
 /// Extract text for a file identified by content sniffing (no usable extension):
-/// PDF via `pdftotext`, anything `text/*` as plain text. Used by the metadata
-/// pass so an extension-less document is still full-text searchable.
+/// PDF via `pdftotext`, HTML as its readable text, anything else `text/*` as
+/// plain text. Used by the metadata pass so an extension-less document is still
+/// full-text searchable.
 pub fn content_for_mime(path: &Path, mime: &str) -> Option<String> {
     if mime == "application/pdf" {
         read_pdf(path)
+    } else if mime == "text/html" {
+        read_text(path).map(|html| html_text(&html))
     } else if mime.starts_with("text/") {
         read_text(path)
     } else {
