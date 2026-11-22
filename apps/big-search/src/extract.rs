@@ -786,20 +786,15 @@ fn office_xml_pages(
     on_page: &mut dyn FnMut(&str),
 ) -> usize {
     use quick_xml::events::Event;
-    let hidden = |name: &str| {
-        matches!(
-            name,
-            "w:instrText" | "w:delText" | "office:annotation" | "rPh"
-        )
-    };
+    let hidden = |name: &str| matches!(name, "instrText" | "delText" | "annotation" | "rPh");
     let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut hidden_depth = 0usize;
     let mut breaks = 0;
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if hidden(e.name().as_ref()) => hidden_depth += 1,
-            Ok(Event::End(e)) if hidden(e.name().as_ref()) => {
+            Ok(Event::Start(e)) if hidden(e.local_name().as_ref()) => hidden_depth += 1,
+            Ok(Event::End(e)) if hidden(e.local_name().as_ref()) => {
                 hidden_depth = hidden_depth.saturating_sub(1)
             }
             Ok(
@@ -817,7 +812,15 @@ fn office_xml_pages(
                 page.clear();
             }
             Ok(e @ (Event::Text(_) | Event::GeneralRef(_))) => push_xml_text(&e, page),
-            Ok(e @ (Event::End(_) | Event::Empty(_))) => page.extend(layout_char(&e)),
+            Ok(e @ (Event::Start(_) | Event::End(_) | Event::Empty(_))) => {
+                // An opening only separates what came before it from what it holds.
+                if let Some(mark) = layout_char(&e)
+                    && (!matches!(e, Event::Start(_))
+                        || !page.is_empty() && !page.ends_with(char::is_whitespace))
+                {
+                    page.push(mark);
+                }
+            }
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -826,21 +829,29 @@ fn office_xml_pages(
     breaks
 }
 
-/// The character an element's end, or an empty element, stands for in the
-/// laid-out text: a line, a tab or a space.
+/// The character an element stands for in the laid-out text: a line, a tab, a
+/// space or a hyphen. Matched without the prefix, which writers choose freely
+/// (`x:si`, `w:p`, `a:br`).
 fn layout_char(event: &quick_xml::events::Event<'_>) -> Option<char> {
     use quick_xml::events::Event;
     match event {
-        Event::End(e) => match e.name().as_ref() {
-            // `si` is one string of a spreadsheet's shared string table.
-            "w:p" | "text:p" | "text:h" | "a:p" | "si" => Some('\n'),
-            "w:tc" | "table:table-cell" => Some('\t'),
+        // A note, a text box or a paragraph inside another paragraph.
+        Event::Start(e) => match e.local_name().as_ref() {
+            "p" | "h" => Some('\n'),
+            "note" | "txbxContent" | "text-box" => Some(' '),
             _ => None,
         },
-        Event::Empty(e) => match e.name().as_ref() {
-            "w:br" | "w:cr" | "text:line-break" | "w:p" | "text:p" | "text:h" => Some('\n'),
-            "w:tab" | "text:tab" => Some('\t'),
-            "text:s" => Some(' '),
+        Event::End(e) => match e.local_name().as_ref() {
+            // `si` is one string of a spreadsheet's shared string table.
+            "p" | "h" | "si" | "br" | "cr" | "line-break" => Some('\n'),
+            "tc" | "table-cell" => Some('\t'),
+            _ => None,
+        },
+        Event::Empty(e) => match e.local_name().as_ref() {
+            "br" | "cr" | "line-break" | "p" | "h" => Some('\n'),
+            "tab" => Some('\t'),
+            "s" => Some(' '),
+            "noBreakHyphen" => Some('-'),
             _ => None,
         },
         _ => None,

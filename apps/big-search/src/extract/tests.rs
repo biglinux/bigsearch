@@ -184,10 +184,40 @@ fn office_index_text_as_written() {
     let docx = r#"<w:document><w:body><w:p><w:r><w:instrText> HYPERLINK "x" </w:instrText></w:r><w:r><w:t>Re</w:t></w:r><w:r><w:delText>xx</w:delText></w:r><w:r><w:t>lat&#243;rio</w:t></w:r></w:p></w:body></w:document>"#;
     let xlsx = r#"<sst><si><t>Alfa</t></si><si><r><t>Be</t></r><r><t>ta</t></r></si><si><t>漢字</t><rPh sb="0" eb="2"><t>カンジ</t></rPh></si></sst>"#;
     let pptx = r#"<p:sld><a:p><a:r><a:t>Re</a:t></a:r><a:r><a:t>latório</a:t></a:r></a:p></p:sld>"#;
+    // Writers choose the prefix; the .NET Open XML SDK writes `x:`.
+    let xlsx_prefixed =
+        r#"<x:sst><x:si><x:t>Fornecedor</x:t></x:si><x:si><x:t>Valor</x:t></x:si></x:sst>"#;
+    let pptx_break = r#"<p:sld><a:p><a:r><a:t>Primeira</a:t></a:r><a:br/><a:r><a:t>Segunda</a:t></a:r></a:p></p:sld>"#;
+    let odt_note = r#"<office:text><text:p>palavra<text:note><text:note-citation>1</text:note-citation><text:note-body><text:p>rodape</text:p></text:note-body></text:note> segue</text:p></office:text>"#;
+    let docx_nested = r#"<w:document><w:body><w:p><w:r><w:t>antes</w:t></w:r><w:r><w:pict><v:textbox><w:txbxContent><w:p><w:r><w:t>caixa</w:t></w:r></w:p></w:txbxContent></v:textbox></w:pict></w:r><w:r><w:t>depois</w:t></w:r><w:r><w:br></w:br><w:t xml:space="preserve">linha </w:t></w:r><w:r><w:t>ref</w:t><w:noBreakHyphen/><w:t>hifen</w:t></w:r></w:p></w:body></w:document>"#;
     for (ext, part, xml, expected) in [
         ("docx", "word/document.xml", docx, "Relatório\n"),
         ("xlsx", "xl/sharedStrings.xml", xlsx, "Alfa\nBeta\n漢字\n"),
         ("pptx", "ppt/slides/slide1.xml", pptx, "Relatório\n"),
+        (
+            "xlsx",
+            "xl/sharedStrings.xml",
+            xlsx_prefixed,
+            "Fornecedor\nValor\n",
+        ),
+        (
+            "pptx",
+            "ppt/slides/slide1.xml",
+            pptx_break,
+            "Primeira\nSegunda\n",
+        ),
+        (
+            "odt",
+            "content.xml",
+            odt_note,
+            "palavra 1\nrodape\n segue\n",
+        ),
+        (
+            "docx",
+            "word/document.xml",
+            docx_nested,
+            "antes caixa\ndepois\nlinha ref-hifen\n",
+        ),
     ] {
         let text = office_text_from_reader(office_zip(&[(part, xml)]), ext);
         assert_eq!(text.as_deref(), Some(expected), "{ext}");
