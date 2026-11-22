@@ -466,10 +466,7 @@ fn write_content_results(
 }
 
 fn dedupe_content_enabled() -> bool {
-    matches!(
-        std::env::var("BIG_SEARCH_DEDUP_CONTENT").ok().as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
+    crate::settings::env_bool("BIG_SEARCH_DEDUP_CONTENT").unwrap_or(false)
 }
 
 /// One pending backfill batch selected from the complete name catalogue without

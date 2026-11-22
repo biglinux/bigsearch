@@ -50,6 +50,7 @@ pub(super) fn open_store(path: &Path) -> Result<Connection> {
         "
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
+        PRAGMA journal_size_limit = 1048576;
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY,

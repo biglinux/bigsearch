@@ -195,6 +195,8 @@ fn pause_resume_rebuild_cycle() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// Debug builds only: a release binary ignores the batch size this test sets.
+#[cfg(debug_assertions)]
 #[test]
 fn content_backfill_continues_past_batch() {
     let base = scratch::scratch_dir("bs-content-backfill");
