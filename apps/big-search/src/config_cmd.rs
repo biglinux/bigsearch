@@ -26,7 +26,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
             println!(
                 "{}",
                 dim(
-                    "The service reads the configuration when it starts: run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped."
+                    "The service applies it when it restarts, which big-search-config.path does on its own; otherwise run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped."
                 )
             );
             Ok(())
@@ -41,7 +41,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
             println!(
                 "{}",
                 dim(
-                    "The service reads the configuration when it starts: run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped."
+                    "The service applies it when it restarts, which big-search-config.path does on its own; otherwise run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped."
                 )
             );
             Ok(())

@@ -71,3 +71,4 @@ SystemCallFilter=~@privileged @mount @reboot @swap @obsolete
 
 [Install]
 WantedBy=default.target
+Also=big-search-config.path

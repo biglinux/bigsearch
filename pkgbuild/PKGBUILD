@@ -87,6 +87,9 @@ package_big-search() {
     install -Dm644 /dev/null "${pkgdir}/usr/lib/systemd/user/big-search.service"
     sed 's|%h/.local/bin/big-search|/usr/bin/big-search|' apps/big-search/packaging/big-search.service \
         >"${pkgdir}/usr/lib/systemd/user/big-search.service"
+    install -Dm644 -t "${pkgdir}/usr/lib/systemd/user" \
+        apps/big-search/packaging/big-search-config.path \
+        apps/big-search/packaging/big-search-config.service
 
     install -Dm644 README.md "${pkgdir}/usr/share/doc/big-search/README.md"
     install -Dm644 apps/big-search/DESIGN.md "${pkgdir}/usr/share/doc/big-search/DESIGN.md"

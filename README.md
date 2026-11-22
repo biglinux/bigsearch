@@ -48,8 +48,9 @@ the bookkeeping around it is SQLite.
 ```sh
 cargo build --release
 install -Dm755 target/release/big-search ~/.local/bin/big-search
-install -Dm644 apps/big-search/packaging/big-search.service \
-    ~/.config/systemd/user/big-search.service
+install -Dm644 -t ~/.config/systemd/user apps/big-search/packaging/big-search.service \
+    apps/big-search/packaging/big-search-config.path \
+    apps/big-search/packaging/big-search-config.service
 systemctl --user enable --now big-search.service
 ```
 
@@ -91,8 +92,9 @@ big-search config preset low-memory     # names-only | low-memory | balanced | c
 big-search config set extract-max-mb 16
 ```
 
-The service reads the file when it starts: after a change, run
-`systemctl --user restart big-search`.
+The service reads the file when it starts. `big-search-config.path`, enabled
+with the service, restarts it two seconds after the file changes; without it,
+run `systemctl --user restart big-search`.
 
 Extra exclusions go in `~/.config/big-search/ignore`, in gitignore syntax. A
 `!` line brings back something the built-in rules skip (`node_modules/`,

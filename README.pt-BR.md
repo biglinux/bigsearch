@@ -51,8 +51,9 @@ SQLite.
 ```sh
 cargo build --release
 install -Dm755 target/release/big-search ~/.local/bin/big-search
-install -Dm644 apps/big-search/packaging/big-search.service \
-    ~/.config/systemd/user/big-search.service
+install -Dm644 -t ~/.config/systemd/user apps/big-search/packaging/big-search.service \
+    apps/big-search/packaging/big-search-config.path \
+    apps/big-search/packaging/big-search-config.service
 systemctl --user enable --now big-search.service
 ```
 
@@ -95,7 +96,8 @@ big-search config preset low-memory     # names-only | low-memory | balanced | c
 big-search config set extract-max-mb 16
 ```
 
-O serviço lê o arquivo quando inicia: depois de uma mudança, rode
+O serviço lê o arquivo quando inicia. O `big-search-config.path`, ativado junto
+com o serviço, o reinicia dois segundos depois que o arquivo muda; sem ele, rode
 `systemctl --user restart big-search`.
 
 Exclusões extras vão em `~/.config/big-search/ignore`, na sintaxe do

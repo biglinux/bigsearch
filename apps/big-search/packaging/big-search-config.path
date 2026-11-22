@@ -1,0 +1,13 @@
+# Restarts big-search when its configuration file changes, so a change from the
+# settings window, the CLI or an editor applies without a manual restart.
+[Unit]
+Description=Apply big-search configuration changes
+Documentation=https://github.com/biglinux/bigsearch
+ConditionUser=!@system
+
+[Path]
+PathChanged=%E/big-search/config.toml
+Unit=big-search-config.service
+
+[Install]
+WantedBy=default.target
