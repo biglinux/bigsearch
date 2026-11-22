@@ -373,8 +373,6 @@ mod tests {
     fn content_settles_ambiguous_extensions() {
         let db = database();
         let dir = crate::test_env::scratch_dir(&format!("lsearch-mime-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
         let write = |name: &str, bytes: &[u8]| {
             let path = dir.join(name);
             std::fs::write(&path, bytes).unwrap();

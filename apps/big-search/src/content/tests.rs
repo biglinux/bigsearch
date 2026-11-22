@@ -72,8 +72,6 @@ fn pending_batch_stops_at_byte_budget() {
         "lsearch-content-byte-budget-{}",
         std::process::id()
     ));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
     let first = base.join("first.txt");
     let second = base.join("second.txt");
     std::fs::write(&first, vec![b'a'; 1024 * 1024]).unwrap();
@@ -167,7 +165,6 @@ fn catalog_batch_defers_recent_edits() {
 fn deleted_files_stop_answering_content_searches() {
     let _lock = ENV_LOCK.lock().unwrap();
     let base = crate::test_env::scratch_dir(&format!("lsearch-ghost-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(base.join("files")).unwrap();
     let _env = [
         EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
@@ -230,8 +227,6 @@ fn deleted_files_stop_answering_content_searches() {
 fn clearing_state_rearms_unreferenced_sweep() {
     let _lock = ENV_LOCK.lock().unwrap();
     let base = crate::test_env::scratch_dir(&format!("lsearch-rearm-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
     let _env = [
         EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
         EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap()),
@@ -430,8 +425,6 @@ fn catalog_byte_budget_is_exclusive() {
         "lsearch-catalog-byte-boundary-{}",
         std::process::id()
     ));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
     let mib = 1u64 << 20;
     // The catalogue records the sizes the budget uses; the files only have to
     // exist, since a missing one is tombstoned instead of queued.
@@ -467,8 +460,6 @@ fn pending_byte_budget_is_exclusive() {
         "lsearch-pending-byte-boundary-{}",
         std::process::id()
     ));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
     let mib = 1usize << 20;
     let first = base.join("a.txt");
     let second = base.join("b.txt");
@@ -561,8 +552,6 @@ fn catalog_pass_indexes_every_batch() {
 #[test]
 fn body_upsert_keeps_one_document() {
     let base = crate::test_env::scratch_dir(&format!("lsearch-content-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
     let path = base.join("note.txt");
 
     let content_index = crate::index::open_content_or_create(&base.join("content-idx")).unwrap();

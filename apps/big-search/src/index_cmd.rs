@@ -345,18 +345,7 @@ fn spawn_mount_watch(commands: std::sync::mpsc::Sender<watch::WatchMessage>) {
                     )]
                     std::process::exit(EXIT_RESTART);
                 }
-                let moved = now
-                    .iter()
-                    .filter(|point| before.binary_search(point).is_err())
-                    .chain(
-                        before
-                            .iter()
-                            .filter(|point| now.binary_search(point).is_err()),
-                    );
-                let inside = moved
-                    .into_iter()
-                    .any(|point| started.iter().any(|root| point.starts_with(root)));
-                if inside {
+                if mounted_inside(&before, &now, &started) {
                     log::info!("a disk was mounted or unmounted inside a source; rescanning");
                     let rescan =
                         watch::WatchMessage::ControlCommand(watch::WatchControlCommand::Rescan);
@@ -370,6 +359,16 @@ fn spawn_mount_watch(commands: std::sync::mpsc::Sender<watch::WatchMessage>) {
     if let Err(e) = spawned {
         log::warn!("mounts are not followed: {e}");
     }
+}
+
+/// Whether a mount point in only one of two sorted tables lies inside a root.
+fn mounted_inside(before: &[PathBuf], now: &[PathBuf], roots: &[PathBuf]) -> bool {
+    let only_in = |a: &[PathBuf], b: &[PathBuf]| {
+        a.iter()
+            .filter(|point| b.binary_search(point).is_err())
+            .any(|point| roots.iter().any(|root| point.starts_with(root)))
+    };
+    only_in(now, before) || only_in(before, now)
 }
 
 /// Start the watcher thread: the startup sync, then incremental indexing for

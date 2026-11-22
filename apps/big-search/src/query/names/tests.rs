@@ -110,7 +110,6 @@ fn names_rank_by_how_they_match() {
 #[test]
 fn equal_names_rank_newest_first() {
     let dir = crate::test_env::scratch_dir(&format!("lsearch-recent-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
     let day = std::time::Duration::from_secs(86_400);
     let now = std::time::SystemTime::now();
     let mut paths = Vec::new();

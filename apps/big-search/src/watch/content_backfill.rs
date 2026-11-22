@@ -346,7 +346,6 @@ mod tests {
     #[test]
     fn compaction_merges_into_one_segment() {
         let dir = crate::test_env::scratch_dir(&format!("bs-compact-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = fields(&index).unwrap();
         let mut writer = crate::index::background_writer(&index).unwrap();

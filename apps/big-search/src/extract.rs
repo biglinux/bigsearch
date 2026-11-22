@@ -439,6 +439,38 @@ pub(crate) fn open_archive(
 /// each kind on its own. Bounds both the name `Vec` and the read loop.
 const MAX_NUMBERED_PARTS: usize = 512;
 
+/// The parts of an office archive that hold its text, in reading order.
+fn text_parts<R: std::io::Read + std::io::Seek>(
+    zip: &zip::ZipArchive<R>,
+    ext: &str,
+) -> Option<Vec<String>> {
+    let parts = match ext {
+        "docx" => {
+            let mut parts = vec!["word/document.xml".to_string()];
+            parts.extend(numbered_parts(zip, "word/header"));
+            parts.extend(numbered_parts(zip, "word/footer"));
+            parts.extend(["word/footnotes.xml".into(), "word/endnotes.xml".into()]);
+            parts
+        }
+        "odt" | "ods" | "odp" => vec!["content.xml".to_string()],
+        // Most strings sit in the shared table; a sheet written by a streaming
+        // writer holds its own.
+        "xlsx" => std::iter::once("xl/sharedStrings.xml".to_string())
+            .chain(numbered_parts(zip, XLSX_SHEET_PREFIX))
+            .collect(),
+        // Numeric order, the same order `for_each_pptx_slide` reads them in: a
+        // deck's text and its page numbers must describe the same slides. The
+        // speaker notes follow, outside any slide's page.
+        "pptx" => {
+            let mut parts = slide_names(zip);
+            parts.extend(numbered_parts(zip, "ppt/notesSlides/notesSlide"));
+            parts
+        }
+        _ => return None,
+    };
+    Some(parts)
+}
+
 /// Reader-based core of `read_office`: extract body text from an OOXML/ODF zip.
 /// Public so fuzz targets can drive it with arbitrary bytes (`Cursor<&[u8]>`):
 /// this is the untrusted-document parsing surface.
@@ -447,30 +479,7 @@ pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
     ext: &str,
 ) -> Option<String> {
     let mut zip = capped_zip(reader)?;
-    let parts: Vec<String> = match ext {
-        "docx" => {
-            let mut parts = vec!["word/document.xml".to_string()];
-            parts.extend(numbered_parts(&zip, "word/header"));
-            parts.extend(numbered_parts(&zip, "word/footer"));
-            parts.extend(["word/footnotes.xml".into(), "word/endnotes.xml".into()]);
-            parts
-        }
-        "odt" | "ods" | "odp" => vec!["content.xml".to_string()],
-        // Most strings sit in the shared table; a sheet written by a streaming
-        // writer holds its own.
-        "xlsx" => std::iter::once("xl/sharedStrings.xml".to_string())
-            .chain(numbered_parts(&zip, XLSX_SHEET_PREFIX))
-            .collect(),
-        // Numeric order, the same order `for_each_pptx_slide` reads them in: a
-        // deck's text and its page numbers must describe the same slides. The
-        // speaker notes follow, outside any slide's page.
-        "pptx" => {
-            let mut parts = slide_names(&zip);
-            parts.extend(numbered_parts(&zip, "ppt/notesSlides/notesSlide"));
-            parts
-        }
-        _ => return None,
-    };
+    let parts = text_parts(&zip, ext)?;
 
     let cap = max_extract_bytes();
     // Markup decompressed across all parts: parts of markup with no text would

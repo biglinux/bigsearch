@@ -114,7 +114,6 @@ fn non_utf8_path_has_no_row() {
 #[test]
 fn catalogue_pass_skips_kept_documents() {
     let dir = crate::test_env::scratch_dir(&format!("bs-history-unkept-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
     let conn = open_store(&dir.join("history.sqlite")).unwrap();
     for (id, path) in [(1, "/d/kept.md"), (2, "/d/edited.md")] {
         conn.execute(

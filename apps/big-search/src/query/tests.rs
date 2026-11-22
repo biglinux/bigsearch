@@ -6,7 +6,6 @@ use tantivy::{IndexReader, doc};
 
 pub(super) fn index_with(label: &str, paths: &[&str]) -> tantivy::IndexReader {
     let dir = crate::test_env::scratch_dir(&format!("lsearch-test-{}-{label}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
     let index = open_or_create(&dir).unwrap();
     let f = fields(&index).unwrap();
     let mut writer = index.writer(15_000_000).unwrap();
@@ -34,7 +33,6 @@ pub(super) fn content_index_with_profile(
         "lsearch-test-{}-{label}-content",
         std::process::id()
     ));
-    std::fs::remove_dir_all(&dir).ok();
     let index = crate::index::create_content_fixture(&dir, record).unwrap();
     let f = content_fields(&index).unwrap();
     let mut writer = index.writer(15_000_000).unwrap();
@@ -168,8 +166,6 @@ fn list_mode_answers_wordless_queries() {
 #[test]
 fn largest_pages_by_size() {
     let root = crate::test_env::scratch_dir(&format!("lsearch-largest-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
-    std::fs::create_dir_all(&root).unwrap();
     // Recorded (mtime, size), in neither name nor time order.
     let recorded = [
         ("small.iso", 100, 10),
@@ -242,8 +238,6 @@ fn largest_pages_by_size() {
 #[test]
 fn type_filter_finds_videos_by_content() {
     let dir = crate::test_env::scratch_dir(&format!("lsearch-mime-query-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
     let mut stream = vec![0_u8; 188 * 4];
     stream.iter_mut().step_by(188).for_each(|byte| *byte = 0x47);
     // Only types the bytes tell: a type known by its name alone needs the
@@ -298,7 +292,6 @@ fn type_filter_finds_videos_by_content() {
 #[test]
 fn kind_filter_keeps_folders_or_files() {
     let dir = crate::test_env::scratch_dir(&format!("lsearch-kind-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(dir.join("fotos")).unwrap();
     std::fs::create_dir_all(dir.join("fotos.d")).unwrap();
     std::fs::write(dir.join("fotos.txt"), b"x").unwrap();
@@ -371,7 +364,6 @@ fn list_sees_past_the_ceiling() {
 #[test]
 fn list_pages_newest_first() {
     let root = crate::test_env::scratch_dir(&format!("lsearch-newest-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
     let pictures = root.join("Pictures");
     std::fs::create_dir_all(&pictures).unwrap();
     // Recorded times, not in name or creation order.
@@ -497,8 +489,6 @@ fn count_and_list_cataloged_paths() {
 #[test]
 fn a_page_counts_all_matches() {
     let dir = crate::test_env::scratch_dir(&format!("lsearch-paged-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
     let owned: Vec<String> = (0..30)
         .map(|i| {
             let path = dir.join(format!("nota {i}.txt"));
@@ -528,8 +518,6 @@ fn a_page_counts_all_matches() {
 #[test]
 fn both_mode_counts_each_file_once() {
     let dir = crate::test_env::scratch_dir(&format!("lsearch-both-total-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
     let owned: Vec<String> = (0..3)
         .map(|i| {
             let path = dir.join(format!("recibo {i}.txt"));
@@ -567,7 +555,6 @@ fn both_mode_counts_each_file_once() {
 #[test]
 fn run_query_filters_paginates_and_enriches() {
     let dir = crate::test_env::scratch_dir(&format!("lsearch-rq-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(dir.join("sub")).unwrap();
     let p_txt = dir.join("item_one.txt");
     let p_md = dir.join("sub/item_two.md");
@@ -659,8 +646,6 @@ fn assert_pages_of_two(index: &IndexReader) {
 #[test]
 fn deleted_file_is_dropped() {
     let dir = crate::test_env::scratch_dir(&format!("lsearch-offline-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
     let kept = dir.join("nota_viva.txt");
     let gone = dir.join("nota_morta.txt");
     std::fs::write(&kept, b"x").unwrap();

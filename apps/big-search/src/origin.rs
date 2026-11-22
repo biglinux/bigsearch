@@ -829,8 +829,6 @@ mod tests {
             std::process::id(),
             now_secs()
         ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
         dir.join("origin.sqlite")
     }
 

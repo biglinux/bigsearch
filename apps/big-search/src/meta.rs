@@ -392,8 +392,6 @@ mod tag_tests {
     #[test]
     fn desktop_tag_list_is_read() {
         let dir = crate::test_env::scratch_dir(&format!("big-search-tags-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("test dir");
         let file = dir.join("tagged.bin");
         std::fs::write(&file, b"contents").expect("write");
         assert!(read_tags(&file).is_empty(), "no attribute, no tags");

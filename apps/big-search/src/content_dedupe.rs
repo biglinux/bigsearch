@@ -368,8 +368,6 @@ mod tests {
             "lsearch-content-signatures-{}",
             std::process::id()
         ));
-        std::fs::remove_dir_all(&base).ok();
-        std::fs::create_dir_all(&base).unwrap();
         let first = base.join("first.md");
         let second = base.join("second.md");
         std::fs::write(&first, b"same personal note").unwrap();
@@ -445,8 +443,6 @@ mod tests {
             "lsearch-content-no-identity-{}",
             std::process::id()
         ));
-        std::fs::remove_dir_all(&base).ok();
-        std::fs::create_dir_all(&base).unwrap();
         let first = base.join("first.md");
         let second = base.join("second.md");
         std::fs::write(&first, b"same personal note").unwrap();

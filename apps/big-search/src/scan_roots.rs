@@ -258,7 +258,6 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let base = crate::test_env::scratch_dir(&format!("lsearch-roots-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
         let ext = base.join("ext"); // a real external tree, linked from home
         std::fs::create_dir_all(home.join("realdir")).unwrap();
@@ -302,7 +301,6 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let base = crate::test_env::scratch_dir(&format!("lsearch-winlink-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
         let windows = base.join("WindowsDisk");
         std::fs::create_dir_all(&home).unwrap();
@@ -347,7 +345,6 @@ mod tests {
 
         let base =
             crate::test_env::scratch_dir(&format!("lsearch-linuxlink-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
         let old_root = base.join("OldLinux");
         std::fs::create_dir_all(&home).unwrap();
@@ -380,7 +377,6 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let base = crate::test_env::scratch_dir(&format!("lsearch-netlink-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
         let network = base.join("nas");
         std::fs::create_dir_all(&home).unwrap();
