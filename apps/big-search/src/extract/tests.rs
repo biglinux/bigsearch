@@ -184,6 +184,39 @@ fn office_index_text_as_written() {
             &[("ppt/slides/slide1.xml", pptx)][..],
             "Relatório\n",
         ),
+        (
+            "docx",
+            &[
+                (
+                    "word/footnotes.xml",
+                    "<w:footnotes><w:p><w:t>Nota</w:t></w:p></w:footnotes>",
+                ),
+                (
+                    "word/footer1.xml",
+                    "<w:ftr><w:p><w:t>Rodapé</w:t></w:p></w:ftr>",
+                ),
+                (
+                    "word/document.xml",
+                    "<w:document><w:p><w:t>Corpo</w:t></w:p></w:document>",
+                ),
+                (
+                    "word/header1.xml",
+                    "<w:hdr><w:p><w:t>Cabeçalho</w:t></w:p></w:hdr>",
+                ),
+            ][..],
+            "Corpo\nCabeçalho\nRodapé\nNota\n",
+        ),
+        (
+            "pptx",
+            &[
+                (
+                    "ppt/notesSlides/notesSlide1.xml",
+                    "<p:notes><a:p><a:t>Fala</a:t></a:p></p:notes>",
+                ),
+                ("ppt/slides/slide1.xml", pptx),
+            ][..],
+            "Relatório\nFala\n",
+        ),
     ] {
         let text = office_text_from_reader(office_zip(parts), ext);
         assert_eq!(text.as_deref(), Some(expected), "{ext}");

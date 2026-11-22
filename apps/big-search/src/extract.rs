@@ -378,8 +378,8 @@ fn exceeds_input_cap(path: &Path) -> bool {
 /// real documents (a heavy pptx is a few hundred), tight against a bomb.
 pub(crate) const MAX_ZIP_ENTRIES: usize = 4_096;
 
-/// Slides, or worksheets, read from one archive. Bounds both the name `Vec` and
-/// the read loop.
+/// Slides, worksheets, speaker notes, headers or footers read from one archive,
+/// each kind on its own. Bounds both the name `Vec` and the read loop.
 const MAX_NUMBERED_PARTS: usize = 512;
 
 /// Reader-based core of `read_office`: extract body text from an OOXML/ODF zip.
@@ -403,7 +403,13 @@ pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
     }
 
     let parts: Vec<String> = match ext {
-        "docx" => vec!["word/document.xml".to_string()],
+        "docx" => {
+            let mut parts = vec!["word/document.xml".to_string()];
+            parts.extend(numbered_parts(&zip, "word/header"));
+            parts.extend(numbered_parts(&zip, "word/footer"));
+            parts.extend(["word/footnotes.xml".into(), "word/endnotes.xml".into()]);
+            parts
+        }
         "odt" | "ods" | "odp" => vec!["content.xml".to_string()],
         // Most strings sit in the shared table; a sheet written by a streaming
         // writer holds its own.
@@ -411,8 +417,13 @@ pub fn office_text_from_reader<R: std::io::Read + std::io::Seek>(
             .chain(numbered_parts(&zip, XLSX_SHEET_PREFIX))
             .collect(),
         // Numeric order, the same order `for_each_pptx_slide` reads them in: a
-        // deck's text and its page numbers must describe the same slides.
-        "pptx" => slide_names(&zip),
+        // deck's text and its page numbers must describe the same slides. The
+        // speaker notes follow, outside any slide's page.
+        "pptx" => {
+            let mut parts = slide_names(&zip);
+            parts.extend(numbered_parts(&zip, "ppt/notesSlides/notesSlide"));
+            parts
+        }
         _ => return None,
     };
 

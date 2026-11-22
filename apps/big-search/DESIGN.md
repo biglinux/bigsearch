@@ -373,11 +373,12 @@ found by name only.
 ### Office documents, EPUB, mail and RTF in-process
 
 These formats are zip and XML, MIME text or a small markup, so they are read
-in-process with no subprocess: `word/document.xml` for docx, `content.xml` for
-ODF, `xl/sharedStrings.xml` and the strings worksheets hold themselves
-(inline strings and text results of formulas, which streaming writers such as
-Apache POI's emit instead of shared ones) for xlsx, `ppt/slides/*.xml` for
-pptx. Numeric cells are left out: dates are stored as day numbers. The
+in-process with no subprocess: `word/document.xml` and its headers, footers,
+footnotes and endnotes for docx, `content.xml` for ODF, `xl/sharedStrings.xml`
+and the strings worksheets hold themselves (inline strings and text results of
+formulas, which streaming writers such as Apache POI's emit instead of shared
+ones) for xlsx, `ppt/slides/*.xml` and the speaker notes for pptx. Numeric
+cells are left out: dates are stored as day numbers. The
 maintained office crates (`undoc`, `text_analysis`, `litchi`) read the same
 entries; parsing them here needs fewer dependencies and keeps the zip-bomb caps
 in one place. `undoc` lacks ODT, `text_analysis` bundles a PDF path already
