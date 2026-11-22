@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn dedup_roundtrip() {
-    let dir = std::env::temp_dir().join(format!("bs-state-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("state.sqlite");
@@ -32,7 +32,7 @@ fn cleared_state_hides_persisted_rows() {
     // A rebuild clears the cache; until the clear is persisted, lookups that
     // fell through to the still-populated SQLite rows would make the rescan
     // skip re-adding every wiped document.
-    let dir = std::env::temp_dir().join(format!("bs-state-clearmem-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-clearmem-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("state.sqlite");
@@ -72,7 +72,7 @@ fn cleared_state_hides_persisted_rows() {
 /// size, the merge must report each difference once and nothing else.
 #[test]
 fn scan_changes_ignore_page_size() {
-    let dir = std::env::temp_dir().join(format!("bs-state-scan-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-scan-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
@@ -113,7 +113,7 @@ fn scan_changes_ignore_page_size() {
 
 #[test]
 fn children_are_one_level_deep() {
-    let dir = std::env::temp_dir().join(format!("bs-state-children-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-children-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
@@ -132,7 +132,7 @@ fn children_are_one_level_deep() {
 
 #[test]
 fn removed_tree_spares_its_siblings() {
-    let dir = std::env::temp_dir().join(format!("bs-state-tree-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-tree-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
@@ -167,7 +167,7 @@ fn removed_tree_spares_its_siblings() {
 
 #[test]
 fn retained_prefix_keeps_accented_paths() {
-    let dir = std::env::temp_dir().join(format!("bs-state-retain-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-retain-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
@@ -194,7 +194,7 @@ fn retained_prefix_keeps_accented_paths() {
 
 #[test]
 fn entries_after_merges_pending_rows() {
-    let dir = std::env::temp_dir().join(format!("bs-state-paths-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-paths-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
@@ -225,7 +225,7 @@ fn entries_after_merges_pending_rows() {
 
 #[test]
 fn stale_entries_stream_pending_work() {
-    let dir = std::env::temp_dir().join(format!("bs-state-stale-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-stale-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let mut names = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
@@ -267,7 +267,7 @@ fn stale_entries_stream_pending_work() {
 
 #[test]
 fn len_tracks_pending_overlaps_and_removals() {
-    let dir = std::env::temp_dir().join(format!("bs-state-len-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-len-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
@@ -309,7 +309,7 @@ fn len_tracks_pending_overlaps_and_removals() {
 fn on_disk_state_uses_wal_journal() {
     // tune_connection_for_low_memory switches to WAL; the default rollback
     // journal would double write amplification on every persist.
-    let dir = std::env::temp_dir().join(format!("bs-state-wal-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-state-wal-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
@@ -319,7 +319,7 @@ fn on_disk_state_uses_wal_journal() {
 
 /// A catalogue database holding `rows` in the name namespace, and a reader of it.
 fn catalogue_of(label: &str, rows: &[(&str, i64, u64)]) -> (PathBuf, CatalogueReader) {
-    let dir = std::env::temp_dir().join(format!("bs-catalogue-{label}-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("bs-catalogue-{label}-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("state.sqlite");

@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn readable_data_dir_becomes_private() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let base = std::env::temp_dir().join(format!("bs-private-{}", std::process::id()));
+        let base = crate::test_env::scratch_dir(&format!("bs-private-{}", std::process::id()));
         let _data = EnvVarGuard::set("XDG_DATA_HOME", base.to_str().unwrap());
         std::fs::create_dir_all(data_dir()).unwrap();
         std::fs::set_permissions(data_dir(), std::fs::Permissions::from_mode(0o755)).unwrap();

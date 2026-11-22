@@ -853,7 +853,7 @@ mod tests {
     #[test]
     fn read_only_content_keeps_stored_profile() {
         for record in [IndexRecordOption::Basic, IndexRecordOption::WithFreqs] {
-            let dir = std::env::temp_dir().join(format!(
+            let dir = crate::test_env::scratch_dir(&format!(
                 "big-search-read-profile-{}-{record:?}",
                 std::process::id()
             ));
@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn corrupt_index_is_recreated() {
-        let dir = std::env::temp_dir().join(format!("bs-index-corrupt-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("bs-index-corrupt-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("meta.json"), b"not tantivy metadata").unwrap();
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn deflated_index_repair_adds_missing_paths() {
-        let dir = std::env::temp_dir().join(format!("bs-index-repair-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("bs-index-repair-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
 

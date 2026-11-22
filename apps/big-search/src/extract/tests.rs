@@ -112,7 +112,7 @@ fn folding_matches_what_people_type() {
 }
 
 fn temporary_extract_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lsearch-ex-{}-{label}", std::process::id()));
+    let dir = crate::test_env::scratch_dir(&format!("lsearch-ex-{}-{label}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

@@ -257,7 +257,7 @@ mod tests {
     fn resolve_roots_expands_and_prunes() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-roots-{}", std::process::id()));
+        let base = crate::test_env::scratch_dir(&format!("lsearch-roots-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
         let ext = base.join("ext"); // a real external tree, linked from home
@@ -301,7 +301,7 @@ mod tests {
     fn symlink_policy_takes_windows_user_dirs() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-winlink-{}", std::process::id()));
+        let base = crate::test_env::scratch_dir(&format!("lsearch-winlink-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
         let windows = base.join("WindowsDisk");
@@ -345,7 +345,8 @@ mod tests {
     fn symlink_policy_takes_linux_home_dirs() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-linuxlink-{}", std::process::id()));
+        let base =
+            crate::test_env::scratch_dir(&format!("lsearch-linuxlink-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
         let old_root = base.join("OldLinux");
@@ -378,7 +379,7 @@ mod tests {
     fn personal_symlink_policy_rejects_network_targets() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-netlink-{}", std::process::id()));
+        let base = crate::test_env::scratch_dir(&format!("lsearch-netlink-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
         let network = base.join("nas");
@@ -412,7 +413,8 @@ mod tests {
     fn symlink_policy_accepts_local_data_dir() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-datalink-{}", std::process::id()));
+        let base =
+            crate::test_env::scratch_dir(&format!("lsearch-datalink-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
         let local_photos_target = base.join("DataDisk/Photos");

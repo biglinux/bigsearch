@@ -3,7 +3,8 @@ use crate::test_env::{ENV_LOCK, EnvVarGuard};
 
 #[test]
 fn pending_batch_reports_more_work() {
-    let base = std::env::temp_dir().join(format!("lsearch-content-batch-{}", std::process::id()));
+    let base =
+        crate::test_env::scratch_dir(&format!("lsearch-content-batch-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
     let first = base.join("first.md");
@@ -35,7 +36,8 @@ fn pending_batch_reports_more_work() {
 /// forgetting the row makes the pass read the file again.
 #[test]
 fn forgotten_row_is_read_again() {
-    let base = std::env::temp_dir().join(format!("lsearch-content-forget-{}", std::process::id()));
+    let base =
+        crate::test_env::scratch_dir(&format!("lsearch-content-forget-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
     let note = base.join("note.md");
@@ -66,7 +68,7 @@ fn forgotten_row_is_read_again() {
 
 #[test]
 fn pending_batch_stops_at_byte_budget() {
-    let base = std::env::temp_dir().join(format!(
+    let base = crate::test_env::scratch_dir(&format!(
         "lsearch-content-byte-budget-{}",
         std::process::id()
     ));
@@ -92,7 +94,7 @@ fn pending_batch_stops_at_byte_budget() {
 #[test]
 fn pending_batch_prioritizes_low_cost_files() {
     let base =
-        std::env::temp_dir().join(format!("lsearch-content-priority-{}", std::process::id()));
+        crate::test_env::scratch_dir(&format!("lsearch-content-priority-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
     let large_pdf = base.join("large.pdf");
@@ -121,7 +123,7 @@ fn pending_batch_prioritizes_low_cost_files() {
 #[test]
 fn catalog_batch_defers_recent_edits() {
     let base =
-        std::env::temp_dir().join(format!("lsearch-content-cooldown-{}", std::process::id()));
+        crate::test_env::scratch_dir(&format!("lsearch-content-cooldown-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
     let now = std::time::SystemTime::now()
@@ -164,7 +166,7 @@ fn catalog_batch_defers_recent_edits() {
 #[test]
 fn deleted_files_stop_answering_content_searches() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let base = std::env::temp_dir().join(format!("lsearch-ghost-{}", std::process::id()));
+    let base = crate::test_env::scratch_dir(&format!("lsearch-ghost-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(base.join("files")).unwrap();
     let _env = [
@@ -227,7 +229,7 @@ fn deleted_files_stop_answering_content_searches() {
 #[test]
 fn clearing_state_rearms_unreferenced_sweep() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let base = std::env::temp_dir().join(format!("lsearch-rearm-{}", std::process::id()));
+    let base = crate::test_env::scratch_dir(&format!("lsearch-rearm-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
     let _env = [
@@ -252,7 +254,7 @@ fn clearing_state_rearms_unreferenced_sweep() {
 #[test]
 fn skipped_entries_become_tombstones() {
     let base =
-        std::env::temp_dir().join(format!("lsearch-content-tombstone-{}", std::process::id()));
+        crate::test_env::scratch_dir(&format!("lsearch-content-tombstone-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
 
@@ -321,7 +323,8 @@ fn symlinks_skip_content_extraction() {
     // own XDG_DATA_HOME: without the lock it would race other tests for the
     // process-wide variable and, with none set, write to the real database.
     let _lock = ENV_LOCK.lock().unwrap();
-    let base = std::env::temp_dir().join(format!("lsearch-content-symlink-{}", std::process::id()));
+    let base =
+        crate::test_env::scratch_dir(&format!("lsearch-content-symlink-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
     let target = base.join("target.md");
@@ -423,7 +426,7 @@ fn worker_pool_width_follows_machine() {
 
 #[test]
 fn catalog_byte_budget_is_exclusive() {
-    let base = std::env::temp_dir().join(format!(
+    let base = crate::test_env::scratch_dir(&format!(
         "lsearch-catalog-byte-boundary-{}",
         std::process::id()
     ));
@@ -460,7 +463,7 @@ fn catalog_byte_budget_is_exclusive() {
 
 #[test]
 fn pending_byte_budget_is_exclusive() {
-    let base = std::env::temp_dir().join(format!(
+    let base = crate::test_env::scratch_dir(&format!(
         "lsearch-pending-byte-boundary-{}",
         std::process::id()
     ));
@@ -493,7 +496,8 @@ fn pending_byte_budget_is_exclusive() {
 #[test]
 fn catalog_pass_indexes_every_batch() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let base = std::env::temp_dir().join(format!("lsearch-catalog-pass-{}", std::process::id()));
+    let base =
+        crate::test_env::scratch_dir(&format!("lsearch-catalog-pass-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(base.join("files")).unwrap();
     let _env = [
@@ -556,7 +560,7 @@ fn catalog_pass_indexes_every_batch() {
 
 #[test]
 fn body_upsert_keeps_one_document() {
-    let base = std::env::temp_dir().join(format!("lsearch-content-{}", std::process::id()));
+    let base = crate::test_env::scratch_dir(&format!("lsearch-content-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(&base).unwrap();
     let path = base.join("note.txt");

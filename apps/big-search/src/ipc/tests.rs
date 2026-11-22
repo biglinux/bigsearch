@@ -1,17 +1,10 @@
 use super::*;
 
-fn scratch(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("bs-ipc-{label}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
 /// Clients do not authenticate the daemon: the socket and its directory
 /// are this user's alone.
 #[test]
 fn socket_and_directory_private() {
-    let base = scratch("mode");
+    let base = crate::test_env::scratch_dir("bs-ipc-mode");
     let sock = base.join("biglinux/indexd.sock");
     let _listener = bind_private_socket(&sock).unwrap();
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
@@ -24,7 +17,7 @@ fn socket_and_directory_private() {
 /// directory it points at keeps its mode.
 #[test]
 fn symlinked_runtime_dir_refused() {
-    let base = scratch("link");
+    let base = crate::test_env::scratch_dir("bs-ipc-link");
     let target = base.join("theirs");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();

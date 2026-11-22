@@ -391,7 +391,7 @@ mod tag_tests {
 
     #[test]
     fn desktop_tag_list_is_read() {
-        let dir = std::env::temp_dir().join(format!("big-search-tags-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("big-search-tags-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("test dir");
         let file = dir.join("tagged.bin");
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn image_text_reads_png_dimensions() {
-        let dir = std::env::temp_dir().join(format!("bsmeta-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("bsmeta-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pic.png");
         std::fs::write(&path, minimal_png(320, 240)).unwrap();
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn sniffed_document_text_follows_content_policy() {
-        let dir = std::env::temp_dir().join(format!("bsmeta-policy-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("bsmeta-policy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("notes");
         std::fs::write(&path, "#!/bin/sh\necho segredo\n").unwrap();

@@ -824,7 +824,7 @@ mod tests {
     use super::*;
 
     fn temporary_origin_path(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_env::scratch_dir(&format!(
             "bs-origin-{label}-{}-{}",
             std::process::id(),
             now_secs()

@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn content_settles_ambiguous_extensions() {
         let db = database();
-        let dir = std::env::temp_dir().join(format!("lsearch-mime-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("lsearch-mime-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let write = |name: &str, bytes: &[u8]| {
@@ -418,7 +418,8 @@ mod tests {
     #[test]
     fn content_alone_types_extensionless_files() {
         let db = database();
-        let dir = std::env::temp_dir().join(format!("lsearch-mime-bare-{}", std::process::id()));
+        let dir =
+            crate::test_env::scratch_dir(&format!("lsearch-mime-bare-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let write = |name: &str, bytes: &[u8]| {
@@ -454,7 +455,8 @@ mod tests {
     #[test]
     fn directories_and_empty_files_by_inode() {
         let db = database();
-        let dir = std::env::temp_dir().join(format!("lsearch-mime-inode-{}", std::process::id()));
+        let dir =
+            crate::test_env::scratch_dir(&format!("lsearch-mime-inode-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let write = |name: &str, bytes: &[u8]| {

@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn atomic_write_leaves_no_temp() {
-        let dir = std::env::temp_dir().join(format!("bs-nosync-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let directory = NoFsyncDirectory::open(&dir).unwrap();
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn only_commits_wake_the_watch() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let dir = std::env::temp_dir().join(format!("bs-nosync-watch-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-watch-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let directory = NoFsyncDirectory::open(&dir).unwrap();
@@ -322,7 +322,7 @@ mod tests {
     /// the daemon's query readers live for its whole life.
     #[test]
     fn a_long_lived_reader_follows_commits() {
-        let dir = std::env::temp_dir().join(format!("bs-nosync-reload-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-reload-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = crate::index::fields(&index).unwrap();
@@ -346,7 +346,7 @@ mod tests {
     /// each commit, and its files must carry the advice (`rr` in smaps).
     #[test]
     fn query_instance_follows_the_writer() {
-        let dir = std::env::temp_dir().join(format!("bs-nosync-query-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-query-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = crate::index::fields(&index).unwrap();
@@ -396,7 +396,7 @@ mod tests {
     /// either way: dropping the syncs must not drop the data.
     #[test]
     fn commits_through_the_index_stay_searchable() {
-        let dir = std::env::temp_dir().join(format!("bs-nosync-idx-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-idx-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = crate::index::fields(&index).unwrap();
