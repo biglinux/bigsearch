@@ -237,7 +237,9 @@ tokenizer keeps combining marks inside a word, so a decomposed accent does not
 split it. Folding at index time means a change to the fold re-indexes content:
 the analyzer's name changes with what it emits (`index::BODY`, `index::NGRAM`),
 so the on-disk schema differs and the index rebuilds; 88,055 documents took
-about 13 minutes on the notebook, part of it under heavy load. A 42-query test
+about 13 minutes on the notebook, part of it under heavy load. `index::BODY`
+also changes when extraction does, since a file read once is not read again
+until it changes. A 42-query test
 in 12 languages finds 41 with folding and the Chinese table below, against 23
 without. German "oe" for "ö" stays unfolded: it would make every "oe" in
 Portuguese or Dutch match "ö".
