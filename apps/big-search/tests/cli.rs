@@ -110,3 +110,25 @@ fn reindex_rebuilds_either_missing_index() {
         fs::remove_dir_all(&base).ok();
     }
 }
+
+/// The service reads config.toml once, when it starts; a change says so.
+#[test]
+fn config_change_names_the_restart() {
+    let base = scratch::scratch_dir("bs-cli-config");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&xdg_storage_home).unwrap();
+    for args in [
+        &["config", "set", "names-only", "true"][..],
+        &["config", "preset", "balanced"][..],
+    ] {
+        let out = run(&home, &xdg_storage_home, args);
+        assert!(
+            out.contains("systemctl --user restart big-search"),
+            "{args:?}: {out}"
+        );
+    }
+    fs::remove_dir_all(&base).ok();
+}
+

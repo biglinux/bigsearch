@@ -26,7 +26,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
             println!(
                 "{}",
                 dim(
-                    "Run `big-search rebuild` (daemon on) or `big-search reindex` for indexing-policy changes."
+                    "The service reads the configuration when it starts: run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped."
                 )
             );
             Ok(())
@@ -41,7 +41,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
             println!(
                 "{}",
                 dim(
-                    "Run `big-search rebuild` (daemon on) or `big-search reindex` to apply this profile."
+                    "The service reads the configuration when it starts: run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped."
                 )
             );
             Ok(())

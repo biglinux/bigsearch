@@ -90,6 +90,9 @@ big-search config preset low-memory     # names-only | low-memory | balanced | c
 big-search config set extract-max-mb 16
 ```
 
+The service reads the file when it starts: after a change, run
+`systemctl --user restart big-search`.
+
 Extra exclusions go in `~/.config/big-search/ignore`, in gitignore syntax. A
 `!` line brings back something the built-in rules skip (`node_modules/`,
 `target/`, minified files and the like).
