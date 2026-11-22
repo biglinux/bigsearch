@@ -253,6 +253,20 @@ pub fn html_text(html: &str) -> String {
             .split(|c: char| !c.is_ascii_alphanumeric())
             .next()
             .unwrap_or_default();
+        // What an image or a link says of itself is read too; markup is not.
+        for attribute in [" alt=", " title="] {
+            let Some(found) = tag.find(attribute) else {
+                continue;
+            };
+            let value = &html[open + found + attribute.len()..tag_end];
+            if let Some(quote @ ('"' | '\'')) = value.chars().next()
+                && let Some(len) = value[1..].find(quote)
+            {
+                out.push(' ');
+                out.push_str(&value[1..=len]);
+                out.push(' ');
+            }
+        }
         if block {
             out.push('\n');
         } else if skip_to.is_none() && !name.is_empty() && !INLINE_TAGS.contains(&name) {

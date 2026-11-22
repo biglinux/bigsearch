@@ -331,7 +331,7 @@ same physical extents are read once (`content_dedupe.rs`).
 | Format | Method |
 |---|---|
 | plain text, Markdown, source code | read in-process; a NUL in the first 8 KiB marks it binary |
-| HTML | the same, then its readable text: scripts, styles and tags dropped, entities decoded |
+| HTML | the same, then its readable text: scripts, styles and tags dropped, `alt` and `title` text kept, entities decoded |
 | PDF | `pdftotext` subprocess |
 | `docx odt ods odp pptx xlsx` | in-process `zip` and `quick-xml` |
 | EPUB | container, package and spine chapters, read as HTML |

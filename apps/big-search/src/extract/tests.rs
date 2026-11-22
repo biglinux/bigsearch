@@ -30,17 +30,25 @@ fn html_page_indexed_as_text() {
     let path = dir.join("page.html");
     std::fs::write(
         &path,
-        r#"<html><head><title>Ata</title><style>.destaque{}</style></head><body><h1>Reuni&#227;o</h1><p class="destaque">Relat&#243;rio</p><table><tr><td>cela</td><td>celb</td></tr></table><p>caf&eacute; <b>for</b>te</p><script>var contador</script></body></html>"#,
+        r#"<html><head><title>Ata</title><style>.destaque{}</style></head><body><h1>Reuni&#227;o</h1><p class="destaque">Relat&#243;rio</p><table><tr><td>cela</td><td>celb</td></tr></table><p>caf&eacute; <b>for</b>te</p><img src="x.png" alt="diagrama de fluxo"><a href="https://example.org/endereco" title='Página inicial'>link</a><script>var contador</script></body></html>"#,
     )
     .unwrap();
     let text = content(&path).unwrap();
-    for word in ["Relatório", "cela", "celb", "café", "forte"] {
+    for word in [
+        "Relatório",
+        "cela",
+        "celb",
+        "café",
+        "forte",
+        "diagrama",
+        "inicial",
+    ] {
         assert!(
             text.split_whitespace().any(|w| w == word),
             "{word} in {text:?}"
         );
     }
-    for markup in ["destaque", "contador", "class", "<p"] {
+    for markup in ["destaque", "contador", "class", "<p", "endereco", "x.png"] {
         assert!(!text.contains(markup), "{markup} in {text:?}");
     }
     let page = described(&path).unwrap();
