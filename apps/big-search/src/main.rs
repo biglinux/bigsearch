@@ -155,7 +155,9 @@ fn colored_usage() -> String {
 {color}:\n  --color auto|always|never, --no-color. NO_COLOR, CLICOLOR_FORCE and CLICOLOR are honored.\n\n\
 {examples}:\n  big-search contract --ext pdf --under ~/Documents\n  big-search both goncalves report -n 20 --origin\n  big-search config preset names-only && big-search reindex\n\n\
 {}",
-        dim("Hidden files and anything a .gitignore excludes are not indexed."),
+        dim(
+            "Hidden files and anything a .gitignore excludes are not indexed. Control and\nbidirectional characters in names print as escapes (\\u{1b})."
+        ),
     )
 }
 

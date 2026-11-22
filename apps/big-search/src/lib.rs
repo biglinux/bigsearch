@@ -44,15 +44,20 @@ pub mod watch;
 
 /// `text` for a terminal, its control characters written as escapes (`\u{1b}`):
 /// a file name or a document can hold a sequence that retitles the window or
-/// sets the clipboard.
+/// sets the clipboard, or a bidirectional override that shows `exe.txt` for
+/// `txt.exe`.
 #[must_use]
 pub fn terminal_text(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains(char::is_control) {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    };
+    if !text.contains(hidden) {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut shown = String::with_capacity(text.len() + 8);
     for c in text.chars() {
-        if c.is_control() {
+        if hidden(c) {
             shown.extend(c.escape_default());
         } else {
             shown.push(c);

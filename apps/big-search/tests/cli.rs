@@ -146,6 +146,7 @@ fn file_names_print_without_control_characters() {
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&xdg_storage_home).unwrap();
     fs::write(home.join("rel\u{1b}]0;title\u{7}.txt"), "corpo").unwrap();
+    fs::write(home.join("relfdp.\u{202e}txt.exe"), "corpo").unwrap();
     run(
         &home,
         &xdg_storage_home,
@@ -157,7 +158,11 @@ fn file_names_print_without_control_characters() {
             out.contains("rel\\u{1b}]0;title\\u{7}.txt"),
             "{args:?}: {out:?}"
         );
-        assert!(!out.contains(['\u{1b}', '\u{7}']), "{args:?}: {out:?}");
+        assert!(out.contains("relfdp.\\u{202e}txt.exe"), "{args:?}: {out:?}");
+        assert!(
+            !out.contains(['\u{1b}', '\u{7}', '\u{202e}']),
+            "{args:?}: {out:?}"
+        );
     }
     fs::remove_dir_all(&base).ok();
 }
