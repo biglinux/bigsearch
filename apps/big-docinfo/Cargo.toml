@@ -18,8 +18,14 @@ big-docinfo = { path = "../../crates/foundation/big-docinfo", version = "0.1.0" 
 # Text extraction exactly as the search service does it: same limits, same
 # pdftotext sandbox, same configuration. The daemon itself is not involved.
 big-search = { path = "../big-search", version = "0.1.0" }
+# The C library's own gettext: no bundled copy is built.
+gettext-rs = { version = "0.8.0", features = ["gettext-system"] }
 libc = { version = "0.2.186" }
 serde_json = { version = "1.0.150" }
 
 [lints]
 workspace = true
+
+# The crate gettext-rs is imported as `gettextrs`, which cargo-machete cannot match.
+[package.metadata.cargo-machete]
+ignored = ["gettext-rs"]

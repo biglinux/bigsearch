@@ -36,8 +36,11 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> Output {
+    // The source language, whatever catalogs the machine has installed.
     Command::new(env!("CARGO_BIN_EXE_big-docinfo"))
         .args(args)
+        .env_remove("LANGUAGE")
+        .env("LC_ALL", "C.UTF-8")
         .output()
         .expect("spawn big-docinfo")
 }

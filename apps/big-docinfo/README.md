@@ -22,3 +22,8 @@ with a dot.
 | 0 | done |
 | 1 | the file has no readable text, the rename was refused, or another error; the message says which |
 | 2 | the arguments name no command |
+
+Messages, report labels and the Dolphin action follow the desktop language
+through gettext (domain `big-docinfo`, catalogs in `po/`). After changing a
+message, run `po/update.sh` to refresh `po/big-docinfo.pot` and merge it into
+every catalog.
