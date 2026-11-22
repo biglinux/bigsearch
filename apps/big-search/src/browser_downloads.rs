@@ -84,7 +84,7 @@ pub fn import(writer: &OriginWriter) -> usize {
 /// Named exactly, never a walk: profile folders also hold `Cookies` and
 /// `Login Data`.
 fn history_files() -> Vec<PathBuf> {
-    let config = home().join(".config");
+    let config = big_search_config::config_home();
     let mut found = Vec::new();
     for browser in CHROMIUM_BROWSERS {
         let root = config.join(browser);
@@ -102,10 +102,6 @@ fn history_files() -> Vec<PathBuf> {
         }
     }
     found
-}
-
-fn home() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }
 
 fn import_one(writer: &OriginWriter, history: &Path) -> Result<usize> {

@@ -2,22 +2,19 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
+/// `$XDG_DATA_HOME`, or `~/.local/share` when it is unset or not absolute: the
+/// XDG spec says a relative value must be ignored, or the index would land in
+/// whatever directory the command ran from.
+pub fn data_home() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| big_search_config::home_dir().join(".local/share"))
 }
 
 /// Data directory (`$XDG_DATA_HOME/big-search`): holds the index, cache, etc.
-///
-/// An empty or relative `XDG_DATA_HOME` is ignored, as the XDG spec requires;
-/// otherwise the index would land in whatever directory the command ran from.
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .unwrap_or_else(|| home().join(".local/share"));
-    base.join("big-search")
+    data_home().join("big-search")
 }
 
 /// Create the data directory owner-only, tightening it if group/world-readable.

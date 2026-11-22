@@ -251,15 +251,17 @@ fn sniff(path: &Path) -> Option<String> {
 
 /// Where shared-mime-info lives: the user's data dir, then the system's.
 fn data_dirs() -> Vec<PathBuf> {
-    let home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
     let system = std::env::var("XDG_DATA_DIRS")
         .ok()
         .filter(|dirs| !dirs.is_empty())
         .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
-    home.into_iter()
-        .chain(system.split(':').map(PathBuf::from))
+    std::iter::once(crate::config::data_home())
+        .chain(
+            system
+                .split(':')
+                .map(PathBuf::from)
+                .filter(|dir| dir.is_absolute()),
+        )
         .collect()
 }
 

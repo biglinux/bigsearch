@@ -443,9 +443,7 @@ fn env_bool(name: &str) -> Option<bool> {
 /// Default source set when config lists none: the home root, symlink-expanded
 /// into extra real-path roots when `follow` is on.
 fn default_sources() -> Vec<SourceConfiguration> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"));
+    let home = big_search_config::home_dir();
     vec![SourceConfiguration {
         path: home,
         name: None,

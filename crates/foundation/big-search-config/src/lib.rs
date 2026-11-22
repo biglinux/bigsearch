@@ -289,9 +289,11 @@ pub fn path() -> PathBuf {
     config_home().join("big-search").join("config.toml")
 }
 
-fn config_home() -> PathBuf {
-    // The XDG spec says a relative value is invalid and must be ignored; an
-    // empty one is relative too.
+/// `$XDG_CONFIG_HOME`, or `~/.config` when it is unset or not absolute: the XDG
+/// spec says a relative value is invalid and must be ignored, and an empty one
+/// is relative too.
+#[must_use]
+pub fn config_home() -> PathBuf {
     match std::env::var_os("XDG_CONFIG_HOME").filter(|value| Path::new(value).is_absolute()) {
         Some(dir) => PathBuf::from(dir),
         None => home_dir().join(".config"),

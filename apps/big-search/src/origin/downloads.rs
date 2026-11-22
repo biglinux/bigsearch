@@ -41,16 +41,11 @@ fn downloads_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("XDG_DOWNLOAD_DIR").map(PathBuf::from) {
         return expand_home(path);
     }
-    let user_dirs = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|config| config.join("user-dirs.dirs"));
-    if let Some(path) = user_dirs.and_then(|path| parse_user_download_dir(&path)) {
+    let user_dirs = big_search_config::config_home().join("user-dirs.dirs");
+    if let Some(path) = parse_user_download_dir(&user_dirs) {
         return path;
     }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Downloads"))
-        .unwrap_or_else(|| PathBuf::from("/Downloads"))
+    big_search_config::home_dir().join("Downloads")
 }
 
 fn parse_user_download_dir(path: &Path) -> Option<PathBuf> {
@@ -68,9 +63,7 @@ fn parse_user_download_dir(path: &Path) -> Option<PathBuf> {
 
 fn expand_user_dir_value(value: &str) -> PathBuf {
     if let Some(rest) = value.strip_prefix("$HOME/") {
-        return std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(rest))
-            .unwrap_or_else(|| PathBuf::from(rest));
+        return big_search_config::home_dir().join(rest);
     }
     expand_home(PathBuf::from(value))
 }
@@ -80,9 +73,7 @@ fn expand_home(path: PathBuf) -> PathBuf {
         return path;
     };
     if let Some(rest) = text.strip_prefix("~/") {
-        return std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(rest))
-            .unwrap_or(path);
+        return big_search_config::home_dir().join(rest);
     }
     path
 }
