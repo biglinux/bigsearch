@@ -1,6 +1,18 @@
 //! Library surface for big-search: the modules the `big-search` binary drives,
 //! re-exported so test and fuzz harnesses can call into them directly (notably
 //! `extract`, the untrusted-document parsing path the fuzz targets exercise).
+//!
+//! - `config`, `settings`: data and runtime paths; the configured sources and policy.
+//! - `scan`, `scan_roots`, `watch`, `mounts`: walking the sources and following changes.
+//! - `index`, `nosync_dir`, `catalogue`: the tantivy indexes and the state they are
+//!   checked against.
+//! - `content`, `content_dedupe`, `extract`, `extract_pdf`, `extract_mail`,
+//!   `extract_rtf`, `prominent`, `meta`, `mime`: reading what files say.
+//! - `cjk_tokenizer`, `simplified_chinese`: indexing scripts written without spaces.
+//! - `query`, `ipc`: answering searches, in-process and over the socket.
+//! - `origin`, `browser_downloads`, `history`: where a file came from and its
+//!   earlier versions.
+//! - `throttle`: staying out of the person's way.
 pub mod browser_downloads;
 pub mod catalogue;
 pub mod cjk_tokenizer;

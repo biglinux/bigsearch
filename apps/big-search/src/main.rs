@@ -1,4 +1,6 @@
 //! big-search: lean unprivileged search of file names and contents, kept current by watching the disk.
+//!
+//! `config_cmd` serves `config`; `index_cmd` serves `reindex` and `daemon`.
 use big_search::{
     catalogue, config, content, extract, index, ipc, origin, query, scan, settings, terminal_text,
     throttle, watch,
