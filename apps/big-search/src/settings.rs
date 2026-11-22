@@ -136,7 +136,7 @@ impl Sources {
         let raw = if config_file.sources.is_empty() {
             default_sources()
         } else {
-            config_file.sources
+            config_file.sources.clone()
         };
 
         let mut list: Vec<Source> = Vec::new();
@@ -409,9 +409,11 @@ pub fn source_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn read_config() -> ConfigFile {
+/// The configuration, read once per process: the service applies a change
+/// when it restarts.
+fn read_config() -> &'static ConfigFile {
     static CONFIG: OnceLock<ConfigFile> = OnceLock::new();
-    CONFIG.get_or_init(read_config_uncached).clone()
+    CONFIG.get_or_init(read_config_uncached)
 }
 
 /// Read the file through `big_search_config`, the same path and parser the
