@@ -232,7 +232,7 @@ fn spawn_connection(
 
 /// Whether the connected peer runs as the same UID as this daemon (SO_PEERCRED).
 fn peer_is_self(stream: &UnixStream) -> bool {
-    // SAFETY: getsockopt on a valid connected Unix socket fd; ucred is POD.
+    // SAFETY: an all-zero `ucred` is a valid value of the C struct.
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     // SAFETY: the fd is the stream's, alive for the call; `cred` and `len` are

@@ -751,7 +751,7 @@ impl WatchLoop<'_> {
                 if self.runtime.paused.load(Ordering::Relaxed) {
                     return Ok(());
                 }
-                log::info!("indexing resumed — reconciling the sources with the catalogue");
+                log::info!("indexing resumed: reconciling the sources with the catalogue");
                 return self.walk_sources();
             }
             WatchMessage::ControlCommand(WatchControlCommand::Rescan) => {
@@ -762,7 +762,7 @@ impl WatchLoop<'_> {
                     log::warn!("rescan refused: indexing is paused");
                     return Ok(());
                 }
-                log::info!("rescan requested — reconciling the sources with the catalogue");
+                log::info!("rescan requested: reconciling the sources with the catalogue");
                 return self.walk_sources();
             }
             WatchMessage::ControlCommand(command) => return self.apply_control(command),
@@ -920,7 +920,9 @@ impl WatchLoop<'_> {
         }
         let overflowed = self.overflowed.swap(false, Ordering::Relaxed);
         let walk_started = if rescan || overflowed {
-            log::warn!("inotify overflow — full rescan");
+            if overflowed {
+                log::warn!("inotify overflow: full rescan");
+            }
             Some(self.rescan_sources(&mut outcome)?)
         } else {
             None
@@ -1071,7 +1073,7 @@ fn rebuild(
     let started = SystemTime::now();
     watches.forget_run()?;
     runtime.activity.store(ACTIVITY_INDEXING, Ordering::Relaxed);
-    log::info!("rebuild requested — clearing index and re-indexing");
+    log::info!("rebuild requested: clearing index and re-indexing");
     writer
         .delete_all_documents()
         .context("rebuild clear index")?;

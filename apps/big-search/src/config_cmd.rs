@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// Printed after a change to the file the service reads only when it starts.
+const APPLY_HINT: &str = "The service applies it when it restarts, which big-search-config.path does on its own; otherwise run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped.";
+
 /// `config`: inspect and modify the documented config.toml without requiring a text editor.
 pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
     settings::seed_config_template();
@@ -23,12 +26,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
             }
             set_config_key(&tokens[1], &tokens[2])?;
             println!("{} {} = {}", green("set"), tokens[1], tokens[2]);
-            println!(
-                "{}",
-                dim(
-                    "The service applies it when it restarts, which big-search-config.path does on its own; otherwise run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped."
-                )
-            );
+            println!("{}", dim(APPLY_HINT));
             Ok(())
         }
         Some("preset") => {
@@ -38,12 +36,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
             }
             apply_config_preset(&tokens[1])?;
             println!("{} preset {}", green("applied"), tokens[1]);
-            println!(
-                "{}",
-                dim(
-                    "The service applies it when it restarts, which big-search-config.path does on its own; otherwise run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped."
-                )
-            );
+            println!("{}", dim(APPLY_HINT));
             Ok(())
         }
         Some(other) => {

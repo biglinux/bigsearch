@@ -203,7 +203,7 @@ fn peak_rss_kb() -> i64 {
 
 /// Total CPU time of this process (all threads), milliseconds, via `getrusage`.
 fn self_cpu_ms() -> f64 {
-    // SAFETY: getrusage on a zeroed rusage with RUSAGE_SELF is always valid.
+    // SAFETY: an all-zero `rusage` is a valid value of the C struct.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: `usage` is valid for writes of a whole rusage.
     unsafe {
@@ -259,7 +259,7 @@ pub(super) fn cmd_daemon() -> Result<()> {
     let _daemon_lock = match acquire_daemon_lock(&lock_path)? {
         Some(lock) => lock,
         None => {
-            log::info!("another big-search daemon is already running — exiting");
+            log::info!("another big-search daemon is already running; exiting");
             return Ok(());
         }
     };

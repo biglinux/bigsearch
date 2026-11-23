@@ -327,7 +327,6 @@ impl OriginWriter {
 
     /// The same, for a download whose date is known: from the list a browser
     /// keeps, where the file may have arrived months ago.
-    ///
     pub fn register_web_download_at(
         &self,
         path: &Path,
@@ -596,7 +595,7 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
             record.ino,
             record.kind.as_str(),
             record.confidence as u8,
-            // The column predates labels built on read; rows keep it empty.
+            // No sentence is stored: `label()` builds it on read.
             "",
             record.source_app,
             record.source_path,

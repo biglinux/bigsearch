@@ -569,15 +569,14 @@ fn two_paths_and_optional_app<'a>(
 fn print_origin(path: &str, origin: Option<&big_indexd_client::OriginProvenance>) {
     // Every field but the numbers comes from file names, extended attributes or
     // other programs' databases.
-    let shown = terminal_text;
     let Some(origin) = origin else {
-        println!("{}: no origin", shown(path));
+        println!("{}: no origin", terminal_text(path));
         return;
     };
-    println!("{}", shown(path));
-    println!("kind: {}", shown(&origin.kind));
+    println!("{}", terminal_text(path));
+    println!("kind: {}", terminal_text(&origin.kind));
     println!("confidence: {}", origin.confidence);
-    println!("label: {}", shown(&origin.label));
+    println!("label: {}", terminal_text(&origin.label));
     println!("first_seen_at: {}", origin.first_seen_at);
     for (field, value) in [
         ("source_app", &origin.source_app),
@@ -587,7 +586,7 @@ fn print_origin(path: &str, origin: Option<&big_indexd_client::OriginProvenance>
         ("source_domain", &origin.source_domain),
     ] {
         if let Some(value) = value {
-            println!("{field}: {}", shown(value));
+            println!("{field}: {}", terminal_text(value));
         }
     }
 }
