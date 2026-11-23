@@ -296,7 +296,7 @@ fn keep_stat_matches(kept: &mut Vec<Hit>, filter: &Filter) {
 /// Fills in the extension, type and metadata of the visible page.
 ///
 /// A hit that will not stat is one of two very different things, and the
-/// caller renders `available == false` as "offline · on <device>". Deciding
+/// caller renders `available == false` as "offline · on `device`". Deciding
 /// that by existence alone would announce every *deleted* file as living on
 /// an unplugged disk named after the user's home directory. Only a source
 /// that is kept while unreachable (removable/network) may claim it; anything
@@ -321,7 +321,7 @@ fn enrich_page(hits: &mut Vec<Hit>, names: &tantivy::Searcher, name_fields: &cra
 /// Answers "is this path on a source we keep catalogued while it is unreachable?"
 /// once per source instead of once per hit.
 ///
-/// [`settings::is_available`] reads the source directory, so asking per result
+/// [`crate::settings::is_available`] reads the source directory, so asking per result
 /// would mean a `read_dir` for every missing file in a page.
 #[derive(Default)]
 pub(crate) struct OfflineSources {

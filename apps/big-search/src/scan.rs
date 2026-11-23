@@ -236,7 +236,7 @@ pub fn is_hidden(path: &Path) -> bool {
 /// `ignore` walker: skip hidden + every gitignore source + our effective ignore.
 /// Symlinks are never followed during the walk (`follow_links(false)`); symlinked
 /// directories the user placed at a scan root are instead resolved
-/// into separate roots by [`crate::scan_roots::resolve_roots`], which avoids chasing the thousands
+/// into separate roots by [`crate::scan_roots::resolve_roots_with_policy`], which avoids chasing the thousands
 /// of deep symlinks a tree contains (and the loops/duplication that brings).
 fn walker(root: &Path) -> ignore::Walk {
     let mut b = WalkBuilder::new(root);
