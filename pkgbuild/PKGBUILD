@@ -24,7 +24,7 @@ if [ "${BIGSEARCH_FORCE_GIT:-0}" != "1" ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
 fi
 
 if [ -n "${_local_root}" ]; then
-    echo "==> Local source detected at ${_local_root} — skipping git fetch" >&2
+    echo "==> Local source detected at ${_local_root}; skipping git fetch" >&2
     source=()
     sha256sums=()
 else
