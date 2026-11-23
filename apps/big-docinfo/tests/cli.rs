@@ -96,7 +96,7 @@ fn rename_never_replaces_an_existing_file() {
 }
 
 #[test]
-fn rename_keeps_the_extension_and_rejects_paths() {
+fn rename_keeps_extension_refuses_paths() {
     let dir = scratch("rename");
     let doc = dir.join("a.pdf");
     fs::write(&doc, "x").expect("write");

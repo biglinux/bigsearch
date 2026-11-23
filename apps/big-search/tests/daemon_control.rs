@@ -650,7 +650,7 @@ fn folder_time_set_back_caught_up() {
 /// A saved folder replaced by a symlink is not watched through it, nor are the
 /// saved folders below it, and what the catalogue held under it leaves.
 #[test]
-fn symlinked_folder_not_followed() {
+fn symlinked_folder_left_alone() {
     let sandbox = Sandbox::new("bs-symlinked-folder");
     let outside = sandbox.base.join("outside");
     std::fs::create_dir_all(outside.join("inner")).unwrap();
