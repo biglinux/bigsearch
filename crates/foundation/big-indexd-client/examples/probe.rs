@@ -1,7 +1,9 @@
 //! A minimal client, the shape a graphical one takes: the daemon filters and
 //! pages, the client shows the page and keeps no state.
 //!
-//!     cargo run -p big-indexd-client --example probe -- relatorio
+//! ```sh
+//! cargo run -p big-indexd-client --example probe -- 'relatorio'
+//! ```
 use big_indexd_client::{Client, Filter, Page};
 
 fn main() {
