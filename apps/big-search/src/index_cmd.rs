@@ -345,7 +345,9 @@ fn spawn_mount_watch(
             // sources were read raises no later event.
             loop {
                 if available() != started {
-                    log::info!("a source came or went; restarting to follow it");
+                    log::info!(
+                        "a source came or went; exiting with status {EXIT_RESTART} for the service manager to start it again"
+                    );
                     #[expect(
                         clippy::exit,
                         reason = "systemd restarts the unit with the new sources"
