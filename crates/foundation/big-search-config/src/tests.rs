@@ -269,6 +269,24 @@ fn mixed_file_ending_in_crlf_edited() {
 }
 
 #[test]
+fn unchanged_settings_not_rewritten() {
+    use std::os::unix::fs::MetadataExt;
+    let (dir, file) = scratch_file("unchanged", "[[source]]\npath = \"/mnt/disk\"\n");
+    let before = std::fs::metadata(&file).unwrap().ino();
+    edit_file(&file, |lines| {
+        add_source_to(lines, &SourceEntry::new("/mnt/disk"), Path::new("/home/p"))
+    })
+    .unwrap();
+    let after = std::fs::metadata(&file).unwrap().ino();
+    let absent = dir.join("absent.toml");
+    edit_file(&absent, |_| Ok(())).unwrap();
+    let created = absent.exists();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(before, after, "an unchanged file was replaced");
+    assert!(!created, "a change that changed nothing created the file");
+}
+
+#[test]
 fn mixed_line_endings_kept() {
     let original = "[origin]\r\nnote = \"\"\"a\nb\"\"\"\n[[source]]\npath = \"/mnt/disk\"\n";
     let (dir, file) = scratch_file("mixed", original);

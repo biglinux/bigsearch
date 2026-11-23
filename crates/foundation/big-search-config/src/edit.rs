@@ -396,7 +396,13 @@ pub(crate) fn edit_file(
         let body = text.strip_suffix('\n').unwrap_or(&text);
         (body.split('\n').map(String::from).collect(), "\n")
     };
+    let before = lines.clone();
     change(&mut lines)?;
+    // Rewriting the same settings would still restart the service that
+    // watches the file, and would create a file that was not there.
+    if lines == before {
+        return Ok(());
+    }
     let edited = format!("{}{ending}", lines.join(ending));
     // A table the line editor does not read (an inline table, say) could get
     // a second definition; the file is never left unreadable.
