@@ -782,11 +782,7 @@ fn pending_batch_with_byte_limit(
 }
 
 fn estimated_read_bytes(path: &Path, size: u64) -> u64 {
-    let Some(ext) = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-    else {
+    let Some(ext) = extract::ext_of(path) else {
         return size;
     };
     if extract::is_text_like_ext(&ext) {

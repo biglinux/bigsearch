@@ -16,6 +16,7 @@
 //!   BIG_SEARCH_META_VIDEO      mkv/webm/mp4 duration (symphonia)
 //!   BIG_SEARCH_META_IMAGE      image dimensions (imagesize)
 //!   BIG_SEARCH_META_MAX_MB     skip metadata parse above this size (default 64)
+use crate::extract::ext_of;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -79,10 +80,6 @@ fn kind_word(kind: Kind) -> &'static str {
         Kind::Archive => "archive",
         Kind::Other => "file",
     }
-}
-
-fn ext_of(path: &Path) -> Option<String> {
-    Some(path.extension()?.to_str()?.to_ascii_lowercase())
 }
 
 fn kind_from_ext(ext: &str) -> Option<Kind> {

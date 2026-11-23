@@ -304,7 +304,7 @@ fn keep_stat_matches(kept: &mut Vec<Hit>, filter: &Filter) {
 fn enrich_page(hits: &mut Vec<Hit>, names: &tantivy::Searcher, name_fields: &crate::index::Fields) {
     let mut offline_sources = OfflineSources::default();
     hits.retain_mut(|h| {
-        h.ext = ext_of(&h.path);
+        h.ext = crate::extract::ext_of(Path::new(&h.path)).unwrap_or_default();
         if h.mime.is_empty() {
             h.mime = indexed_mime(names, name_fields, &h.path);
         }
@@ -349,15 +349,6 @@ fn file_name(path: &str) -> String {
     Path::new(path)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-/// Lowercase extension of `path` without the dot; empty when there is none.
-fn ext_of(path: &str) -> String {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
         .unwrap_or_default()
 }
 

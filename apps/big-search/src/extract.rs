@@ -116,7 +116,9 @@ fn read_capped_bytes(path: &Path) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn ext_of(path: &Path) -> Option<String> {
+/// The extension of `path` without the dot, ASCII-lowercased; `None` when it
+/// has none or it is not UTF-8.
+pub(crate) fn ext_of(path: &Path) -> Option<String> {
     Some(path.extension()?.to_str()?.to_ascii_lowercase())
 }
 
