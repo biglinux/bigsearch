@@ -515,7 +515,8 @@ The catch-up then compares:
 - a saved folder that is no longer the one watched (another folder renamed into
   its place, by its inode, or a file, a symlink or nothing): it leaves with its
   tree, and what took its place is indexed. One that cannot be read keeps its
-  entries, and the run is not recorded, so the next start walks;
+  entries and the folders listed below it, and the run is not recorded, so the
+  next start walks;
 - the direct entries of every folder modified or changed (`ctime`, which
   `cp -a`, `rsync -a` and `tar` cannot set back) since the last run started:
   folders and files created, renamed or deleted while the daemon was stopped.
@@ -531,7 +532,7 @@ all three wait for the next walk, `big-search rescan`.
 
 Mounts change no folder either. The daemon holds `/proc/self/mountinfo` open and
 wakes only when the kernel flags a change on it: a disk mounted or unmounted
-inside a source starts a rescan, and a source that comes or goes (a removable
+in or above a source starts a rescan, and a source that comes or goes (a removable
 disk plugged in) changes the roots the daemon started with, so it exits with
 status 75 and the unit starts it again (`RestartForceExitStatus=75`).
 
