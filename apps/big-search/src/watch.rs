@@ -135,6 +135,9 @@ struct Watches {
     recorded: bool,
     /// When the run this one recorded started, as written in the record.
     run_started: Option<SystemTime>,
+    /// A folder this run could not read or list where it had to, or could not
+    /// save: what changes in it would go unseen by a start that trusts the run.
+    missed: bool,
     /// Listed folders this user could not read, so no watch is on them: one
     /// made readable is watched and walked when the catch-up or an event
     /// reaches it.
@@ -153,7 +156,7 @@ impl Watches {
         // The list keys paths as text: a name that is not UTF-8 would be saved
         // as another path, so a run holding one leaves the next start a walk.
         if dir.to_str().is_none() {
-            self.failed.fetch_add(1, Ordering::Relaxed);
+            self.missed = true;
             return placed;
         }
         if (placed || self.unreadable.contains(dir))
@@ -201,7 +204,7 @@ impl Watches {
     /// failed watch it also drops the run record.
     fn persist(&mut self) -> Result<()> {
         self.dirs.persist()?;
-        if self.failed.load(Ordering::Relaxed) > 0 {
+        if self.failed.load(Ordering::Relaxed) > 0 || self.missed {
             self.forget_run()?;
         }
         // A clock set back since the run started: the record's start moves back
@@ -221,7 +224,10 @@ impl Watches {
         let Some(fingerprint) = self.fingerprint else {
             return Ok(());
         };
-        if self.failed.load(Ordering::Relaxed) > 0 || self.paused.load(Ordering::Relaxed) {
+        if self.failed.load(Ordering::Relaxed) > 0
+            || self.missed
+            || self.paused.load(Ordering::Relaxed)
+        {
             return Ok(());
         }
         self.dirs.set_meta(RUN_STARTED, Some(epoch_secs(started)))?;
@@ -229,6 +235,14 @@ impl Watches {
         self.recorded = true;
         self.run_started = Some(started);
         Ok(())
+    }
+
+    /// Before a walk: it places every watch and reads every folder again, so
+    /// the failures counted so far are counted again by it.
+    fn walk_begins(&mut self) -> Result<()> {
+        self.failed.store(0, Ordering::Relaxed);
+        self.missed = false;
+        self.forget_run()
     }
 
     /// Drop the run record, before a walk too: the walk commits the catalogue
@@ -395,6 +409,7 @@ fn start_inotify(
         fingerprint,
         recorded: true,
         run_started: None,
+        missed: false,
         unreadable: HashSet::new(),
         paused: Arc::clone(&runtime.paused),
     };
@@ -483,7 +498,7 @@ fn watch_initial_dirs(
                     // recorded, so the next start walks.
                     Err(e) => {
                         log::warn!("cannot read {}: {e}", dir.display());
-                        watches.failed.fetch_add(1, Ordering::Relaxed);
+                        watches.missed = true;
                         continue;
                     }
                 };
@@ -574,7 +589,7 @@ fn catch_up_at_start(
             Err(e) => {
                 // Its changes would go unseen once this run is recorded.
                 log::warn!("cannot list {}: {e}", dir.display());
-                watches.failed.fetch_add(1, Ordering::Relaxed);
+                watches.missed = true;
                 continue;
             }
         };
@@ -586,7 +601,7 @@ fn catch_up_at_start(
                 }
                 Err(e) => {
                     log::warn!("cannot list {}: {e}", dir.display());
-                    watches.failed.fetch_add(1, Ordering::Relaxed);
+                    watches.missed = true;
                 }
             }
         }
@@ -976,7 +991,7 @@ impl WatchLoop<'_> {
     /// were dropped, or on request. Returns when the walk began.
     fn rescan_sources(&mut self, outcome: &mut scan::ReconcileOutcome) -> Result<SystemTime> {
         let started = SystemTime::now();
-        self.watches.forget_run()?;
+        self.watches.walk_begins()?;
         // The versions worker cannot trust what it heard either, so its pass
         // over the catalogue starts again from the top.
         self.history_pass_done = false;
@@ -1099,7 +1114,7 @@ fn rebuild(
     watches: &mut Watches,
 ) -> Result<bool> {
     let started = SystemTime::now();
-    watches.forget_run()?;
+    watches.walk_begins()?;
     runtime.activity.store(ACTIVITY_INDEXING, Ordering::Relaxed);
     log::info!("rebuild requested: clearing index and re-indexing");
     writer
