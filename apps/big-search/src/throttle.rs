@@ -140,15 +140,10 @@ pub fn prepare_idle_cgroup() -> Option<&'static str> {
 
 /// This process's cgroup, when systemd delegated it as `<unit>.service/main`.
 fn delegated_cgroup() -> Option<std::path::PathBuf> {
-    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
-    let own = std::path::Path::new("/sys/fs/cgroup").join(
-        own.lines()
-            .find_map(|line| line.strip_prefix("0::"))?
-            .trim_start_matches('/'),
-    );
+    let own = own_cgroup_dir()?;
     let unit = own.parent()?;
     let delegated = own.file_name()? == "main"
-        && (unit == std::path::Path::new("/sys/fs/cgroup")
+        && (unit == std::path::Path::new(CGROUP_ROOT)
             || unit
                 .file_name()?
                 .to_str()
