@@ -319,7 +319,7 @@ pub fn name_doc_stale(recorded: Option<(i64, u64)>, mtime: i64) -> bool {
 
 /// Drop any document for `path` (the `path` field is a single raw token).
 pub fn delete_path(writer: &IndexWriter, f: &Fields, path: &Path) {
-    writer.delete_term(path_term(f, path));
+    writer.delete_term(path_term(f.path, path));
 }
 
 /// Drop the document for `path` and, when it was a folder, every document
@@ -343,8 +343,10 @@ pub fn upsert_path(
     add_name_only(writer, f, path, metadata)
 }
 
-pub fn path_term(f: &Fields, path: &Path) -> Term {
-    Term::from_field_text(f.path, &path.to_string_lossy())
+/// The term a document is keyed by in either index: its path as text.
+#[must_use]
+pub fn path_term(field: tantivy::schema::Field, path: &Path) -> Term {
+    Term::from_field_text(field, &path.to_string_lossy())
 }
 
 /// What a cache-aware reconcile actually touched. A metadata-only change (same

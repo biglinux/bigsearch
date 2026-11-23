@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tantivy::indexer::UserOperation;
-use tantivy::{Index, IndexWriter, TantivyDocument, Term};
+use tantivy::{Index, IndexWriter, TantivyDocument};
 
 pub struct PendingContentBatch {
     pub files: Vec<PathBuf>,
@@ -108,7 +108,7 @@ pub fn prune_unreferenced_content_docs(index: &Index) -> Result<usize> {
     let f = content_fields(index)?;
     let mut writer = crate::index::content_writer(index)?;
     for path in &doomed {
-        writer.delete_term(Term::from_field_text(f.path, &path.to_string_lossy()));
+        writer.delete_term(crate::scan::path_term(f.path, path));
     }
     writer
         .commit()
@@ -170,10 +170,7 @@ pub fn prune_orphaned_content(index: &Index, limit: usize) -> Result<(usize, boo
             None => writer.insert(crate::index::content_writer(index)?),
         };
         for path in &orphans {
-            active.delete_term(tantivy::Term::from_field_text(
-                f.path,
-                &path.to_string_lossy(),
-            ));
+            active.delete_term(crate::scan::path_term(f.path, path));
             content_state.remove(path);
         }
         removed += batch;
@@ -816,7 +813,7 @@ fn upsert_with_body(
     document.add_text(f.path, path.to_string_lossy());
     document.add_text(f.body, body);
     writer.run([
-        UserOperation::Delete(Term::from_field_text(f.path, &path.to_string_lossy())),
+        UserOperation::Delete(crate::scan::path_term(f.path, path)),
         UserOperation::Add(document),
     ])?;
     Ok(())
