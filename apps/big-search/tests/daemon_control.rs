@@ -704,6 +704,38 @@ fn unreadable_folder_keeps_the_record() {
     std::fs::remove_dir_all(&sandbox.base).ok();
 }
 
+/// A folder renamed over a listed one while the daemon runs is listed with its
+/// own inode, or the next start would take it for a replaced folder.
+#[test]
+fn renamed_over_folder_relisted() {
+    use std::os::unix::fs::MetadataExt;
+    let sandbox = Sandbox::new("bs-renamed-over");
+    let project = sandbox.docs.join("proj");
+    let replacement = sandbox.docs.join("proj.new");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::write(replacement.join("plan.txt"), "delta").unwrap();
+    let _daemon = sandbox.start();
+    sandbox.await_docs_watched();
+    std::fs::rename(&replacement, &project).unwrap();
+    let inode = std::fs::symlink_metadata(&project).unwrap().ino();
+    let listed = |db: rusqlite::Connection| {
+        db.query_row(
+            "SELECT size FROM file_state WHERE namespace = 'watch' AND path = ?1",
+            [project.to_str().unwrap()],
+            |row| row.get::<_, i64>(0),
+        )
+    };
+    assert!(
+        settles(|| sandbox
+            .state_db()
+            .and_then(listed)
+            .is_ok_and(|size| u64::try_from(size) == Ok(inode))),
+        "the folder renamed into place is listed with the old inode"
+    );
+    std::fs::remove_dir_all(&sandbox.base).ok();
+}
+
 /// A saved folder that cannot be read at the next start keeps its entries:
 /// a failed lookup is no evidence that another folder took its place.
 #[test]

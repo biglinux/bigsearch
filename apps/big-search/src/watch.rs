@@ -151,8 +151,8 @@ impl Watches {
         use std::os::unix::fs::MetadataExt;
         let placed = self.place(dir);
         if (placed || self.unreadable.contains(dir))
-            && !self.dirs.contains(dir)
             && let Ok(metadata) = std::fs::symlink_metadata(dir)
+            && self.dirs.recorded(dir) != Some((0, metadata.ino()))
         {
             self.dirs.set(dir, 0, metadata.ino());
         }
