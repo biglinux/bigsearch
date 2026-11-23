@@ -714,6 +714,7 @@ impl CatalogueReader {
             Some(conn) => conn,
             empty => empty.insert(open_catalogue_reader(&self.db_path)?),
         };
+        // ast-grep-ignore: rust-sql-format (the clause is built from fixed fragments; every value is bound)
         let total: i64 = conn
             .prepare_cached(&format!(
                 "SELECT COUNT(*) FROM file_state WHERE {count_where}"
@@ -739,6 +740,7 @@ impl CatalogueReader {
         };
         page_args.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         page_args.push(Value::Integer(i64::try_from(offset).unwrap_or(i64::MAX)));
+        // ast-grep-ignore: rust-sql-format (the clause and the column come from fixed fragments; every value is bound)
         let mut stmt = conn
             .prepare_cached(&format!(
                 "SELECT path FROM file_state WHERE {page_where}

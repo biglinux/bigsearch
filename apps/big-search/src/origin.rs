@@ -652,6 +652,7 @@ fn select_records(
     }
     let placeholders = (0..paths.len()).map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!("SELECT {RECORD_COLUMNS} FROM file_origin WHERE path IN ({placeholders})");
+    // ast-grep-ignore: rust-sql-format (only the column constant and "?" placeholders are formatted; every value is bound)
     let mut stmt = conn.prepare(&sql)?;
     let records = stmt.query_map(params_from_iter(paths.iter()), row_to_record)?;
     let mut by_path = HashMap::with_capacity(paths.len());
@@ -704,6 +705,7 @@ fn attach_by_identity(
         "SELECT {RECORD_COLUMNS} FROM file_origin
           WHERE (dev, ino) IN ({placeholders})"
     );
+    // ast-grep-ignore: rust-sql-format (only the column constant and "?" placeholders are formatted; every value is bound)
     let mut stmt = conn.prepare(&sql)?;
     let mut values: Vec<i64> = Vec::with_capacity(identities.len() * 2);
     for (_, dev, ino) in &identities {
