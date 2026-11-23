@@ -259,32 +259,38 @@ pub fn opens_with_kind(normalized: &str) -> bool {
     COMBINED.find(normalized).is_some_and(|m| m.start() == 0)
 }
 
+/// The words a file name opens with, by kind, in the document's own language:
+/// a name the document would give itself, whatever the desktop's language.
+const LABELS_EN: &[(&str, &str)] = &[
+    ("nota_fiscal", "Invoice"),
+    ("recibo", "Receipt"),
+    ("fatura_boleto", "Bill"),
+    ("extrato", "Statement"),
+    ("contrato", "Contract"),
+];
+const LABELS_ES: &[(&str, &str)] = &[
+    ("nota_fiscal", "Factura"),
+    ("recibo", "Recibo"),
+    ("fatura_boleto", "Cobro"),
+    ("extrato", "Extracto"),
+    ("contrato", "Contrato"),
+];
+const LABELS_PT: &[(&str, &str)] = &[
+    ("nota_fiscal", "Nota fiscal"),
+    ("recibo", "Recibo"),
+    ("fatura_boleto", "Fatura"),
+    ("extrato", "Extrato"),
+    ("contrato", "Contrato"),
+];
+
 /// The word a file name opens with for `kind`, in the language that named it,
 /// only for kinds whose own words are evidence enough (an invoice says
 /// "nota fiscal"); an article or a report is named by its title alone.
 pub fn label(kind: &str, lang: &str) -> Option<&'static str> {
-    let labels: &[(&str, &str)] = match lang {
-        "en" => &[
-            ("nota_fiscal", "Invoice"),
-            ("recibo", "Receipt"),
-            ("fatura_boleto", "Bill"),
-            ("extrato", "Statement"),
-            ("contrato", "Contract"),
-        ],
-        "es" => &[
-            ("nota_fiscal", "Factura"),
-            ("recibo", "Recibo"),
-            ("fatura_boleto", "Cobro"),
-            ("extrato", "Extracto"),
-            ("contrato", "Contrato"),
-        ],
-        _ => &[
-            ("nota_fiscal", "Nota fiscal"),
-            ("recibo", "Recibo"),
-            ("fatura_boleto", "Fatura"),
-            ("extrato", "Extrato"),
-            ("contrato", "Contrato"),
-        ],
+    let labels = match lang {
+        "en" => LABELS_EN,
+        "es" => LABELS_ES,
+        _ => LABELS_PT,
     };
     labels.iter().find(|(k, _)| *k == kind).map(|(_, w)| *w)
 }
