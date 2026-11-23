@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Capture the big-search daemon's answer to every request big-indexd-client sends.
 
-Runs the installed daemon in a private HOME and runtime directory, sends each
+Runs the daemon built from this tree in a private HOME and runtime directory, sends each
 request line below over its socket and writes the pairs, with the private
 directory spelled `/home/p`, to the client's contract fixtures. The client's
 tests decode every answer and send every request back through its own types.
 
-    scripts/capture-search-wire.py [DAEMON]   (default: big-search on PATH)
+    scripts/capture-search-wire.py [DAEMON]   (default: target/release/big-search)
 
-Exit: 0 written, 1 the daemon did not answer, 2 no daemon installed.
+Exit: 0 written, 1 the daemon did not answer, 2 no daemon found.
 """
 
 from __future__ import annotations
@@ -25,9 +25,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "crates/foundation/big-indexd-client/tests/wire.jsonl"
+DAEMON = ROOT / "target/release/big-search"
 SPELLED = "/home/p"
 
 
+# shape: declares a view
 def requests(home: str) -> list[dict]:
     doc = f"{home}/Documents/relatorio.txt"
     copy = f"{home}/Documents/relatorio-copia.txt"
@@ -116,29 +118,69 @@ def ask(sock_path: Path, line: str) -> str:
     return reply.decode().strip()
 
 
+def scratch_home(scratch: Path) -> tuple[Path, Path, dict[str, str]]:
+    """A home with one document, its runtime directory and the daemon's environment."""
+    home = scratch / "home"
+    runtime = scratch / "run"
+    (home / "Documents").mkdir(parents=True)
+    runtime.mkdir(mode=0o700)
+    (home / "Documents/relatorio.txt").write_text("relatório trimestral\n")
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin"),
+        "HOME": str(home),
+        "XDG_RUNTIME_DIR": str(runtime),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_STATE_HOME": str(home / ".local/state"),
+        "LANG": "C.UTF-8",
+    }
+    return home, runtime, env
+
+
+def await_indexed(sock_path: Path, server: subprocess.Popen) -> str | None:
+    """Wait until the daemon answers with something indexed; why not, otherwise."""
+    deadline = time.monotonic() + 30
+    while not sock_path.exists():
+        if time.monotonic() > deadline or server.poll() is not None:
+            return "the daemon did not open its socket"
+        time.sleep(0.1)
+    while json.loads(ask(sock_path, '{"v":2,"cmd":"status"}')).get("indexed", 0) == 0:
+        if time.monotonic() > deadline:
+            return "the daemon indexed nothing"
+        time.sleep(0.2)
+    return None
+
+
+def exchanges(sock_path: Path, home: Path) -> list[str] | str:
+    """Each request with its answer, the home spelled `/home/p`; or what failed."""
+    pairs = []
+    for request in requests(str(home)):
+        line = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
+        reply = ask(sock_path, line)
+        if not reply:
+            return f"no answer to {request['cmd']}"
+        pairs.append(
+            json.dumps(
+                {"request": json.loads(line), "reply": json.loads(reply)},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).replace(str(home), SPELLED)
+        )
+    return pairs
+
+
 def main() -> int:
-    daemon = shutil.which(sys.argv[1] if len(sys.argv) > 1 else "big-search")
-    if daemon is None:
-        print("no big-search daemon installed", file=sys.stderr)
+    daemon = sys.argv[1] if len(sys.argv) > 1 else str(DAEMON)
+    if shutil.which(daemon) is None:
+        print(
+            f"{daemon} not found; build it with cargo build --release", file=sys.stderr
+        )
         return 2
     # In /tmp: the daemon skips what lies below a hidden or build folder, such
     # as ~/.cache or target/. The scratch home holds data only.
     with tempfile.TemporaryDirectory(prefix="search-wire-", dir="/tmp") as scratch:
-        home = Path(scratch) / "home"
-        runtime = Path(scratch) / "run"
-        (home / "Documents").mkdir(parents=True)
-        runtime.mkdir(mode=0o700)
-        (home / "Documents/relatorio.txt").write_text("relatório trimestral\n")
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin"),
-            "HOME": str(home),
-            "XDG_RUNTIME_DIR": str(runtime),
-            "XDG_CONFIG_HOME": str(home / ".config"),
-            "XDG_DATA_HOME": str(home / ".local/share"),
-            "XDG_CACHE_HOME": str(home / ".cache"),
-            "XDG_STATE_HOME": str(home / ".local/state"),
-            "LANG": "C.UTF-8",
-        }
+        home, runtime, env = scratch_home(Path(scratch))
         server = subprocess.Popen(
             [daemon, "daemon"],
             env=env,
@@ -147,37 +189,14 @@ def main() -> int:
         )
         try:
             sock_path = runtime / "biglinux/indexd.sock"
-            deadline = time.monotonic() + 30
-            while not sock_path.exists():
-                if time.monotonic() > deadline or server.poll() is not None:
-                    print("the daemon did not open its socket", file=sys.stderr)
-                    return 1
-                time.sleep(0.1)
-            while (
-                json.loads(ask(sock_path, '{"v":2,"cmd":"status"}')).get("indexed", 0)
-                == 0
-            ):
-                if time.monotonic() > deadline:
-                    print("the daemon indexed nothing", file=sys.stderr)
-                    return 1
-                time.sleep(0.2)
-            pairs = []
-            for request in requests(str(home)):
-                line = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
-                reply = ask(sock_path, line)
-                if not reply:
-                    print(f"no answer to {request['cmd']}", file=sys.stderr)
-                    return 1
-                pairs.append(
-                    json.dumps(
-                        {"request": json.loads(line), "reply": json.loads(reply)},
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).replace(str(home), SPELLED)
-                )
+            failure = await_indexed(sock_path, server)
+            pairs = failure or exchanges(sock_path, home)
         finally:
             server.terminate()
             server.wait(timeout=10)
+    if isinstance(pairs, str):
+        print(pairs, file=sys.stderr)
+        return 1
     FIXTURES.write_text("\n".join(pairs) + "\n")
     print(f"{len(pairs)} exchanges written to {FIXTURES.relative_to(ROOT)}")
     return 0

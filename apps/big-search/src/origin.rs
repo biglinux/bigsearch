@@ -595,7 +595,8 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
             record.ino,
             record.kind.as_str(),
             record.confidence as u8,
-            // No sentence is stored: `label()` builds it on read.
+            // `label()` builds the sentence on read; the column stays, empty,
+            // for the older builds that still read it.
             "",
             record.source_app,
             record.source_path,
@@ -611,7 +612,7 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
 
 /// The columns `row_to_record` reads, in its positional order: a query listing
 /// them differently would silently swap fields.
-const RECORD_COLUMNS: &str = "path, dev, ino, kind, confidence, label, source_app, \
+const RECORD_COLUMNS: &str = "path, dev, ino, kind, confidence, source_app, \
      source_path, source_device_id, source_device_label, source_domain, \
      first_seen_at, updated_at";
 
@@ -746,13 +747,13 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OriginRecord> {
         ino: row.get(2)?,
         kind: parse_kind(&kind_text),
         confidence: parse_confidence(confidence),
-        source_app: row.get(6)?,
-        source_path: row.get(7)?,
-        source_device_id: row.get(8)?,
-        source_device_label: row.get(9)?,
-        source_domain: row.get(10)?,
-        first_seen_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        source_app: row.get(5)?,
+        source_path: row.get(6)?,
+        source_device_id: row.get(7)?,
+        source_device_label: row.get(8)?,
+        source_domain: row.get(9)?,
+        first_seen_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 
