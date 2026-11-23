@@ -160,12 +160,13 @@ impl History {
     /// Never fails outward: a store that cannot be opened is a feature that does
     /// nothing, not a service that stops.
     pub fn open(settings: &big_search_config::FileHistory) -> Self {
-        let disabled = |reason| Self {
-            conn: None,
-            objects: crate::config::history_dir().join("objects"),
-            support: Support::Unavailable(reason),
+        let objects = crate::config::history_dir().join("objects");
+        let store = |conn, support, budget_bytes| Self {
+            conn,
+            objects: objects.clone(),
+            support,
             hopeless_devices: Vec::new(),
-            budget_bytes: 0,
+            budget_bytes,
             keep_versions: settings.keep_versions,
             keep_days: settings.keep_days,
             paused_for_space: false,
@@ -173,13 +174,13 @@ impl History {
             skip_git_repositories: settings.skip_git_repositories,
             respect_gitignore: settings.respect_gitignore,
         };
+        let disabled = |reason| store(None, Support::Unavailable(reason), 0);
         if !settings.enabled {
             return disabled(Unavailable::Disabled);
         }
         if is_live_session() {
             return disabled(Unavailable::LiveSession);
         }
-        let objects = crate::config::history_dir().join("objects");
         if let Err(error) = prepare_store(&objects) {
             log::warn!("file history disabled: {error:#}");
             return disabled(Unavailable::NoReflink);
@@ -194,19 +195,11 @@ impl History {
         let disk = disk_capacity(&crate::config::data_dir())
             .map(|capacity| capacity.total_bytes)
             .unwrap_or(0);
-        Self {
-            conn: Some(conn),
-            objects,
-            support: Support::Untested,
-            hopeless_devices: Vec::new(),
-            budget_bytes: big_search_config::history_budget_bytes(settings.max_total_gib, disk),
-            keep_versions: settings.keep_versions,
-            keep_days: settings.keep_days,
-            paused_for_space: false,
-            budget_unchecked: false,
-            skip_git_repositories: settings.skip_git_repositories,
-            respect_gitignore: settings.respect_gitignore,
-        }
+        store(
+            Some(conn),
+            Support::Untested,
+            big_search_config::history_budget_bytes(settings.max_total_gib, disk),
+        )
     }
 
     pub const fn support(&self) -> Support {

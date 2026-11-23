@@ -339,33 +339,21 @@ impl State {
         // `path > ?` also starts a pass. Every keyset query here relies on that:
         // an `?2 = '' OR` guard stops SQLite seeking the primary key, and each
         // page becomes a scan from the namespace's first row.
-        let after = after.unwrap_or_default();
-        let mut stmt = self
-            .conn
-            .prepare(
-                "
-                SELECT path FROM file_state
-                WHERE namespace = ?1
-                  AND path > ?2
-                  AND NOT EXISTS (
-                      SELECT 1 FROM temp.current_scan_seen AS seen
-                      WHERE seen.path = file_state.path
-                  )
-                ORDER BY path
-                LIMIT ?3
-                ",
-            )
-            .context("prepare unseen path query")?;
-        let rows = stmt
-            .query_map(params![self.namespace, after, limit as i64], |row| {
-                row.get::<_, String>(0)
-            })
-            .context("query unseen paths")?;
-        let mut paths = Vec::new();
-        for row in rows {
-            paths.push(PathBuf::from(row?));
-        }
-        Ok(paths)
+        self.path_page(
+            "
+            SELECT path FROM file_state
+            WHERE namespace = ?1
+              AND path > ?2
+              AND NOT EXISTS (
+                  SELECT 1 FROM temp.current_scan_seen AS seen
+                  WHERE seen.path = file_state.path
+              )
+            ORDER BY path
+            LIMIT ?3
+            ",
+            params![self.namespace, after.unwrap_or_default(), limit as i64],
+            "unseen paths",
+        )
     }
 
     /// Paths of this namespace (ordered, strictly after `after`) absent from
@@ -382,34 +370,45 @@ impl State {
         if limit == 0 || self.clear_before_persist {
             return Ok(Vec::new());
         }
-        let after = after.unwrap_or_default();
+        self.path_page(
+            "
+            SELECT mine.path
+            FROM file_state AS mine
+            LEFT JOIN file_state AS catalog
+              ON catalog.namespace = ?2 AND catalog.path = mine.path
+            WHERE mine.namespace = ?1
+              AND mine.path > ?3
+              AND catalog.path IS NULL
+            ORDER BY mine.path
+            LIMIT ?4
+            ",
+            params![
+                self.namespace,
+                other_namespace,
+                after.unwrap_or_default(),
+                limit as i64
+            ],
+            "orphan namespace paths",
+        )
+    }
+
+    /// One page of the paths `sql` selects, in its first column.
+    fn path_page(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::ToSql],
+        what: &str,
+    ) -> Result<Vec<PathBuf>> {
         let mut stmt = self
             .conn
-            .prepare_cached(
-                "
-                SELECT mine.path
-                FROM file_state AS mine
-                LEFT JOIN file_state AS catalog
-                  ON catalog.namespace = ?2 AND catalog.path = mine.path
-                WHERE mine.namespace = ?1
-                  AND mine.path > ?3
-                  AND catalog.path IS NULL
-                ORDER BY mine.path
-                LIMIT ?4
-                ",
-            )
-            .context("prepare orphan-namespace query")?;
+            .prepare_cached(sql)
+            .with_context(|| format!("prepare {what}"))?;
         let rows = stmt
-            .query_map(
-                params![self.namespace, other_namespace, after, limit as i64],
-                |row| row.get::<_, String>(0),
-            )
-            .context("query orphan namespace paths")?;
-        let mut paths = Vec::new();
-        for row in rows {
-            paths.push(PathBuf::from(row?));
-        }
-        Ok(paths)
+            .query_map(params, |row| row.get::<_, String>(0))
+            .with_context(|| format!("query {what}"))?;
+        Ok(rows
+            .map(|row| row.map(PathBuf::from))
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     /// Rows of this namespace (path-ordered, strictly after `after`) whose

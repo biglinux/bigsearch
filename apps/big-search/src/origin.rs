@@ -71,6 +71,26 @@ struct OriginRecord {
 }
 
 impl OriginRecord {
+    /// A file at `path`, seen arriving at `at`, with nothing known yet of
+    /// where it came from.
+    fn arrived(path: &Path, kind: OriginKind, confidence: OriginConfidence, at: i64) -> Self {
+        let (dev, ino) = dev_ino(path);
+        Self {
+            path: path_key(path),
+            dev,
+            ino,
+            kind,
+            confidence,
+            source_app: None,
+            source_path: None,
+            source_device_id: None,
+            source_device_label: None,
+            source_domain: None,
+            first_seen_at: at,
+            updated_at: at,
+        }
+    }
+
     /// The sentence the command line prints, built when the record is read so
     /// that nothing in one language is stored. The desktop builds its own,
     /// translated, from `kind` and the fields.
@@ -200,22 +220,14 @@ impl OriginWriter {
             return Ok(());
         };
         ensure_path_under_source(path)?;
-        let now = now_secs();
-        let (dev, ino) = dev_ino(path);
-        let app = app_id.map(str::to_string);
         let record = OriginRecord {
-            path: path_key(path),
-            dev,
-            ino,
-            kind: OriginKind::AppCreated,
-            confidence: OriginConfidence::High,
-            source_app: app,
-            source_path: None,
-            source_device_id: None,
-            source_device_label: None,
-            source_domain: None,
-            first_seen_at: now,
-            updated_at: now,
+            source_app: app_id.map(str::to_string),
+            ..OriginRecord::arrived(
+                path,
+                OriginKind::AppCreated,
+                OriginConfidence::High,
+                now_secs(),
+            )
         };
         upsert_record(conn, &record)
     }
@@ -225,8 +237,6 @@ impl OriginWriter {
             return Ok(());
         };
         ensure_path_under_source(dst)?;
-        let now = now_secs();
-        let (dev, ino) = dev_ino(dst);
         let source = crate::settings::sources().owner(src);
         let (kind, source_device_id, source_device_label) = match source {
             Some(source) if source.removable() => (
@@ -242,18 +252,11 @@ impl OriginWriter {
             _ => (OriginKind::LocalCopy, None, None),
         };
         let record = OriginRecord {
-            path: path_key(dst),
-            dev,
-            ino,
-            kind,
-            confidence: OriginConfidence::High,
             source_app: app_id.map(str::to_string),
             source_path: Some(path_key(src)),
             source_device_id,
             source_device_label,
-            source_domain: None,
-            first_seen_at: now,
-            updated_at: now,
+            ..OriginRecord::arrived(dst, kind, OriginConfidence::High, now_secs())
         };
         upsert_record(conn, &record)
     }
@@ -281,18 +284,14 @@ impl OriginWriter {
         }
 
         let record = OriginRecord {
-            path: dst_key,
-            dev,
-            ino,
-            kind: OriginKind::MovedOrRenamed,
-            confidence: OriginConfidence::Medium,
             source_app: app_id.map(str::to_string),
-            source_path: Some(path_key(src)),
-            source_device_id: None,
-            source_device_label: None,
-            source_domain: None,
-            first_seen_at: now,
-            updated_at: now,
+            source_path: Some(src_key),
+            ..OriginRecord::arrived(
+                dst,
+                OriginKind::MovedOrRenamed,
+                OriginConfidence::Medium,
+                now,
+            )
         };
         upsert_record(conn, &record)
     }
@@ -302,21 +301,15 @@ impl OriginWriter {
             return Ok(());
         };
         ensure_path_under_source(dst)?;
-        let now = now_secs();
-        let (dev, ino) = dev_ino(dst);
         let record = OriginRecord {
-            path: path_key(dst),
-            dev,
-            ino,
-            kind: OriginKind::DerivedFile,
-            confidence: OriginConfidence::High,
             source_app: app_id.map(str::to_string),
             source_path: Some(path_key(src)),
-            source_device_id: None,
-            source_device_label: None,
-            source_domain: None,
-            first_seen_at: now,
-            updated_at: now,
+            ..OriginRecord::arrived(
+                dst,
+                OriginKind::DerivedFile,
+                OriginConfidence::High,
+                now_secs(),
+            )
         };
         upsert_record(conn, &record)
     }
@@ -337,20 +330,15 @@ impl OriginWriter {
             return Ok(());
         };
         ensure_path_under_source(path)?;
-        let (dev, ino) = dev_ino(path);
         let record = OriginRecord {
-            path: path_key(path),
-            dev,
-            ino,
-            kind: OriginKind::WebDownload,
-            confidence: OriginConfidence::High,
-            source_app: None,
-            source_path: None,
-            source_device_id: None,
-            source_device_label: None,
             source_domain: Some(domain.to_string()),
             first_seen_at: downloaded_at,
-            updated_at: now_secs(),
+            ..OriginRecord::arrived(
+                path,
+                OriginKind::WebDownload,
+                OriginConfidence::High,
+                now_secs(),
+            )
         };
         upsert_record(conn, &record)
     }
