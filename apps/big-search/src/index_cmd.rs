@@ -339,17 +339,22 @@ fn spawn_mount_watch(
         .spawn(move || {
             let mut table = match mounts::MountTable::open() {
                 Ok(table) => table,
-                Err(e) => return log::warn!("mounts are not followed: {e}"),
+                Err(e) => {
+                    log::warn!("mounts are not followed: {e}");
+                    return;
+                }
             };
             let mut before = match table.points() {
                 Ok(points) => points,
-                Err(e) => return log::warn!("mounts are not followed: {e}"),
+                Err(e) => {
+                    log::warn!("mounts are not followed: {e}");
+                    return;
+                }
             };
+            let mut now = before.clone();
+            // Checked before the first wait too: a source that came while the
+            // table was opened raises no later event.
             loop {
-                let now = match table.wait().and_then(|()| table.points()) {
-                    Ok(now) => now,
-                    Err(e) => return log::warn!("mounts are no longer followed: {e}"),
-                };
                 if available() != started {
                     log::info!("a source came or went; restarting to follow it");
                     #[expect(
@@ -367,6 +372,13 @@ fn spawn_mount_watch(
                     }
                 }
                 before = now;
+                now = match table.wait().and_then(|()| table.points()) {
+                    Ok(now) => now,
+                    Err(e) => {
+                        log::warn!("mounts are no longer followed: {e}");
+                        return;
+                    }
+                };
             }
         });
     if let Err(e) = spawned {

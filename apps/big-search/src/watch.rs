@@ -150,6 +150,12 @@ impl Watches {
     fn watch(&mut self, dir: &Path) -> bool {
         use std::os::unix::fs::MetadataExt;
         let placed = self.place(dir);
+        // The list keys paths as text: a name that is not UTF-8 would be saved
+        // as another path, so a run holding one leaves the next start a walk.
+        if dir.to_str().is_none() {
+            self.failed.fetch_add(1, Ordering::Relaxed);
+            return placed;
+        }
         if (placed || self.unreadable.contains(dir))
             && let Ok(metadata) = std::fs::symlink_metadata(dir)
             && self.dirs.recorded(dir) != Some((0, metadata.ino()))
@@ -159,12 +165,9 @@ impl Watches {
         placed
     }
 
-    /// Place the watch on `dir`. A folder that cannot be watched leaves the
-    /// list, unless the inotify watch limit refused it or this user cannot
-    /// read it (the walker cannot read it either). Any failure but those two
-    /// and a vanished folder makes the next start walk (see
-    /// [`Self::persist`]). The limit leaves every later folder unwatched too,
-    /// so only the first failure is logged.
+    /// Place the watch on `dir`. An unreadable folder stays listed for the
+    /// catch-up; any other failure but a vanished folder keeps this run from
+    /// being recorded, and only the first is logged.
     fn place(&mut self, dir: &Path) -> bool {
         let Err(error) = self.watcher.watch(dir, RecursiveMode::NonRecursive) else {
             self.unreadable.remove(dir);
@@ -558,10 +561,35 @@ fn catch_up_at_start(
         )?);
     }
     for dir in catch_up.changed {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let listing = match std::fs::read_dir(&dir) {
+            Ok(listing) => listing,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => {
+                // Its changes would go unseen once this run is recorded.
+                log::warn!("cannot list {}: {e}", dir.display());
+                watches.failed.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
         };
-        let mut entries: HashSet<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        let mut entries = HashSet::new();
+        for entry in listing {
+            match entry {
+                Ok(entry) => {
+                    entries.insert(entry.path());
+                }
+                Err(e) => {
+                    log::warn!("cannot list {}: {e}", dir.display());
+                    watches.failed.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         entries.extend(state.children(&dir)?);
         outcome.absorb(reconcile(
             active_index_writer(writer),
@@ -746,8 +774,8 @@ impl WatchLoop<'_> {
                 return self.reindex_path(path);
             }
             WatchMessage::ControlCommand(WatchControlCommand::Resume) => {
-                // ipc.rs cleared the flag; set again, a pause sent after this
-                // resume is waiting in the queue.
+                // The flag was cleared when the command was accepted; set
+                // again, a pause sent after this resume is waiting in the queue.
                 if self.runtime.paused.load(Ordering::Relaxed) {
                     return Ok(());
                 }
@@ -755,7 +783,7 @@ impl WatchLoop<'_> {
                 return self.walk_sources();
             }
             WatchMessage::ControlCommand(WatchControlCommand::Rescan) => {
-                // ipc.rs refuses it with an answer; this is the backstop. A
+                // The socket refuses it while paused; this guards the queue. A
                 // paused watcher drops events, so no walk may record its run
                 // as covered: `resume` walks.
                 if self.runtime.paused.load(Ordering::Relaxed) {
@@ -778,8 +806,8 @@ impl WatchLoop<'_> {
     }
 
     fn reindex_path(&mut self, path: PathBuf) -> Result<()> {
-        // ipc.rs refuses these with an answer; this is the backstop for
-        // the sources having changed since.
+        // The socket refuses these; this guards against the sources having
+        // changed since.
         if self.runtime.paused.load(Ordering::Relaxed)
             || !path.is_absolute()
             || !self.roots.iter().any(|root| path.starts_with(root))
@@ -1041,7 +1069,7 @@ fn apply_control_command(
 ) -> Result<bool> {
     match command {
         WatchControlCommand::Pause => {
-            // ipc.rs set the flag when it accepted the command, so a request
+            // The flag was set when the command was accepted, so a request
             // right after it already sees it. Events are dropped while
             // paused, so the next start must walk.
             watches.forget_run()?;
