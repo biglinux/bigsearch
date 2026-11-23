@@ -292,8 +292,16 @@ pub(super) fn cmd_daemon() -> Result<()> {
         Some(how) => log::info!("indexing runs in its own cgroup ({how})"),
         None => log::info!("indexing shares the service's cgroup (no cgroup delegated)"),
     }
-    spawn_watcher(&index, &content_index, &control, rx, &history)?;
-    spawn_mount_watch(control.commands.clone());
+    // One reading of the sources present, for the walk and the mount watch
+    // alike: a source that comes between two readings would be in neither.
+    let available: Vec<&'static settings::Source> = settings::sources()
+        .all()
+        .iter()
+        .filter(|s| settings::is_available(s))
+        .collect();
+    let started: Vec<PathBuf> = available.iter().map(|s| s.path.clone()).collect();
+    spawn_watcher(&index, &content_index, &control, rx, &history, available)?;
+    spawn_mount_watch(control.commands.clone(), started);
 
     let (name_reader, content_reader) = open_query_readers()?;
     ipc::serve(
@@ -314,7 +322,10 @@ const EXIT_RESTART: i32 = 75;
 /// watcher for a rescan, since inotify reports neither. A source that comes or
 /// goes (a removable disk plugged in) changes the roots the daemon started
 /// with, so it exits for systemd to start it again with the new set.
-fn spawn_mount_watch(commands: std::sync::mpsc::Sender<watch::WatchMessage>) {
+fn spawn_mount_watch(
+    commands: std::sync::mpsc::Sender<watch::WatchMessage>,
+    started: Vec<PathBuf>,
+) {
     let available = || -> Vec<PathBuf> {
         settings::sources()
             .all()
@@ -326,12 +337,14 @@ fn spawn_mount_watch(commands: std::sync::mpsc::Sender<watch::WatchMessage>) {
     let spawned = std::thread::Builder::new()
         .name("mounts".into())
         .spawn(move || {
-            let started = available();
             let mut table = match mounts::MountTable::open() {
                 Ok(table) => table,
                 Err(e) => return log::warn!("mounts are not followed: {e}"),
             };
-            let mut before = table.points().unwrap_or_default();
+            let mut before = match table.points() {
+                Ok(points) => points,
+                Err(e) => return log::warn!("mounts are not followed: {e}"),
+            };
             loop {
                 let now = match table.wait().and_then(|()| table.points()) {
                     Ok(now) => now,
@@ -379,6 +392,7 @@ fn spawn_watcher(
     control: &ipc::Control,
     rx: std::sync::mpsc::Receiver<watch::WatchMessage>,
     history: &big_search::history::SharedHistory,
+    available: Vec<&'static settings::Source>,
 ) -> Result<()> {
     let watch_history = std::sync::Arc::clone(history);
     let watch_commands = control.commands.clone();
@@ -394,6 +408,7 @@ fn spawn_watcher(
             let _watcher_exit_guard = WatcherExitGuard;
             throttle::lower_priority();
             let start = startup_sync(
+                &available,
                 &watch_index,
                 &watch_content_index,
                 &watch_pending_content,
@@ -444,17 +459,13 @@ struct StartupSync {
 /// stale content and extracts the first content batch. Exits the process when
 /// the walk keeps failing.
 fn startup_sync(
+    available: &[&settings::Source],
     index: &tantivy::Index,
     content_index: &tantivy::Index,
     pending_content: &std::sync::atomic::AtomicU64,
     activity: &std::sync::atomic::AtomicU8,
 ) -> StartupSync {
     let started = std::time::SystemTime::now();
-    let available: Vec<&settings::Source> = settings::sources()
-        .all()
-        .iter()
-        .filter(|s| settings::is_available(s))
-        .collect();
     let roots: Vec<PathBuf> = available.iter().map(|s| s.path.clone()).collect();
     // A removable disk or a network folder changes on other machines, where
     // folder times need not move (FAT and exFAT written by Windows).
