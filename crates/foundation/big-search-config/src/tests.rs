@@ -360,6 +360,11 @@ fn non_utf8_folder_refused() {
     let refused = add_source_to(&mut lines, &SourceEntry::new(folder), Path::new("/home/p"));
     assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     assert!(lines.is_empty());
+    // The first folder also writes the home folder, which is no exception.
+    let home = PathBuf::from(std::ffi::OsStr::from_bytes(b"/home/jos\xe9"));
+    let refused = add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), &home);
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    assert!(lines.is_empty());
 }
 
 #[test]

@@ -72,13 +72,6 @@ pub(crate) fn add_source_to(
     source: &SourceEntry,
     home: &Path,
 ) -> io::Result<()> {
-    // TOML strings are UTF-8: another name would be written as a different path.
-    if source.path.to_str().is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} is not a UTF-8 path", source.path.display()),
-        ));
-    }
     let before = parsed(lines)?;
     let sources = source_entries(&before).to_vec();
     if sources.iter().any(|entry| is_folder(entry, &source.path)) {
@@ -91,6 +84,14 @@ pub(crate) fn add_source_to(
         added.push(SourceEntry::new(home));
     }
     added.push(source.clone());
+    // TOML strings are UTF-8: another name would be written as a different
+    // path, the home folder written for the file's first folder included.
+    if let Some(entry) = added.iter().find(|entry| entry.path.to_str().is_none()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a UTF-8 path", entry.path.display()),
+        ));
+    }
     // Built from the entries, not from the lines the writer makes, so a field
     // the writer leaves out is refused.
     let expected = with_sources(
