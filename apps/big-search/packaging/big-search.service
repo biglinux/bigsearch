@@ -8,8 +8,8 @@
 Description=big-search file index daemon
 Documentation=https://github.com/biglinux/bigsearch
 ConditionUser=!@system
-# Pulled by the service itself, so an install that only enables the service,
-# or enabled it before the path unit shipped, still follows config changes.
+# Pulled by the service itself, so an install that only enables the service
+# still follows config changes.
 Wants=big-search-config.path
 
 [Service]
