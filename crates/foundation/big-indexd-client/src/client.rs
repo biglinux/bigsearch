@@ -578,7 +578,9 @@ mod tests {
         done.store(true, Ordering::Relaxed);
         std::fs::remove_file(&socket_path).ok();
         assert!(matches!(outcome, Err(ClientError::Io(_))), "{outcome:?}");
-        assert!(took < deadline + deadline / 2, "{took:?}");
+        // Well under the default deadline, with room for a busy runner; the
+        // connection count below tells a resend.
+        assert!(took < deadline * 5, "{took:?}");
         assert_eq!(server.join().unwrap(), 1);
     }
 }

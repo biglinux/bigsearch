@@ -34,13 +34,19 @@ pub fn env_cmd(args: &[&str], home: &Path, xdg_storage_home: &Path, run: &Path) 
     c
 }
 
-/// Send one request line, return the reply line.
+/// Send one request line, return the reply line. A daemon that stops
+/// answering fails the test instead of hanging it.
 pub fn send_daemon_request(sock: &Path, json: &str) -> String {
     let mut stream = UnixStream::connect(sock).expect("connect daemon");
+    let limit = Some(Duration::from_secs(30));
+    stream.set_read_timeout(limit).unwrap();
+    stream.set_write_timeout(limit).unwrap();
     stream.write_all(json.as_bytes()).unwrap();
     stream.write_all(b"\n").unwrap();
     let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line).unwrap();
+    BufReader::new(&stream)
+        .read_line(&mut line)
+        .unwrap_or_else(|error| panic!("no reply to {json}: {error}"));
     line
 }
 
