@@ -25,6 +25,22 @@ fn dedup_roundtrip() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A folder's inode, kept in the size column of the watch list, reads back as
+/// it was written even when it does not fit an `i64`.
+#[test]
+fn full_width_inode_kept() {
+    let dir = crate::test_env::scratch_dir("bs-state-inode");
+    let file = dir.join("state.sqlite");
+    let folder = Path::new("/x/folder");
+    let inode = u64::MAX - 7;
+    let mut state = State::empty(&file, WATCH_NAMESPACE);
+    state.set(folder, 0, inode);
+    state.persist().unwrap();
+    let recorded = State::load(&file, WATCH_NAMESPACE).recorded(folder);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(recorded, Some((0, inode)));
+}
+
 #[test]
 fn cleared_state_hides_persisted_rows() {
     // A rebuild clears the cache; until the clear is persisted, lookups that
@@ -447,7 +463,8 @@ fn ranges_compare_recorded_values() {
             ("/p/a", 100, 10),
             ("/p/b", 200, 20),
             ("/p/c", 300, 30),
-            ("/p/huge", 400, u64::MAX),
+            // The largest size a file can have: `off_t` is signed.
+            ("/p/huge", 400, i64::MAX.cast_unsigned()),
         ],
     );
     let mtime = Filter {

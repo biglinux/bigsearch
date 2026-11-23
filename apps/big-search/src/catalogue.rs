@@ -813,8 +813,8 @@ fn catalogue_where(filter: &Filter, hide_path_range: bool) -> Option<(String, Ve
     if let Some([low, high]) = filter.size {
         clause.push_str(" AND size BETWEEN ? AND ?");
         args.extend([
-            Value::Integer(u64_to_db_size(low)),
-            Value::Integer(u64_to_db_size(high)),
+            Value::Integer(i64::try_from(low).unwrap_or(i64::MAX)),
+            Value::Integer(i64::try_from(high).unwrap_or(i64::MAX)),
         ]);
     }
     Some((clause, args))
@@ -909,12 +909,14 @@ fn init_schema(conn: &Connection) -> Result<()> {
     .context("initialize state schema")
 }
 
+/// Stored bit for bit: the watch list keeps a folder's inode in the size
+/// column, and an inode can use all 64 bits.
 fn u64_to_db_size(size: u64) -> i64 {
-    i64::try_from(size).unwrap_or(i64::MAX)
+    size.cast_signed()
 }
 
 fn db_size_to_u64(size: i64) -> u64 {
-    u64::try_from(size).unwrap_or(0)
+    size.cast_unsigned()
 }
 
 /// `(mtime_secs, size)` from already-fetched metadata (no extra stat).
