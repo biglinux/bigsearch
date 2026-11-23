@@ -96,8 +96,7 @@ impl MountTable {
         })
     }
 
-    /// The mounts now, as mount point and mount id, sorted. Reading through
-    /// this handle is also what clears the change the kernel flagged on it.
+    /// The mounts now, as mount point and mount id, sorted.
     ///
     /// # Errors
     ///
@@ -107,15 +106,15 @@ impl MountTable {
         let mut table = String::new();
         self.file.rewind()?;
         self.file.read_to_string(&mut table)?;
-        let mut points: Vec<(PathBuf, u64)> = table
+        let mut mounts: Vec<(PathBuf, u64)> = table
             .lines()
             .filter_map(|line| {
                 let id = line.split(' ').next()?.parse().ok()?;
                 Some((parse_line(line)?.0, id))
             })
             .collect();
-        points.sort_unstable();
-        Ok(points)
+        mounts.sort_unstable();
+        Ok(mounts)
     }
 
     /// Block until something is mounted or unmounted: the kernel raises

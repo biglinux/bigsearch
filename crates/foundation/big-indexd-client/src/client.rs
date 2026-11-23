@@ -11,8 +11,8 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// How long a request may take before the caller gets an error instead of a
-/// thread that never returns.
+/// How long one read or write on the socket may block before the caller gets
+/// an error instead of a thread that never returns.
 ///
 /// Without a deadline, a daemon that accepted the connection and then stopped
 /// answering (a wedged commit, a stopped process still holding the socket)
@@ -51,7 +51,7 @@ fn read_reply_line(reader: &mut impl BufRead, line: &mut String) -> Result<(), C
     Ok(())
 }
 
-/// Apply the request deadline to both directions of `stream`.
+/// Apply the deadline to reads and writes on `stream`.
 fn apply_deadlines(stream: &UnixStream) -> Result<(), ClientError> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
