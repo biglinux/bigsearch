@@ -44,6 +44,9 @@ const SKIPPED: &[&str] = &[
     "buptim",
 ];
 
+/// Deepest group nesting kept apart from its parent.
+const MAX_GROUP_DEPTH: usize = 1024;
+
 /// Windows-1252 bytes 0x80–0x9F, the ones Latin-1 leaves as controls.
 const CP1252: [char; 32] = [
     '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}',
@@ -70,7 +73,13 @@ pub(crate) fn read_rtf(bytes: &[u8]) -> Option<(String, Option<String>)> {
     while i < bytes.len() {
         match bytes[i] {
             b'{' => {
-                reader.stack.push(reader.group);
+                // Past the cap a group is read as part of its parent: nesting
+                // that deep is no document's, and each level costs memory.
+                if reader.stack.len() < MAX_GROUP_DEPTH {
+                    reader.stack.push(reader.group);
+                } else {
+                    reader.uncounted += 1;
+                }
                 // "{\*\dest …}": a destination a reader may ignore.
                 if bytes[i + 1..].starts_with(b"\\*") {
                     reader.group.skip = true;
@@ -78,7 +87,11 @@ pub(crate) fn read_rtf(bytes: &[u8]) -> Option<(String, Option<String>)> {
                 i += 1;
             }
             b'}' => {
-                reader.group = reader.stack.pop().unwrap_or(reader.group);
+                if reader.uncounted > 0 {
+                    reader.uncounted -= 1;
+                } else {
+                    reader.group = reader.stack.pop().unwrap_or(reader.group);
+                }
                 i += 1;
             }
             b'\\' => i += 1 + reader.control(&bytes[i + 1..]),
@@ -107,6 +120,8 @@ struct RtfReader {
     title: String,
     stack: Vec<Group>,
     group: Group,
+    /// Groups opened past [`MAX_GROUP_DEPTH`] and not closed yet.
+    uncounted: usize,
     /// Fallback characters still to drop after a `\u`.
     pending_skip: usize,
 }
@@ -122,6 +137,7 @@ impl Default for RtfReader {
                 title: false,
                 fallback: 1,
             },
+            uncounted: 0,
             pending_skip: 0,
         }
     }
@@ -256,5 +272,20 @@ Aos onze dias, \u8220?reuni\u227?o\u8221? \endash  pauta\tab item\par
             "{text:?}"
         );
         assert!(read_rtf(b"not rtf").is_none());
+    }
+
+    /// Nesting past the cap is read as its parent's text, and the groups
+    /// around it close where they should.
+    #[test]
+    fn rtf_deep_nesting_read() {
+        let depth = MAX_GROUP_DEPTH * 4;
+        let mut rtf = br"{\rtf1{\info{\title T}}{\fonttbl{\f0 Arial;}}".to_vec();
+        rtf.extend(std::iter::repeat_n(b'{', depth));
+        rtf.extend_from_slice(b"deep");
+        rtf.extend(std::iter::repeat_n(b'}', depth));
+        rtf.extend_from_slice(br"\par after}");
+        let (text, title) = read_rtf(&rtf).expect("text");
+        assert_eq!(title.as_deref(), Some("T"));
+        assert_eq!(text, "deep\nafter");
     }
 }
