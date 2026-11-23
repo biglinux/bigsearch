@@ -643,9 +643,6 @@ impl WatchLoop<'_> {
         if outcome.deleted {
             self.content_backfill.note_deletion();
         }
-        if outcome.unread {
-            self.watches.missed = true;
-        }
         self.watches.persist()?;
         if outcome.any() {
             self.state.persist()?;
@@ -786,6 +783,8 @@ fn reconcile(
     for path in batch {
         pass.path(watches, state, &path)?;
     }
+    // A folder the pass could not read leaves this run unable to vouch for it.
+    watches.missed |= pass.outcome.unread;
     Ok(pass.outcome)
 }
 
