@@ -44,13 +44,13 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// How many candidates the daemon considers before filtering and paging.
 ///
 /// Part of the wire contract rather than an implementation detail of the daemon,
-/// because in every mode but `list` and `largest` [`QueryOutcome::total`] is capped at it,
-/// so a caller cannot tell an exact count from a floor without knowing this
-/// number. A total below it is how many matched, within what
-/// [`QueryOutcome::total`] says about paged counts; a total equal to it means "this
-/// many, and possibly far more", and a surface that prints it as an exact figure
-/// is stating something nobody established. A `list` or `largest` page is also at
-/// most this long.
+/// because in every mode but `list` and `largest` [`QueryOutcome::total`] is
+/// capped at it, so a caller cannot tell an exact count from a floor without
+/// knowing this number. A total below it is how many matched, within what
+/// [`QueryOutcome::total`] says about paged counts; a total equal to it means
+/// "this many, and possibly far more", and a surface that prints it as an exact
+/// figure is stating something nobody established. A `list` or `largest` page
+/// is also at most this long.
 pub const CANDIDATE_CEILING: usize = 5_000;
 
 /// Short origin/provenance summary attached to visible hits only when requested.
@@ -105,14 +105,13 @@ impl From<OriginProvenance> for OriginSummary {
 /// Which index a hit was found through, so a GUI can explain a result whose
 /// filename does not contain the query at all.
 ///
-/// The daemon knows this while it merges the two searches in `search_both`.
-/// Passing it on costs no larger
-/// index, no token positions, no stored bodies and no extra query: it is a
-/// single tag on a hit that already exists.
+/// The daemon learns this while it merges the two searches in `search_both`.
+/// Carrying it costs a single tag on a hit that already exists: no larger
+/// index, no token positions, no stored bodies and no extra query.
 ///
 /// `Body` does not mean "found in the document text": the content index also
-/// holds extracted metadata and tags, so all it claims is that the match came
-/// from inside the file rather than from its name.
+/// holds extracted metadata and tags, so the claim is that the match came from
+/// inside the file rather than from its name.
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchKind {
@@ -249,10 +248,10 @@ pub struct QueryOutcome {
     ///
     /// In the `list` and `largest` modes without a `mime` or `kind` filter it
     /// is the exact number of catalogued files matching the filter, and may
-    /// exceed the ceiling; hits come newest modification (`list`) or largest size
-    /// (`largest`) first and every match is reachable by paging
-    /// with `next_offset`. A client that reads a total at or above the ceiling
-    /// as "at least this many" is still right. With a `mime` or `kind` filter,
+    /// exceed the ceiling; hits come newest modification (`list`) or largest
+    /// size (`largest`) first, and every match is reachable by paging with
+    /// `next_offset`. A client that reads a total at or above the ceiling as
+    /// "at least this many" is still right. With a `mime` or `kind` filter,
     /// both are unordered and capped like the other modes.
     ///
     /// Files deleted since they were indexed are counted in every mode, so a
@@ -263,7 +262,7 @@ pub struct QueryOutcome {
     pub next_offset: Option<usize>,
     /// Approximate number of recently-changed files whose content is not yet
     /// (re-)extracted. `> 0` on a content/both query means results may be
-    /// incomplete: the daemon has already been nudged to extract them, so a
+    /// incomplete; the daemon has already been nudged to extract them, so a
     /// retry shortly will see them ("loading" hint for UIs).
     #[serde(default)]
     pub content_pending: u64,
@@ -309,18 +308,13 @@ pub enum RequestBody {
     Reindex(ReindexRequest),
     /// Which directories this daemon catalogues. See [`IndexedRoot`].
     Sources,
-    /// Forget every recorded file origin.
-    ///
-    /// Done by the daemon rather than by deleting the file: the daemon holds an
-    /// open write-ahead connection to that database, and a client that unlinked
-    /// the file would leave it writing into an inode nobody can read.
+    /// Forget every recorded file origin. Done by the daemon because it holds
+    /// the database open; unlinking the file would orphan its writes.
     ClearOrigin,
     /// The earlier versions kept for one document.
     Versions(PathRequest),
-    /// Keep the state a document is in right now.
-    ///
-    /// What a file manager asks for just before putting an older version back,
-    /// so changing one's mind about that is possible too.
+    /// Keep the state a document is in right now, e.g. before restoring an
+    /// older version, so the restore can be undone.
     SaveVersion(PathRequest),
     /// Forget the versions of one document.
     ForgetVersions(PathRequest),
@@ -512,11 +506,8 @@ pub enum Reply {
 
 /// Why a machine keeps no earlier versions of documents, when it keeps none.
 ///
-/// An enum shared by daemon and clients because each value is a different
-/// sentence on three screens: the file manager's history tab, the search
-/// settings, and the command line. As a bare string those three all ended in a
-/// catch-all arm, so a reason added later showed up as "not kept on this
-/// computer" everywhere; a variant added here is a compile error in all three.
+/// An enum shared by daemon and clients so a new reason is a compile error in
+/// every screen that explains it, not a silent catch-all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unavailable {
     /// The person turned it off.
@@ -573,8 +564,7 @@ pub struct VersionsAnswer {
     pub paused_for_space: bool,
 }
 
-/// One directory the daemon catalogues, as a caller standing in a folder needs
-/// to hear it.
+/// One directory the daemon catalogues.
 ///
 /// This exists so a file manager can tell "the index has nothing matching here"
 /// apart from "the index has never looked here": two states that produce the
