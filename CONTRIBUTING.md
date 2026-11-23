@@ -25,6 +25,20 @@ cargo test --workspace --all-features
 The integration tests start real daemons in temporary directories; they need
 no running session and touch nothing under your home.
 
+Three files at the root hold what a review already accepted, so a change that
+goes past them has to say why:
+
+- `deny.toml`: `cargo deny check` (advisories, licenses, sources).
+- `approved-crates.txt`: every crate name `Cargo.lock` may hold. A new name is
+  checked on crates.io (owner, repository, a typo of a known crate) before it
+  joins the list.
+- `systemd-exposure.json`: the highest `systemd-analyze security --offline=yes`
+  score each unit may reach.
+
+`sgconfig.yml` and `rules/` are [ast-grep](https://ast-grep.github.io) rules
+for this tree: `ast-grep scan` refuses a call that bypasses the function owning
+it, such as reading `HOME` or `XDG_CONFIG_HOME` outside `big_search_config`.
+
 `apps/big-search/dev/` has a long-running leak probe (`stress.sh`) and an
 adversarial-input probe (`security-probe.sh`); `apps/big-search/fuzz/` has the
 fuzz targets for the document parsers. Run them when you change extraction or
