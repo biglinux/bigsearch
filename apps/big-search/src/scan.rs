@@ -578,7 +578,21 @@ fn mark_walked_entries(
             if entry.file_type().is_some_and(|t| t.is_dir()) {
                 on_dir(path);
             }
-            let Ok(md) = entry.metadata() else { continue };
+            let md = match entry.metadata() {
+                Ok(md) => md,
+                Err(error) => {
+                    let kind = error.io_error().map(std::io::Error::kind);
+                    // Gone between the listing and the lookup: it goes as Gone.
+                    if kind == Some(NotFound) {
+                        continue;
+                    }
+                    // A failed lookup is no evidence the file is gone.
+                    state.mark_seen(path, None)?;
+                    state.mark_seen(path, None)?;
+                    unread |= kind != Some(PermissionDenied);
+                    continue;
+                }
+            };
             state.mark_seen(path, Some(catalogue::meta_pair(&md)))?;
         }
     }

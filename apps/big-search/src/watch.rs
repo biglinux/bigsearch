@@ -811,6 +811,12 @@ impl ReconcilePass<'_> {
         }
         let stat = std::fs::symlink_metadata(path);
         let gone = matches!(&stat, Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+        // A lookup that failed otherwise leaves the path unread, and what the
+        // catalogue holds for it stays.
+        self.outcome.unread |= matches!(&stat, Err(error) if !matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        ));
         let metadata = stat.ok();
         let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
         let recorded = state.recorded(path);
