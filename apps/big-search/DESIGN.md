@@ -492,39 +492,48 @@ reconcile, which `big-search rescan` runs.
 A start walks the sources only when no record vouches for the saved folder list.
 The record (`watch_fingerprint` and `watch_started` in the `meta` table) holds a
 fingerprint of the available sources, the effective ignore rules and the global
-git ignore file, and when that run started. The first start, a changed source
-set or ignore file, a stop while paused, a watch the run could not place, a
-watcher that stopped on an error, a walk or rebuild cut short and `big-search
-reindex` leave no matching record, so the next start walks. It also walks when
-the clock reads earlier than the last run's start (a clock set back during a run
-moves the record's start back with it at the next save), and while a source that
-may change where this machine does not see it is available
-(`settings::is_detachable`): one marked removable or network, or one on or
-holding a FAT, exFAT or network mount or a mount under `/run/media`, `/media` or
-`/mnt/usb`. Folder times there need not move, and FAT inode numbers change
-between mounts. Otherwise it watches the saved folders, each only as a directory
-under a kept folder or as a root, so a symlink put in place of a folder is never
-followed. A saved folder that is no longer the one watched (another folder
-renamed into its place, by its inode, or a file, a symlink or nothing) leaves
-with its tree, and what took its place is indexed. The start then compares again
-the direct entries of every folder modified or changed (`ctime`, which `cp -a`,
-`rsync -a` and `tar` cannot set back) since the last run started: folders and
-files created, renamed or deleted while the daemon was stopped are found that
-way. A catalogued, watched folder among those entries only gets its row
-refreshed, since it has a pass of its own; any other folder is walked whole. A
-folder this user cannot read stays listed without a watch; once made readable,
-by `chmod` or `chown`, its change time puts it in the catch-up, or its
-attribute event reaches the running watcher, and it is watched and walked. A
-file rewritten in place changes no folder, an edited `.gitignore` or `.ignore`
+git ignore file, and when that run started. The saved list spares a restart the
+read of every entry's metadata, the cost that dominates on a hard disk.
+
+A start walks when:
+
+- no record matches: the first start, a changed source set or ignore file, a
+  stop while paused, a watch the run could not place, a watcher that stopped on
+  an error, a walk or rebuild cut short, `big-search reindex`;
+- the clock reads earlier than the last run's start (a clock set back during a
+  run moves the record's start back with it at the next save);
+- a source that may change where this machine does not see it is available
+  (`settings::is_detachable`): one marked removable or network, or one on or
+  holding a FAT, exFAT or network mount or a mount under `/run/media`, `/media`
+  or `/mnt/usb`. Folder times there need not move, and FAT inode numbers change
+  between mounts.
+
+Otherwise it watches the saved folders, each only as a directory under a kept
+folder or as a root, so a symlink put in place of a folder is never followed.
+The catch-up then compares:
+
+- a saved folder that is no longer the one watched (another folder renamed into
+  its place, by its inode, or a file, a symlink or nothing): it leaves with its
+  tree, and what took its place is indexed. One that cannot be read keeps its
+  entries, and the run is not recorded, so the next start walks;
+- the direct entries of every folder modified or changed (`ctime`, which
+  `cp -a`, `rsync -a` and `tar` cannot set back) since the last run started:
+  folders and files created, renamed or deleted while the daemon was stopped.
+  A catalogued, watched folder among them only gets its row refreshed, since it
+  has a pass of its own; any other folder is walked whole;
+- a folder this user could not read: it stays listed without a watch, and once
+  made readable (`chmod`, `chown`) its change time puts it in the catch-up, or
+  its attribute event reaches the running watcher.
+
+A file rewritten in place changes no folder, an edited `.gitignore` or `.ignore`
 inside a source changes no fingerprint, and joining a group changes no folder:
-all three wait for the next walk, `big-search rescan`. A disk mounted or unmounted
-inside a source changes no folder either: the daemon holds
-`/proc/self/mountinfo` open and wakes only when the kernel flags a change on it,
-then rescans. A source that comes or goes (a removable disk plugged in) changes
-the roots the daemon started with, so it exits with status 75 and the unit
-starts it again (`RestartForceExitStatus=75`). The saved list
-spares a restart the read of every entry's metadata, the cost that dominates on
-a hard disk.
+all three wait for the next walk, `big-search rescan`.
+
+Mounts change no folder either. The daemon holds `/proc/self/mountinfo` open and
+wakes only when the kernel flags a change on it: a disk mounted or unmounted
+inside a source starts a rescan, and a source that comes or goes (a removable
+disk plugged in) changes the roots the daemon started with, so it exits with
+status 75 and the unit starts it again (`RestartForceExitStatus=75`).
 
 The settings are conservative for old machines: `cache_size=-2048` (2 MiB),
 file-backed temporary storage (`SQLITE_TMPDIR` points at the data folder), and
