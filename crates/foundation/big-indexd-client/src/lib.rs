@@ -462,8 +462,9 @@ pub enum Reply {
         origin: Option<OriginProvenance>,
     },
     /// A command that returns nothing was carried out; `pause`, `resume`,
-    /// `rescan`, `rebuild` and `reindex` were accepted, and the watcher
-    /// carries them out after this reply.
+    /// `rescan`, `rebuild` and `reindex` were queued for the watcher, which
+    /// carries them out after this reply. A pause that reaches it first drops
+    /// a queued rescan.
     Ok { v: u32 },
     /// The daemon refused the request; the client returns
     /// [`ClientError::Daemon`].
