@@ -194,6 +194,10 @@ fn unknown_choices_named() {
         ]
     );
     assert!(unknown_choices("[defaults]\ncontent_index_mode = \"basic\"\n").is_empty());
+    // A folder does not read this key, so its value is no choice the service
+    // took as the default.
+    let per_folder = "[[source]]\npath = \"/mnt/disk\"\ncontent_index_mode = \"freq\"\n";
+    assert!(unknown_choices(per_folder).is_empty());
 }
 
 #[test]

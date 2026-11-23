@@ -334,9 +334,10 @@ pub fn read() -> SearchConfig {
 /// pass unseen.
 #[must_use]
 pub fn unknown_choices(text: &str) -> Vec<String> {
-    const CHOICES: [(&str, &[&str]); 2] = [
-        ("content_index_mode", &["auto", "basic", "freqs"]),
-        ("symlink_policy", &["local-exact", "personal-local"]),
+    // Each key, its values, and whether a folder may set it for itself.
+    const CHOICES: [(&str, &[&str], bool); 2] = [
+        ("content_index_mode", &["auto", "basic", "freqs"], false),
+        ("symlink_policy", &["local-exact", "personal-local"], true),
     ];
     let Ok(table) = text.parse::<toml::Table>() else {
         return Vec::new();
@@ -348,9 +349,16 @@ pub fn unknown_choices(text: &str) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(toml::Value::as_table);
+    let blocks = defaults
+        .into_iter()
+        .map(|block| (block, false))
+        .chain(sources.map(|block| (block, true)));
     let mut unknown = Vec::new();
-    for block in defaults.into_iter().chain(sources) {
-        for (key, known) in CHOICES {
+    for (block, in_folder) in blocks {
+        for (key, known, per_folder) in CHOICES {
+            if in_folder && !per_folder {
+                continue;
+            }
             if let Some(value) = block.get(key).and_then(toml::Value::as_str)
                 && !known.contains(&value)
             {
