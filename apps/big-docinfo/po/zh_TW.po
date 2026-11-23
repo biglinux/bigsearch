@@ -1,0 +1,185 @@
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: big-docinfo\n"
+"Report-Msgid-Bugs-To: https://github.com/biglinux/bigsearch/issues\n"
+"POT-Creation-Date: 2026-11-22 21:23-0300\n"
+"PO-Revision-Date: 2026-11-22 18:00-0300\n"
+"Last-Translator: BigLinux <https://github.com/biglinux>\n"
+"Language-Team: BigLinux <https://github.com/biglinux>\n"
+"Language: zh_TW\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: src/main.rs
+msgid "This name has characters a file name cannot hold. Choose another name."
+msgstr "此名稱包含檔名不允許的字元。請選擇其他名稱。"
+
+#: src/main.rs
+msgid ""
+"This file has no readable text: its type is not supported, or it is a "
+"scanned PDF."
+msgstr "此檔案沒有可讀取的文字：不支援其類型，或者它是掃描的 PDF。"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Kind"
+msgstr "類型"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Date"
+msgstr "日期"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Entity"
+msgstr "機構"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Title"
+msgstr "標題"
+
+#: src/main.rs
+msgid "No kind or title found in this document; the current name stays."
+msgstr "在此文件中找不到類型或標題；保留目前的名稱。"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Name"
+msgstr "名稱"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Invoice"
+msgstr "發票"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Receipt"
+msgstr "收據"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Bill or payment slip"
+msgstr "帳單或繳費單"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Statement"
+msgstr "對帳單"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Contract"
+msgstr "合約"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Minutes"
+msgstr "會議記錄"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Law, decree or ordinance"
+msgstr "法律、命令或規章"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Public notice"
+msgstr "公告"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Opinion or expert report"
+msgstr "意見書或鑑定報告"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Report"
+msgstr "報告"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Official letter or letter"
+msgstr "公文或信件"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Email"
+msgstr "電子郵件"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Declaration or certificate"
+msgstr "聲明或證明"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Résumé"
+msgstr "履歷"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Manual"
+msgstr "手冊"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Article"
+msgstr "文章"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Quote"
+msgstr "報價單"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Notes"
+msgstr "筆記"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Health document"
+msgstr "醫療文件"
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid "“{name}” cannot be a file name. Use a name without slashes."
+msgstr "「{name}」不能作為檔名。請使用不含斜線的名稱。"
+
+#: src/main.rs
+msgid "This name is too long. Use a shorter name."
+msgstr "此名稱太長。請使用較短的名稱。"
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid ""
+"A file named “{name}” already exists in this folder. Choose another name."
+msgstr "此資料夾中已有名為「{name}」的檔案。請選擇其他名稱。"
+
+#: src/main.rs
+msgid ""
+"This disk cannot rename without risking another file. Rename it in the file "
+"manager."
+msgstr "此磁碟無法在不危及其他檔案的情況下重新命名。請在檔案管理員中重新命名。"
+
+#. Translators: keep {error} as written; the system fills in why.
+#: src/main.rs
+#, rust-format
+msgid "Could not rename: {error}."
+msgstr "無法重新命名：{error}。"
+
+#: packaging/suggest-name
+msgid "Suggest a name"
+msgstr "建議名稱"
+
+#: packaging/big-docinfo.desktop
+msgid "Suggest a name…"
+msgstr "建議名稱…"

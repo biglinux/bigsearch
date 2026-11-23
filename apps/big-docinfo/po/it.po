@@ -1,0 +1,194 @@
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: big-docinfo\n"
+"Report-Msgid-Bugs-To: https://github.com/biglinux/bigsearch/issues\n"
+"POT-Creation-Date: 2026-11-22 21:23-0300\n"
+"PO-Revision-Date: 2026-11-22 18:00-0300\n"
+"Last-Translator: BigLinux <https://github.com/biglinux>\n"
+"Language-Team: BigLinux <https://github.com/biglinux>\n"
+"Language: it\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: src/main.rs
+msgid "This name has characters a file name cannot hold. Choose another name."
+msgstr ""
+"Questo nome contiene caratteri che un nome di file non accetta. Scegli un "
+"altro nome."
+
+#: src/main.rs
+msgid ""
+"This file has no readable text: its type is not supported, or it is a "
+"scanned PDF."
+msgstr ""
+"Questo file non ha testo leggibile: il tipo non è supportato oppure è un PDF "
+"scansionato."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Kind"
+msgstr "Tipo"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Date"
+msgstr "Data"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Entity"
+msgstr "Emittente"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Title"
+msgstr "Titolo"
+
+#: src/main.rs
+msgid "No kind or title found in this document; the current name stays."
+msgstr ""
+"Nessun tipo né titolo trovato in questo documento; il nome attuale resta."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Name"
+msgstr "Nome"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Invoice"
+msgstr "Fattura"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Receipt"
+msgstr "Ricevuta"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Bill or payment slip"
+msgstr "Fattura o bollettino"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Statement"
+msgstr "Estratto conto"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Contract"
+msgstr "Contratto"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Minutes"
+msgstr "Verbale"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Law, decree or ordinance"
+msgstr "Legge, decreto o ordinanza"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Public notice"
+msgstr "Bando"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Opinion or expert report"
+msgstr "Parere o perizia"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Report"
+msgstr "Relazione"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Official letter or letter"
+msgstr "Lettera ufficiale o lettera"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Email"
+msgstr "Email"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Declaration or certificate"
+msgstr "Dichiarazione o certificato"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Résumé"
+msgstr "Curriculum"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Manual"
+msgstr "Manuale"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Article"
+msgstr "Articolo"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Quote"
+msgstr "Preventivo"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Notes"
+msgstr "Appunti"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Health document"
+msgstr "Documento sanitario"
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid "“{name}” cannot be a file name. Use a name without slashes."
+msgstr "«{name}» non può essere un nome di file. Usa un nome senza barre."
+
+#: src/main.rs
+msgid "This name is too long. Use a shorter name."
+msgstr "Questo nome è troppo lungo. Usa un nome più corto."
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid ""
+"A file named “{name}” already exists in this folder. Choose another name."
+msgstr ""
+"In questa cartella esiste già un file chiamato «{name}». Scegli un altro "
+"nome."
+
+#: src/main.rs
+msgid ""
+"This disk cannot rename without risking another file. Rename it in the file "
+"manager."
+msgstr ""
+"Questo disco non permette di rinominare senza rischiare di cancellare un "
+"altro file. Rinominalo dal gestore di file."
+
+#. Translators: keep {error} as written; the system fills in why.
+#: src/main.rs
+#, rust-format
+msgid "Could not rename: {error}."
+msgstr "Impossibile rinominare: {error}."
+
+#: packaging/suggest-name
+msgid "Suggest a name"
+msgstr "Suggerisci un nome"
+
+#: packaging/big-docinfo.desktop
+msgid "Suggest a name…"
+msgstr "Suggerisci un nome…"

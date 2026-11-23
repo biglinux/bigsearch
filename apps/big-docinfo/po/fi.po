@@ -1,0 +1,190 @@
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: big-docinfo\n"
+"Report-Msgid-Bugs-To: https://github.com/biglinux/bigsearch/issues\n"
+"POT-Creation-Date: 2026-11-22 21:23-0300\n"
+"PO-Revision-Date: 2026-11-22 18:00-0300\n"
+"Last-Translator: BigLinux <https://github.com/biglinux>\n"
+"Language-Team: BigLinux <https://github.com/biglinux>\n"
+"Language: fi\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: src/main.rs
+msgid "This name has characters a file name cannot hold. Choose another name."
+msgstr ""
+"Nimessä on merkkejä, joita tiedostonimessä ei voi olla. Valitse toinen nimi."
+
+#: src/main.rs
+msgid ""
+"This file has no readable text: its type is not supported, or it is a "
+"scanned PDF."
+msgstr ""
+"Tiedostossa ei ole luettavaa tekstiä: tiedostotyyppiä ei tueta, tai se on "
+"skannattu PDF."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Kind"
+msgstr "Laji"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Date"
+msgstr "Päiväys"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Entity"
+msgstr "Laatija"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Title"
+msgstr "Otsikko"
+
+#: src/main.rs
+msgid "No kind or title found in this document; the current name stays."
+msgstr "Asiakirjasta ei löytynyt lajia eikä otsikkoa; nykyinen nimi säilyy."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Name"
+msgstr "Nimi"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Invoice"
+msgstr "Lasku"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Receipt"
+msgstr "Kuitti"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Bill or payment slip"
+msgstr "Lasku tai maksulomake"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Statement"
+msgstr "Tiliote"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Contract"
+msgstr "Sopimus"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Minutes"
+msgstr "Pöytäkirja"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Law, decree or ordinance"
+msgstr "Laki, asetus tai määräys"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Public notice"
+msgstr "Kuulutus"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Opinion or expert report"
+msgstr "Lausunto tai asiantuntijaraportti"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Report"
+msgstr "Raportti"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Official letter or letter"
+msgstr "Virallinen kirje tai kirje"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Email"
+msgstr "Sähköposti"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Declaration or certificate"
+msgstr "Todistus tai vakuutus"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Résumé"
+msgstr "Ansioluettelo"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Manual"
+msgstr "Käyttöohje"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Article"
+msgstr "Artikkeli"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Quote"
+msgstr "Tarjous"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Notes"
+msgstr "Muistiinpanot"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Health document"
+msgstr "Terveysasiakirja"
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid "“{name}” cannot be a file name. Use a name without slashes."
+msgstr "”{name}” ei kelpaa tiedostonimeksi. Käytä nimeä ilman kauttaviivoja."
+
+#: src/main.rs
+msgid "This name is too long. Use a shorter name."
+msgstr "Nimi on liian pitkä. Käytä lyhyempää nimeä."
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid ""
+"A file named “{name}” already exists in this folder. Choose another name."
+msgstr "Kansiossa on jo tiedosto nimeltä ”{name}”. Valitse toinen nimi."
+
+#: src/main.rs
+msgid ""
+"This disk cannot rename without risking another file. Rename it in the file "
+"manager."
+msgstr ""
+"Tällä levyllä nimeä ei voi vaihtaa vaarantamatta toista tiedostoa. Vaihda "
+"nimi tiedostonhallinnassa."
+
+#. Translators: keep {error} as written; the system fills in why.
+#: src/main.rs
+#, rust-format
+msgid "Could not rename: {error}."
+msgstr "Nimen vaihtaminen epäonnistui: {error}."
+
+#: packaging/suggest-name
+msgid "Suggest a name"
+msgstr "Ehdota nimeä"
+
+#: packaging/big-docinfo.desktop
+msgid "Suggest a name…"
+msgstr "Ehdota nimeä…"

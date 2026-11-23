@@ -1,0 +1,194 @@
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: big-docinfo\n"
+"Report-Msgid-Bugs-To: https://github.com/biglinux/bigsearch/issues\n"
+"POT-Creation-Date: 2026-11-22 21:23-0300\n"
+"PO-Revision-Date: 2026-11-22 18:00-0300\n"
+"Last-Translator: BigLinux <https://github.com/biglinux>\n"
+"Language-Team: BigLinux <https://github.com/biglinux>\n"
+"Language: pl\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=(n==1 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 "
+"|| n%100>=20) ? 1 : 2);\n"
+
+#: src/main.rs
+msgid "This name has characters a file name cannot hold. Choose another name."
+msgstr ""
+"Ta nazwa zawiera znaki, których nazwa pliku nie może mieć. Wybierz inną "
+"nazwę."
+
+#: src/main.rs
+msgid ""
+"This file has no readable text: its type is not supported, or it is a "
+"scanned PDF."
+msgstr ""
+"Ten plik nie zawiera czytelnego tekstu: jego typ nie jest obsługiwany albo "
+"to zeskanowany PDF."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Kind"
+msgstr "Rodzaj"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Date"
+msgstr "Data"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Entity"
+msgstr "Wystawca"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Title"
+msgstr "Tytuł"
+
+#: src/main.rs
+msgid "No kind or title found in this document; the current name stays."
+msgstr ""
+"W tym dokumencie nie znaleziono rodzaju ani tytułu; obecna nazwa zostaje."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Name"
+msgstr "Nazwa"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Invoice"
+msgstr "Faktura"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Receipt"
+msgstr "Pokwitowanie"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Bill or payment slip"
+msgstr "Rachunek lub blankiet wpłaty"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Statement"
+msgstr "Wyciąg"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Contract"
+msgstr "Umowa"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Minutes"
+msgstr "Protokół"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Law, decree or ordinance"
+msgstr "Ustawa, dekret lub rozporządzenie"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Public notice"
+msgstr "Ogłoszenie"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Opinion or expert report"
+msgstr "Opinia lub ekspertyza"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Report"
+msgstr "Raport"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Official letter or letter"
+msgstr "Pismo urzędowe lub list"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Email"
+msgstr "E-mail"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Declaration or certificate"
+msgstr "Oświadczenie lub zaświadczenie"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Résumé"
+msgstr "CV"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Manual"
+msgstr "Instrukcja"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Article"
+msgstr "Artykuł"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Quote"
+msgstr "Kosztorys"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Notes"
+msgstr "Notatki"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Health document"
+msgstr "Dokument medyczny"
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid "“{name}” cannot be a file name. Use a name without slashes."
+msgstr "„{name}” nie może być nazwą pliku. Użyj nazwy bez ukośników."
+
+#: src/main.rs
+msgid "This name is too long. Use a shorter name."
+msgstr "Ta nazwa jest za długa. Użyj krótszej nazwy."
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid ""
+"A file named “{name}” already exists in this folder. Choose another name."
+msgstr ""
+"W tym folderze istnieje już plik o nazwie „{name}”. Wybierz inną nazwę."
+
+#: src/main.rs
+msgid ""
+"This disk cannot rename without risking another file. Rename it in the file "
+"manager."
+msgstr ""
+"Na tym dysku nie można zmienić nazwy bez ryzyka usunięcia innego pliku. "
+"Zmień nazwę w menedżerze plików."
+
+#. Translators: keep {error} as written; the system fills in why.
+#: src/main.rs
+#, rust-format
+msgid "Could not rename: {error}."
+msgstr "Nie można zmienić nazwy: {error}."
+
+#: packaging/suggest-name
+msgid "Suggest a name"
+msgstr "Zaproponuj nazwę"
+
+#: packaging/big-docinfo.desktop
+msgid "Suggest a name…"
+msgstr "Zaproponuj nazwę…"
