@@ -51,6 +51,46 @@ fn no_catalogue() -> CatalogueReader {
     CatalogueReader::new(Path::new("/nonexistent/big-search/state.sqlite"))
 }
 
+/// A name index holding `paths`.
+fn index_of(label: &str, paths: &[PathBuf]) -> tantivy::IndexReader {
+    let owned: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    index_with(label, &owned.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// The page `mode` answers for `filter` without query words.
+fn wordless_page(
+    index: &tantivy::IndexReader,
+    catalogue: &CatalogueReader,
+    mode: &str,
+    filter: &Filter,
+    offset: usize,
+    limit: usize,
+) -> QueryOutcome {
+    let indexes = QueryIndexes {
+        name: index,
+        content: None,
+        catalogue,
+    };
+    run_query(
+        indexes,
+        "",
+        mode,
+        filter,
+        &Page { offset, limit },
+        false,
+        None,
+    )
+    .unwrap()
+}
+
+/// The file names of a page's hits, in order.
+fn page_names(outcome: &QueryOutcome) -> Vec<String> {
+    outcome.hits.iter().map(|hit| hit.name.clone()).collect()
+}
+
 /// A catalogue recording `files` with the given modification times and
 /// sizes, in a fresh directory under `dir`.
 fn catalogue_with(dir: &Path, files: &[(&Path, i64, u64)]) -> CatalogueReader {
@@ -107,14 +147,7 @@ fn list_mode_answers_wordless_queries() {
     for path in &paths {
         std::fs::write(path, b"x").unwrap();
     }
-    let listed: Vec<String> = paths
-        .iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect();
-    let index = index_with(
-        "list-mode",
-        &listed.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let index = index_of("list-mode", &paths);
     let catalogue = catalogue_with(
         &root,
         &paths
@@ -127,25 +160,7 @@ fn list_mode_answers_wordless_queries() {
         ext: vec!["pdf".to_string()],
         ..Default::default()
     };
-    let run = |mode: &str| {
-        run_query(
-            QueryIndexes {
-                name: &index,
-                content: None,
-                catalogue: &catalogue,
-            },
-            "",
-            mode,
-            &filter,
-            &Page {
-                offset: 0,
-                limit: 50,
-            },
-            false,
-            None,
-        )
-        .unwrap()
-    };
+    let run = |mode: &str| wordless_page(&index, &catalogue, mode, &filter, 0, 50);
     let outcome = run("list");
     let found: Vec<&str> = outcome.hits.iter().map(|hit| hit.path.as_str()).collect();
     assert_eq!(
@@ -187,46 +202,21 @@ fn largest_pages_by_size() {
             .map(|(path, (_, mtime, size))| (path.as_path(), mtime, size))
             .collect::<Vec<_>>(),
     );
-    let owned: Vec<String> = paths
-        .iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect();
-    let index = index_with(
-        "largest",
-        &owned.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let index = index_of("largest", &paths);
     // "Large and old": everything not changed since 1000.
     let filter = Filter {
         under: Some(root.to_string_lossy().into_owned()),
         mtime: Some([i64::MIN, 1_000]),
         ..Default::default()
     };
-    let page = |offset, limit| {
-        run_query(
-            QueryIndexes {
-                name: &index,
-                content: None,
-                catalogue: &catalogue,
-            },
-            "",
-            "largest",
-            &filter,
-            &Page { offset, limit },
-            false,
-            None,
-        )
-        .unwrap()
-    };
-    let names = |outcome: &QueryOutcome| -> Vec<String> {
-        outcome.hits.iter().map(|hit| hit.name.clone()).collect()
-    };
+    let page = |offset, limit| wordless_page(&index, &catalogue, "largest", &filter, offset, limit);
 
     let first = page(0, 3);
     // Same size: the path breaks the tie.
-    assert_eq!(names(&first), ["huge.iso", "tie-a.iso", "tie-b.iso"]);
+    assert_eq!(page_names(&first), ["huge.iso", "tie-a.iso", "tie-b.iso"]);
     assert_eq!((first.total, first.next_offset), (4, Some(3)));
     let last = page(3, 3);
-    assert_eq!(names(&last), ["small.iso"]);
+    assert_eq!(page_names(&last), ["small.iso"]);
     assert_eq!((last.total, last.next_offset), (4, None));
     std::fs::remove_dir_all(&root).ok();
 }
@@ -386,59 +376,35 @@ fn list_pages_newest_first() {
             .map(|(path, mtime)| (path.as_path(), *mtime, 1))
             .collect::<Vec<_>>(),
     );
-    let owned: Vec<String> = files
-        .iter()
-        .map(|(path, _)| path.to_string_lossy().into_owned())
-        .collect();
-    let index = index_with(
-        "newest",
-        &owned.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let paths: Vec<PathBuf> = files.iter().map(|(path, _)| path.clone()).collect();
+    let index = index_of("newest", &paths);
     let filter = Filter {
         under: Some(pictures.to_string_lossy().into_owned()),
         ext: vec!["jpg".into(), "png".into()],
         ..Default::default()
     };
-    let page = |offset, limit| {
-        run_query(
-            QueryIndexes {
-                name: &index,
-                content: None,
-                catalogue: &catalogue,
-            },
-            "",
-            "list",
-            &filter,
-            &Page { offset, limit },
-            false,
-            None,
-        )
-        .unwrap()
-    };
-    let names = |outcome: &QueryOutcome| -> Vec<String> {
-        outcome.hits.iter().map(|hit| hit.name.clone()).collect()
-    };
+    let page = |offset, limit| wordless_page(&index, &catalogue, "list", &filter, offset, limit);
 
     let first = page(0, 2);
-    assert_eq!(names(&first), ["a.jpg", "b.JPG"]);
+    assert_eq!(page_names(&first), ["a.jpg", "b.JPG"]);
     assert_eq!((first.total, first.next_offset), (5, Some(2)));
     // Enriched like any page: the file's own stat and extension.
     assert!(first.hits.iter().all(|hit| hit.available && hit.size == 1));
     assert_eq!(first.hits[1].ext, "jpg");
     let second = page(2, 2);
-    assert_eq!(names(&second), ["c.jpg", "d.jpg"]);
+    assert_eq!(page_names(&second), ["c.jpg", "d.jpg"]);
     assert_eq!((second.total, second.next_offset), (5, Some(4)));
     let last = page(4, 2);
-    assert_eq!(names(&last), ["e.png"]);
+    assert_eq!(page_names(&last), ["e.png"]);
     assert_eq!((last.total, last.next_offset), (5, None));
 
     // A file deleted before the watcher noticed is dropped from its page,
     // and the next page still starts after the rows this one covered.
     std::fs::remove_file(pictures.join("b.JPG")).unwrap();
     let first = page(0, 2);
-    assert_eq!(names(&first), ["a.jpg"]);
+    assert_eq!(page_names(&first), ["a.jpg"]);
     assert_eq!((first.total, first.next_offset), (5, Some(2)));
-    assert_eq!(names(&page(2, 2)), ["c.jpg", "d.jpg"]);
+    assert_eq!(page_names(&page(2, 2)), ["c.jpg", "d.jpg"]);
     std::fs::remove_dir_all(&root).ok();
 }
 
