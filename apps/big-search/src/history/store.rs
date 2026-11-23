@@ -10,15 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
-/// Whether this is a live session, where nothing survives the reboot.
+/// Whether this is a live session, where nothing survives the reboot: the root
+/// is an overlay.
 pub(super) fn is_live_session() -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/self/mountinfo") else {
-        return false;
-    };
-    mounts.lines().any(|line| {
-        let mount_point = line.split(' ').nth(4);
-        mount_point == Some("/") && line.contains(" overlay ")
-    })
+    crate::mounts::mount_for(Path::new("/")).is_some_and(|mount| mount.fstype == "overlay")
 }
 
 /// The store's own directory, with the marker that keeps it out of backups.
