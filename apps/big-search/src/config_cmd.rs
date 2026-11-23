@@ -4,7 +4,7 @@
 use super::*;
 
 /// Printed after a change to the file the service reads only when it starts.
-const APPLY_HINT: &str = "The service applies it when it restarts, which big-search-config.path does on its own; otherwise run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped.";
+const APPLY_HINT: &str = "The service applies it when it restarts, which big-search-config.path does on its own; otherwise run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped. Files already indexed are read again under the new setting only after `big-search rebuild`.";
 
 /// `config`: inspect and modify the documented config.toml without requiring a text editor.
 pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
