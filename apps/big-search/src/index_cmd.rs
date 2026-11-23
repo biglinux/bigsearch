@@ -354,8 +354,8 @@ fn spawn_mount_watch(
                     )]
                     std::process::exit(EXIT_RESTART);
                 }
-                if mounted_inside(&before, &now, &started) {
-                    log::info!("a disk was mounted or unmounted inside a source; rescanning");
+                if source_mounts_changed(&before, &now, &started) {
+                    log::info!("a disk was mounted or unmounted in or above a source; rescanning");
                     let rescan =
                         watch::WatchMessage::ControlCommand(watch::WatchControlCommand::Rescan);
                     if commands.send(rescan).is_err() {
@@ -377,13 +377,22 @@ fn spawn_mount_watch(
     }
 }
 
-/// Whether a mount in only one of two sorted tables lies inside a root. The
+/// Whether a mount in only one of two sorted tables lies inside a root or holds
+/// one: a disk mounted above a source replaces what the source shows. The
 /// mount id tells apart a disk mounted over another at the same point.
-fn mounted_inside(before: &[(PathBuf, u64)], now: &[(PathBuf, u64)], roots: &[PathBuf]) -> bool {
+fn source_mounts_changed(
+    before: &[(PathBuf, u64)],
+    now: &[(PathBuf, u64)],
+    roots: &[PathBuf],
+) -> bool {
     let only_in = |a: &[(PathBuf, u64)], b: &[(PathBuf, u64)]| {
         a.iter()
             .filter(|mount| b.binary_search(mount).is_err())
-            .any(|(point, _)| roots.iter().any(|root| point.starts_with(root)))
+            .any(|(point, _)| {
+                roots
+                    .iter()
+                    .any(|root| point.starts_with(root) || root.starts_with(point))
+            })
     };
     only_in(now, before) || only_in(before, now)
 }
@@ -818,23 +827,28 @@ fn recover_inflated_index(index: &mut tantivy::Index) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::mounted_inside;
+    use super::source_mounts_changed;
     use std::path::PathBuf;
 
     #[test]
-    fn stacked_mount_inside_source() {
+    fn mount_in_or_above_source() {
         let roots = [PathBuf::from("/home/p")];
         let disk = (PathBuf::from("/home/p/disk"), 40);
         let elsewhere = (PathBuf::from("/mnt/other"), 41);
         let before = vec![(PathBuf::from("/"), 1), disk.clone()];
         let mut stacked = vec![before[0].clone(), disk, (PathBuf::from("/home/p/disk"), 42)];
         stacked.sort_unstable();
-        assert!(mounted_inside(&before, &stacked, &roots));
-        assert!(mounted_inside(&stacked, &before, &roots));
-        assert!(!mounted_inside(&before, &before, &roots));
+        assert!(source_mounts_changed(&before, &stacked, &roots));
+        assert!(source_mounts_changed(&stacked, &before, &roots));
+        assert!(!source_mounts_changed(&before, &before, &roots));
         let mut outside = before.clone();
         outside.push(elsewhere);
         outside.sort_unstable();
-        assert!(!mounted_inside(&before, &outside, &roots));
+        assert!(!source_mounts_changed(&before, &outside, &roots));
+        // A disk mounted over a folder that holds the source.
+        let mut above = before.clone();
+        above.push((PathBuf::from("/home"), 43));
+        above.sort_unstable();
+        assert!(source_mounts_changed(&before, &above, &roots));
     }
 }
