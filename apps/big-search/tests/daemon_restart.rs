@@ -240,7 +240,8 @@ fn unreadable_saved_folder_keeps_entries() {
     let sandbox = Sandbox::new("bs-unreadable-saved");
     let outer = sandbox.docs.join("outer");
     let inner = outer.join("inner");
-    std::fs::create_dir_all(&inner).unwrap();
+    let deep = inner.join("deep");
+    std::fs::create_dir_all(&deep).unwrap();
     let inside = inner.join("inside.txt");
     std::fs::write(&inside, "alpha").unwrap();
     sandbox.age_folders();
@@ -251,6 +252,7 @@ fn unreadable_saved_folder_keeps_entries() {
     assert!(recorded, "the run did not record its folders");
 
     std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable_again = Readable(&outer);
     let daemon = sandbox.start();
     assert!(sandbox.await_idle(), "the start never finished");
     let recorded_while_unread = sandbox.run_recorded();
@@ -261,7 +263,8 @@ fn unreadable_saved_folder_keeps_entries() {
     let kept = sandbox.catalogued_size(&inside);
     let recorded_after_rescan = settles(|| sandbox.run_recorded());
     drop(daemon);
-    std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::remove_file(&sandbox.sock).ok();
+    drop(readable_again);
     assert!(
         !recorded_while_unread,
         "a run that missed a folder was recorded"
@@ -272,7 +275,26 @@ fn unreadable_saved_folder_keeps_entries() {
         "the rescan dropped what the unread folder held"
     );
     assert!(recorded_after_rescan, "the rescan did not record its run");
+
+    // Readable again: the folders below it are still watched.
+    let _daemon = sandbox.start();
+    assert!(sandbox.await_idle(), "the start never finished");
+    std::fs::write(deep.join("arrived.txt"), "beta").unwrap();
+    assert!(
+        settles(|| sandbox.name_hits("arrived") == 1),
+        "a folder below the unreadable one lost its watch"
+    );
     std::fs::remove_dir_all(&sandbox.base).ok();
+}
+
+/// Gives a folder its mode back however the test ends, so it can be removed.
+struct Readable<'a>(&'a std::path::Path);
+
+impl Drop for Readable<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o700));
+    }
 }
 
 /// A folder made readable while the daemon runs is watched and indexed.

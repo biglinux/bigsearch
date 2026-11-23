@@ -80,7 +80,8 @@ pub(super) fn watch_initial_dirs(
 /// watches placed. A saved folder stays only while it is a directory, under a
 /// kept folder or as a root: inotify follows a symlink, at the folder or above
 /// it, and the walker never does. The list is in path order, a parent before
-/// its folders, which leave with it.
+/// its folders, which leave with it; the folders of one that cannot be read
+/// now stay listed, unchecked, for the start that can read them.
 fn watch_saved(
     watches: &mut Watches,
     roots: &[PathBuf],
@@ -89,7 +90,12 @@ fn watch_saved(
     catch_up: &mut CatchUp,
 ) -> usize {
     let mut watched = 0usize;
+    let mut unread: HashSet<PathBuf> = HashSet::new();
     for (dir, saved_inode) in dirs {
+        if dir.parent().is_some_and(|parent| unread.contains(parent)) {
+            unread.insert(dir);
+            continue;
+        }
         let in_kept =
             roots.contains(&dir) || dir.parent().is_some_and(|p| catch_up.watched.contains(p));
         if !in_kept {
@@ -106,6 +112,7 @@ fn watch_saved(
             Err(e) => {
                 log::warn!("cannot read {}: {e}", dir.display());
                 watches.missed = true;
+                unread.insert(dir);
                 continue;
             }
         };
