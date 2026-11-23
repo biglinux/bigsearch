@@ -1,5 +1,5 @@
-//! Minimal big-indexd client, the shape a GUI (big-shell, big-filemanager) uses:
-//! ask the daemon to filter + page server-side, render the page, hold no state.
+//! A minimal client, the shape a graphical one takes: the daemon filters and
+//! pages, the client shows the page and keeps no state.
 //!
 //!     cargo run -p big-indexd-client --example probe -- relatorio
 use big_indexd_client::{Client, Filter, Page};

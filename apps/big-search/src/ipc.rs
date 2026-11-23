@@ -622,7 +622,7 @@ fn daemon_capabilities() -> Vec<String> {
     // `filter.kind` keeps folders or files.
     capabilities.push(big_indexd_client::KIND_FILTER.to_string());
     // The `rescan` command.
-    capabilities.push("rescan".to_string());
+    capabilities.push(big_indexd_client::RESCAN.to_string());
     capabilities
 }
 

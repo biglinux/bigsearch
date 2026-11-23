@@ -18,12 +18,7 @@ use std::time::Duration;
 /// answering (a wedged commit, a stopped process still holding the socket)
 /// blocks the calling thread forever, and `PersistentClient`'s single retry
 /// only fires on a closed connection, which a silent hang never produces.
-/// Short under test, where a deadline that expires is the case being checked.
-const IO_TIMEOUT: Duration = if cfg!(test) {
-    Duration::from_secs(1)
-} else {
-    Duration::from_secs(15)
-};
+const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The largest reply this client will assemble.
 ///
@@ -51,10 +46,10 @@ fn read_reply_line(reader: &mut impl BufRead, line: &mut String) -> Result<(), C
     Ok(())
 }
 
-/// Apply the deadline to reads and writes on `stream`.
-fn apply_deadlines(stream: &UnixStream) -> Result<(), ClientError> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+/// Apply `deadline` to reads and writes on `stream`.
+fn apply_deadlines(stream: &UnixStream, deadline: Duration) -> Result<(), ClientError> {
+    stream.set_read_timeout(Some(deadline))?;
+    stream.set_write_timeout(Some(deadline))?;
     Ok(())
 }
 
@@ -96,6 +91,7 @@ struct PersistentConnection {
 pub struct PersistentClient {
     sock: PathBuf,
     connection: Option<PersistentConnection>,
+    deadline: Duration,
 }
 
 impl Client {
@@ -120,7 +116,7 @@ impl Client {
     }
 
     fn roundtrip(&self, body: RequestBody) -> Result<Reply, ClientError> {
-        exchange(&mut connect(&self.sock)?, &request_line(body)?)
+        exchange(&mut connect(&self.sock, IO_TIMEOUT)?, &request_line(body)?)
     }
 
     /// Run a query; the daemon filters, pages, and attaches metadata server-side.
@@ -390,6 +386,7 @@ impl PersistentClient {
         Self {
             sock: sock.into(),
             connection: None,
+            deadline: IO_TIMEOUT,
         }
     }
 
@@ -405,7 +402,7 @@ impl PersistentClient {
     fn connection(&mut self) -> Result<&mut PersistentConnection, ClientError> {
         let connection = match self.connection.take() {
             Some(connection) => connection,
-            None => connect(&self.sock)?,
+            None => connect(&self.sock, self.deadline)?,
         };
         Ok(self.connection.insert(connection))
     }
@@ -464,9 +461,9 @@ fn ok_from(reply: Reply) -> Result<(), ClientError> {
     }
 }
 
-fn connect(sock: &Path) -> Result<PersistentConnection, ClientError> {
+fn connect(sock: &Path, deadline: Duration) -> Result<PersistentConnection, ClientError> {
     let stream = UnixStream::connect(sock)?;
-    apply_deadlines(&stream)?;
+    apply_deadlines(&stream, deadline)?;
     let reader = BufReader::new(stream.try_clone()?);
     Ok(PersistentConnection { stream, reader })
 }
@@ -570,14 +567,18 @@ mod tests {
             }
         });
 
-        let mut client = PersistentClient::new(socket_path.clone());
+        let deadline = Duration::from_secs(1);
+        let mut client = PersistentClient {
+            deadline,
+            ..PersistentClient::new(socket_path.clone())
+        };
         let started = Instant::now();
         let outcome = client.forget_versions("/home/p/a");
         let took = started.elapsed();
         done.store(true, Ordering::Relaxed);
         std::fs::remove_file(&socket_path).ok();
         assert!(matches!(outcome, Err(ClientError::Io(_))), "{outcome:?}");
-        assert!(took < IO_TIMEOUT + IO_TIMEOUT / 2, "{took:?}");
+        assert!(took < deadline + deadline / 2, "{took:?}");
         assert_eq!(server.join().unwrap(), 1);
     }
 }

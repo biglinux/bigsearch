@@ -206,6 +206,10 @@ pub enum EntryKind {
 /// [`Filter::kind`].
 pub const KIND_FILTER: &str = "kind-filter";
 
+/// The [`Status::capabilities`] entry of a daemon that answers
+/// [`RequestBody::Rescan`].
+pub const RESCAN: &str = "rescan";
+
 /// Page window for virtual scrolling.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Page {

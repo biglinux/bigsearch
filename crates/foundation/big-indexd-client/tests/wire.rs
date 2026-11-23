@@ -31,20 +31,16 @@ fn daemon_exchanges_round_trip() {
         assert_eq!(kind, answer["kind"], "{command}");
         commands.push(command);
     }
-    // Every command in `RequestBody`, as serde lists them when refusing one.
+    // Every command in `RequestBody`: serde names the unknown one and each it
+    // knows between backticks when refusing one.
     let refused =
         serde_json::from_value::<RequestBody>(serde_json::json!({"cmd": "no_such_command"}))
             .expect_err("an unknown command")
             .to_string();
-    let (_, expected) = refused
-        .split_once("expected one of ")
-        .expect("serde lists the commands");
-    let mut known: Vec<&str> = expected
-        .split(", ")
-        .map(|name| name.trim_matches('`'))
-        .collect();
-    known.push("no_such_command");
+    let mut known: Vec<&str> = refused.split('`').skip(1).step_by(2).collect();
+    assert!(known.len() > 2, "serde named no commands: {refused}");
     known.sort_unstable();
+    known.dedup();
     commands.sort_unstable();
     commands.dedup();
     assert_eq!(commands, known);
