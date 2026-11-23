@@ -55,6 +55,24 @@ pub(super) fn print_config_help() {
     );
 }
 
+/// The choices in the file this build does not know, which read as defaults.
+fn print_unknown_choices() {
+    match std::fs::read_to_string(config::config_file()) {
+        Ok(text) => {
+            for choice in big_search_config::unknown_choices(&text) {
+                println!(
+                    "{} {} is not a known value; read as the default",
+                    yellow("Unknown:"),
+                    terminal_text(&choice)
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => println!("{} {error}", yellow("Unreadable:")),
+    }
+}
+
+// shape: declares a view
 pub(super) fn cmd_config_show() -> Result<()> {
     let requested = settings::content_index_mode().as_str();
     let resolved = settings::resolved_content_index_mode().as_str();
@@ -108,19 +126,7 @@ pub(super) fn cmd_config_show() -> Result<()> {
         "{} BIG_SEARCH_* variables override these; DESIGN.md lists them",
         bold("Environment:"),
     );
-    match std::fs::read_to_string(config::config_file()) {
-        Ok(text) => {
-            for choice in big_search_config::unknown_choices(&text) {
-                println!(
-                    "{} {} is not a known value; read as the default",
-                    yellow("Unknown:"),
-                    terminal_text(&choice)
-                );
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => println!("{} {error}", yellow("Unreadable:")),
-    }
+    print_unknown_choices();
     Ok(())
 }
 

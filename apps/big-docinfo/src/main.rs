@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use big_docinfo::{Hints, analyze};
+use big_docinfo::{DocInfo, Hints, analyze};
 use gettextrs::{gettext, pgettext};
 
 const USAGE: &str = "usage: big-docinfo [--json | --name] FILE | big-docinfo rename FILE NAME";
@@ -112,39 +112,42 @@ fn describe(path: &Path, output: Output) -> Result<()> {
             println!("{value}");
         }
         Output::Name => println!("{free}"),
-        Output::Text => {
-            let show = |label: &str, value: Option<&str>| {
-                println!(
-                    "{label}: {}",
-                    big_search::terminal_text(value.unwrap_or("—"))
-                );
-            };
-            show(
-                &pgettext("document field", "Kind"),
-                analysis.kind.map(kind_label).as_deref(),
-            );
-            show(
-                &pgettext("document field", "Date"),
-                analysis.date.as_deref(),
-            );
-            show(
-                &pgettext("document field", "Entity"),
-                analysis.entity.as_deref(),
-            );
-            show(
-                &pgettext("document field", "Title"),
-                analysis.title.as_deref(),
-            );
-            if kept {
-                println!(
-                    "{}",
-                    gettext("No kind or title found in this document; the current name stays.")
-                );
-            }
-            show(&pgettext("document field", "Name"), Some(&free));
-        }
+        Output::Text => print_report(&analysis, &free, kept),
     }
     Ok(())
+}
+
+/// The analysis as the dialog shows it, one translated field a line.
+fn print_report(analysis: &DocInfo, free: &str, kept: bool) {
+    let show = |label: &str, value: Option<&str>| {
+        println!(
+            "{label}: {}",
+            big_search::terminal_text(value.unwrap_or("—"))
+        );
+    };
+    show(
+        &pgettext("document field", "Kind"),
+        analysis.kind.map(kind_label).as_deref(),
+    );
+    show(
+        &pgettext("document field", "Date"),
+        analysis.date.as_deref(),
+    );
+    show(
+        &pgettext("document field", "Entity"),
+        analysis.entity.as_deref(),
+    );
+    show(
+        &pgettext("document field", "Title"),
+        analysis.title.as_deref(),
+    );
+    if kept {
+        println!(
+            "{}",
+            gettext("No kind or title found in this document; the current name stays.")
+        );
+    }
+    show(&pgettext("document field", "Name"), Some(free));
 }
 
 /// How a kind reads in the dialog.
