@@ -185,8 +185,10 @@ impl Scope {
 /// have decided had it come to `path` from the repository's root.
 ///
 /// Git's precedence: the `.gitignore` nearest the path first, up to the root of
-/// the work tree, then `.git/info/exclude`, then the global excludes file. The
-/// first with an opinion decides, `!` re-includes included.
+/// the work tree, then the repository's `info/exclude`, then the global
+/// excludes file. The first with an opinion decides, `!` re-includes included;
+/// nothing re-includes what lies in an ignored folder, which the walk never
+/// enters.
 ///
 /// The walker never tests the root it is given, so a directory its repository
 /// ignores, created again after the scan (`cargo fuzz` recreating
@@ -195,29 +197,65 @@ impl Scope {
 /// nothing more.
 pub fn repo_ignored(path: &Path, is_dir: bool) -> bool {
     use ignore::gitignore::{Gitignore, GitignoreBuilder};
-    let mut rules = Vec::new();
+    // Each `.gitignore` above `path`, nearest first, with the folder it is in.
+    let mut nested: Vec<(&Path, Gitignore)> = Vec::new();
     for dir in path.ancestors().skip(1) {
         let file = dir.join(".gitignore");
         if file.is_file() {
-            rules.push(Gitignore::new(&file).0);
+            nested.push((dir, Gitignore::new(&file).0));
         }
         // Outside a repository its ignore files do not apply (the walker's
-        // `require_git`). A linked worktree or a submodule has a `.git` file.
-        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
-            let mut exclude = GitignoreBuilder::new(dir);
-            exclude.add(dir.join(".git/info/exclude"));
-            if let Ok(exclude) = exclude.build() {
-                rules.push(exclude);
-            }
-            rules.push(GitignoreBuilder::new(dir).build_global().0);
-            return rules
+        // `require_git`).
+        let Ok(dot_git) = std::fs::symlink_metadata(dir.join(".git")) else {
+            continue;
+        };
+        let mut exclude = GitignoreBuilder::new(dir);
+        exclude.add(git_common_dir(dir, dot_git.is_file()).join("info/exclude"));
+        let repository_wide = [
+            exclude.build().unwrap_or_else(|_| Gitignore::empty()),
+            GitignoreBuilder::new(dir).build_global().0,
+        ];
+        // A `.gitignore` speaks for what lies below its own folder.
+        let ignored = |target: &Path, target_is_dir: bool| {
+            nested
                 .iter()
-                .map(|rules| rules.matched_path_or_any_parents(path, is_dir))
+                .filter(|(owner, _)| target != *owner && target.starts_with(owner))
+                .map(|(_, rules)| rules)
+                .chain(&repository_wide)
+                .map(|rules| rules.matched_path_or_any_parents(target, target_is_dir))
                 .find(|matched| !matched.is_none())
-                .is_some_and(|matched| matched.is_ignore());
-        }
+                .is_some_and(|matched| matched.is_ignore())
+        };
+        return path
+            .ancestors()
+            .skip(1)
+            .take_while(|folder| *folder != dir)
+            .any(|folder| ignored(folder, true))
+            || ignored(path, is_dir);
     }
     false
+}
+
+/// Where a work tree's repository keeps the files its worktrees share:
+/// `.git` itself, or, when `.git` is a file (a linked worktree or a submodule),
+/// the common folder of the git folder it names.
+fn git_common_dir(work_tree: &Path, dot_git_is_file: bool) -> PathBuf {
+    let dot_git = work_tree.join(".git");
+    if !dot_git_is_file {
+        return dot_git;
+    }
+    let Some(git_dir) = std::fs::read_to_string(&dot_git).ok().and_then(|text| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("gitdir:"))
+            .map(|named| work_tree.join(named.trim()))
+    }) else {
+        return dot_git;
+    };
+    // A submodule's git folder holds its own files and no `commondir`.
+    match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(common) => git_dir.join(common.trim()),
+        Err(_) => git_dir,
+    }
 }
 
 /// `path` below the source that holds it. The walker tests only what lies
@@ -776,6 +814,37 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn ignored_parent_and_worktree_exclude() {
+        let base = scratch_dir("lsearch-scan-git-layouts");
+        // A rule below an ignored folder brings nothing back (gitignore(5)).
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".git/worktrees/wt")).unwrap();
+        std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+        std::fs::create_dir_all(repo.join("cache")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "cache/\n").unwrap();
+        std::fs::write(repo.join("cache/.gitignore"), "!report.txt\n").unwrap();
+        // A linked worktree reads the exclude file of the repository it shares.
+        std::fs::write(repo.join(".git/info/exclude"), "*.secret\n").unwrap();
+        std::fs::write(repo.join(".git/worktrees/wt/commondir"), "../..\n").unwrap();
+        let worktree = base.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git_dir = repo.join(".git/worktrees/wt");
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+
+        let report = repo_ignored(&repo.join("cache/report.txt"), false);
+        let secret = repo_ignored(&worktree.join("notes.secret"), false);
+        let plain = repo_ignored(&worktree.join("notes.txt"), false);
+        std::fs::remove_dir_all(&base).ok();
+        assert!(report, "a file in an ignored folder came back");
+        assert!(secret, "the worktree skipped the shared exclude file");
+        assert!(!plain);
     }
 
     #[test]
