@@ -595,30 +595,35 @@ pub fn set_history(values: &[(&str, &str)]) -> io::Result<()> {
 ///
 /// When the file cannot be read or written.
 pub fn add_source(source: &SourceEntry) -> io::Result<()> {
-    edit(|lines| {
-        add_source_to(lines, source, &home_dir());
-        Ok(())
-    })
+    edit(|lines| add_source_to(lines, source, &home_dir()))
 }
 
 /// Decided on the lines read under the write lock, so a folder another writer
 /// added a moment ago is not added twice.
-fn add_source_to(lines: &mut Vec<String>, source: &SourceEntry, home: &Path) {
-    if find_source(lines, &source.path).is_some() {
-        return;
+fn add_source_to(lines: &mut Vec<String>, source: &SourceEntry, home: &Path) -> io::Result<()> {
+    let listed = listed_sources(lines)?;
+    if listed.contains(&source.path) {
+        return Ok(());
     }
     // No `[[source]]` means the home folder alone; adding a folder must keep
     // it, unless the folder is home itself.
-    if lists_no_source(lines) && source.path != home {
+    if listed.is_empty() && source.path != home {
         append_source(lines, &SourceEntry::new(home));
     }
     append_source(lines, source);
+    Ok(())
 }
 
-fn lists_no_source(lines: &[String]) -> bool {
-    lines
-        .iter()
-        .all(|line| header(line).as_deref() != Some("[[source]]"))
+/// The folders the file lists, as TOML reads it: a header in any spelling
+/// counts, and a header-like line inside a string does not.
+fn listed_sources(lines: &[String]) -> io::Result<Vec<PathBuf>> {
+    let config = parse(&lines.join("\n"))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(config
+        .sources
+        .into_iter()
+        .map(|source| source.path)
+        .collect())
 }
 
 /// Take a folder out of the catalogue. A folder the file does not list is
@@ -636,7 +641,7 @@ pub fn remove_source(path: &Path) -> io::Result<()> {
 fn remove_source_from(lines: &mut Vec<String>, path: &Path, home: &Path) -> io::Result<()> {
     if let Some(block) = find_source(lines, path) {
         lines.drain(block);
-    } else if lists_no_source(lines) && path == home {
+    } else if path == home && listed_sources(lines)?.is_empty() {
         return Err(missing_source(path));
     }
     Ok(())
@@ -653,7 +658,7 @@ fn remove_source_from(lines: &mut Vec<String>, path: &Path, home: &Path) -> io::
 /// otherwise when the file cannot be read or written.
 pub fn set_source_content(path: &Path, content: bool) -> io::Result<()> {
     edit(|lines| {
-        if set_content_in(lines, path, &home_dir(), content) {
+        if set_content_in(lines, path, &home_dir(), content)? {
             Ok(())
         } else {
             Err(missing_source(path))
@@ -663,13 +668,18 @@ pub fn set_source_content(path: &Path, content: bool) -> io::Result<()> {
 
 /// Set `content` in the block for `path`, reporting whether there was one.
 /// Decided on the lines read under the write lock, like [`add_source`].
-fn set_content_in(lines: &mut Vec<String>, path: &Path, home: &Path, content: bool) -> bool {
+fn set_content_in(
+    lines: &mut Vec<String>,
+    path: &Path,
+    home: &Path,
+    content: bool,
+) -> io::Result<bool> {
     if let Some(block) = find_source(lines, path) {
         let literal = if content { "true" } else { "false" };
         upsert_line(lines, block.start + 1, block.end, "content", literal);
-        return true;
+        return Ok(true);
     }
-    if lists_no_source(lines) && path == home {
+    if path == home && listed_sources(lines)?.is_empty() {
         append_source(
             lines,
             &SourceEntry {
@@ -677,9 +687,9 @@ fn set_content_in(lines: &mut Vec<String>, path: &Path, home: &Path, content: bo
                 ..SourceEntry::new(home)
             },
         );
-        return true;
+        return Ok(true);
     }
-    false
+    Ok(false)
 }
 
 fn missing_source(path: &Path) -> io::Error {
@@ -769,8 +779,8 @@ fn edit_file(
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     change(&mut lines)?;
     let edited = format!("{}{ending}", lines.join(ending));
-    // A header spelled in a way the line editor does not read (a quoted key)
-    // could get a second table; the file is never left unreadable.
+    // A table the line editor does not read (an inline table, say) could get
+    // a second definition; the file is never left unreadable.
     if let Err(error) = parse(&edited) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, error));
     }
@@ -866,11 +876,16 @@ fn next_table(lines: &[String], start: usize) -> usize {
 }
 
 /// The `[table]` or `[[array]]` header on this line, without its trailing
-/// comment and the spaces TOML allows inside the brackets, so `[[ source ]]`
-/// reads as `[[source]]`. `None` when the line is not a header.
+/// comment and the spaces and quotes TOML allows around the name, so
+/// `[[ source ]]` and `[["source"]]` read as `[[source]]`. `None` when the
+/// line is not a header.
 fn header(line: &str) -> Option<String> {
     let code = without_comment(line).trim();
-    (code.starts_with('[') && code.ends_with(']')).then(|| code.split_whitespace().collect())
+    (code.starts_with('[') && code.ends_with(']')).then(|| {
+        code.chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '"' | '\''))
+            .collect()
+    })
 }
 
 /// The line up to a `#` comment that is not inside a string.

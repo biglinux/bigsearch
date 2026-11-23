@@ -79,12 +79,37 @@ fn spaced_source_header_recognised() {
         &mut lines,
         &SourceEntry::new(PathBuf::from("/mnt/new")),
         Path::new("/home/p"),
-    );
+    )
+    .unwrap();
     let sources = read_text(&lines.join("\n")).sources;
     let paths: Vec<_> = sources.iter().map(|source| source.path.clone()).collect();
     assert_eq!(
         paths,
         [PathBuf::from("/mnt/disk"), PathBuf::from("/mnt/new")]
+    );
+}
+
+/// Whether the file lists a folder is what TOML reads: a quoted header counts,
+/// and a header-like line inside a string does not.
+#[test]
+fn listed_folders_read_as_toml() {
+    let home = Path::new("/home/p");
+    let added = |text: &str| {
+        let mut lines: Vec<String> = text.lines().map(String::from).collect();
+        add_source_to(&mut lines, &SourceEntry::new("/mnt/new"), home).unwrap();
+        let sources = read_text(&lines.join("\n")).sources;
+        sources
+            .into_iter()
+            .map(|source| source.path)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        added("[[\"source\"]]\npath = \"/mnt/disk\"\n"),
+        [PathBuf::from("/mnt/disk"), PathBuf::from("/mnt/new")]
+    );
+    assert_eq!(
+        added("[origin]\nnote = \"\"\"\n[[source]]\n\"\"\"\n"),
+        [PathBuf::from("/home/p"), PathBuf::from("/mnt/new")]
     );
 }
 
@@ -305,7 +330,7 @@ fn control_characters_stay_valid_toml() {
 fn implicit_home_gets_written() {
     let mut lines = vec!["[defaults]".to_owned(), "content = true".to_owned()];
     let home = Path::new("/home/p");
-    assert!(set_content_in(&mut lines, home, home, false));
+    assert!(set_content_in(&mut lines, home, home, false).unwrap());
     let parsed = read_text(&lines.join("\n"));
     assert_eq!(parsed.sources.len(), 1);
     assert_eq!(parsed.sources[0].path, home);
@@ -317,12 +342,7 @@ fn implicit_home_gets_written() {
 fn unlisted_folder_is_refused() {
     let mut lines = vec!["[[source]]".to_owned(), "path = \"/mnt/disk\"".to_owned()];
     let before = lines.clone();
-    assert!(!set_content_in(
-        &mut lines,
-        Path::new("/home/p"),
-        Path::new("/home/p"),
-        true
-    ));
+    assert!(!set_content_in(&mut lines, Path::new("/home/p"), Path::new("/home/p"), true).unwrap());
     assert_eq!(lines, before);
 }
 
@@ -331,8 +351,8 @@ fn unlisted_folder_is_refused() {
 fn first_folder_keeps_home() {
     let home = Path::new("/home/p");
     let mut lines = vec!["[defaults]".to_owned()];
-    add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), home);
-    add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), home);
+    add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), home).unwrap();
+    add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), home).unwrap();
     let parsed = read_text(&lines.join("\n"));
     assert_eq!(
         parsed.sources,
@@ -354,8 +374,7 @@ fn broken_file_refuses_new_folder() {
     let original = "[[source]]\npath = \"/home/p\"\ncontent = = true\n";
     let (dir, file) = scratch_file("broken", original);
     let result = edit_file(&file, |lines| {
-        add_source_to(lines, &SourceEntry::new("/mnt/new"), Path::new("/home/p"));
-        Ok(())
+        add_source_to(lines, &SourceEntry::new("/mnt/new"), Path::new("/home/p"))
     });
     let left = std::fs::read_to_string(&file).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
@@ -411,8 +430,8 @@ fn concurrent_writers_keep_both() {
 
 /// A file written with Windows line endings keeps them.
 #[test]
-fn quoted_header_edit_refused() {
-    let original = "[\"defaults\"]\ncontent = true\n";
+fn inline_table_edit_refused() {
+    let original = "defaults = { content = true }\n";
     let (dir, file) = scratch_file("quoted", original);
     let refused = edit_file(&file, |lines| {
         set_in_table(lines, "[defaults]", &[("content", "false")]);
