@@ -65,129 +65,23 @@ pub(crate) fn read_rtf(bytes: &[u8]) -> Option<(String, Option<String>)> {
     if !bytes.starts_with(b"{\\rtf") {
         return None;
     }
-    let mut text = String::new();
-    let mut title = String::new();
-    let mut stack: Vec<Group> = Vec::new();
-    let mut group = Group {
-        skip: false,
-        title: false,
-        fallback: 1,
-    };
-    let mut pending_skip = 0usize; // fallback characters still to drop after \u
+    let mut reader = RtfReader::default();
     let mut i = 0;
-    let push = |c: char, group: &Group, text: &mut String, title: &mut String| {
-        if group.title {
-            title.push(c);
-        } else if !group.skip {
-            text.push(c);
-        }
-    };
     while i < bytes.len() {
         match bytes[i] {
             b'{' => {
-                stack.push(group);
+                reader.stack.push(reader.group);
                 // "{\*\dest …}": a destination a reader may ignore.
                 if bytes[i + 1..].starts_with(b"\\*") {
-                    group.skip = true;
+                    reader.group.skip = true;
                 }
                 i += 1;
             }
             b'}' => {
-                group = stack.pop().unwrap_or(group);
+                reader.group = reader.stack.pop().unwrap_or(reader.group);
                 i += 1;
             }
-            b'\\' => {
-                let rest = &bytes[i + 1..];
-                match rest.first() {
-                    Some(b'\'') => {
-                        let byte = rest
-                            .get(1..3)
-                            .and_then(|hex| std::str::from_utf8(hex).ok())
-                            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-                        if let Some(byte) = byte {
-                            if pending_skip > 0 {
-                                pending_skip -= 1;
-                            } else {
-                                let c = match byte {
-                                    0x80..=0x9f => CP1252[usize::from(byte - 0x80)],
-                                    b => char::from(b),
-                                };
-                                push(c, &group, &mut text, &mut title);
-                            }
-                        }
-                        i += 4;
-                    }
-                    Some(c) if c.is_ascii_alphabetic() => {
-                        let word_len = rest.iter().take_while(|c| c.is_ascii_alphabetic()).count();
-                        let word = std::str::from_utf8(&rest[..word_len]).unwrap_or("");
-                        let mut j = word_len;
-                        let sign = usize::from(rest.get(j) == Some(&b'-'));
-                        let digits = rest[j + sign..]
-                            .iter()
-                            .take_while(|c| c.is_ascii_digit())
-                            .count();
-                        let number = (digits > 0)
-                            .then(|| {
-                                std::str::from_utf8(&rest[j..j + sign + digits])
-                                    .ok()?
-                                    .parse::<i32>()
-                                    .ok()
-                            })
-                            .flatten();
-                        j += sign + digits;
-                        if rest.get(j) == Some(&b' ') {
-                            j += 1; // the space that ends a control word is not text
-                        }
-                        i += 1 + j;
-                        match word {
-                            "par" | "line" | "sect" | "page" | "row" => {
-                                push('\n', &group, &mut text, &mut title);
-                            }
-                            "tab" | "cell" => push('\t', &group, &mut text, &mut title),
-                            "endash" => push('–', &group, &mut text, &mut title),
-                            "emdash" => push('—', &group, &mut text, &mut title),
-                            "lquote" => push('‘', &group, &mut text, &mut title),
-                            "rquote" => push('’', &group, &mut text, &mut title),
-                            "ldblquote" => push('“', &group, &mut text, &mut title),
-                            "rdblquote" => push('”', &group, &mut text, &mut title),
-                            "bullet" => push('•', &group, &mut text, &mut title),
-                            "uc" => {
-                                group.fallback =
-                                    number.and_then(|n| usize::try_from(n).ok()).unwrap_or(1)
-                            }
-                            "u" => {
-                                if let Some(n) = number {
-                                    // Negative values are the high half of a 16-bit code.
-                                    let code = if n < 0 { n + 65_536 } else { n };
-                                    if let Some(c) =
-                                        u32::try_from(code).ok().and_then(char::from_u32)
-                                    {
-                                        push(c, &group, &mut text, &mut title);
-                                    }
-                                    pending_skip = group.fallback;
-                                }
-                            }
-                            "title" => group.title = true,
-                            "info" => group.skip = true,
-                            w if SKIPPED.contains(&w) => group.skip = true,
-                            _ => {}
-                        }
-                    }
-                    Some(&c) => {
-                        // A control symbol: "\{", "\}", "\\" are text; "\~" a space.
-                        match c {
-                            b'{' | b'}' | b'\\' => {
-                                push(char::from(c), &group, &mut text, &mut title)
-                            }
-                            b'~' => push(' ', &group, &mut text, &mut title),
-                            b'\n' | b'\r' => push('\n', &group, &mut text, &mut title),
-                            _ => {}
-                        }
-                        i += 2;
-                    }
-                    None => i += 1,
-                }
-            }
+            b'\\' => i += 1 + reader.control(&bytes[i + 1..]),
             b'\r' | b'\n' => i += 1,
             _ => {
                 // Plain text up to the next control character, as UTF-8 if it is.
@@ -196,18 +90,145 @@ pub(crate) fn read_rtf(bytes: &[u8]) -> Option<(String, Option<String>)> {
                     .position(|b| matches!(b, b'{' | b'}' | b'\\' | b'\r' | b'\n'))
                     .map_or(bytes.len(), |n| i + n);
                 for c in String::from_utf8_lossy(&bytes[i..end]).chars() {
-                    if pending_skip > 0 {
-                        pending_skip -= 1;
-                    } else {
-                        push(c, &group, &mut text, &mut title);
-                    }
+                    reader.push_unless_fallback(c);
                 }
                 i = end;
             }
         }
     }
-    let title = title.trim().to_owned();
+    let title = reader.title.trim().to_owned();
+    let text = reader.text;
     (!text.trim().is_empty()).then(|| (text, (!title.is_empty()).then_some(title)))
+}
+
+/// What has been read so far, and the state of the group being read.
+struct RtfReader {
+    text: String,
+    title: String,
+    stack: Vec<Group>,
+    group: Group,
+    /// Fallback characters still to drop after a `\u`.
+    pending_skip: usize,
+}
+
+impl Default for RtfReader {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            title: String::new(),
+            stack: Vec::new(),
+            group: Group {
+                skip: false,
+                title: false,
+                fallback: 1,
+            },
+            pending_skip: 0,
+        }
+    }
+}
+
+impl RtfReader {
+    fn push(&mut self, c: char) {
+        if self.group.title {
+            self.title.push(c);
+        } else if !self.group.skip {
+            self.text.push(c);
+        }
+    }
+
+    /// A character that may be one of the fallbacks a `\u` asked to drop.
+    fn push_unless_fallback(&mut self, c: char) {
+        if self.pending_skip > 0 {
+            self.pending_skip -= 1;
+        } else {
+            self.push(c);
+        }
+    }
+
+    /// What follows a backslash; returns how many of `rest`'s bytes it took.
+    fn control(&mut self, rest: &[u8]) -> usize {
+        match rest.first() {
+            Some(b'\'') => {
+                // `\'hh`: one byte in Windows-1252.
+                let byte = rest
+                    .get(1..3)
+                    .and_then(|hex| std::str::from_utf8(hex).ok())
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+                if let Some(byte) = byte {
+                    let c = match byte {
+                        0x80..=0x9f => CP1252[usize::from(byte - 0x80)],
+                        b => char::from(b),
+                    };
+                    self.push_unless_fallback(c);
+                }
+                3
+            }
+            Some(c) if c.is_ascii_alphabetic() => self.control_word(rest),
+            Some(&c) => {
+                // A control symbol: "\{", "\}", "\\" are text; "\~" a space.
+                match c {
+                    b'{' | b'}' | b'\\' => self.push(char::from(c)),
+                    b'~' => self.push(' '),
+                    b'\n' | b'\r' => self.push('\n'),
+                    _ => {}
+                }
+                1
+            }
+            None => 0,
+        }
+    }
+
+    /// A control word, its optional number and the space that ends it; returns
+    /// how many of `rest`'s bytes it took.
+    fn control_word(&mut self, rest: &[u8]) -> usize {
+        let word_len = rest.iter().take_while(|c| c.is_ascii_alphabetic()).count();
+        let word = std::str::from_utf8(&rest[..word_len]).unwrap_or("");
+        let mut j = word_len;
+        let sign = usize::from(rest.get(j) == Some(&b'-'));
+        let digits = rest[j + sign..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        let number = (digits > 0)
+            .then(|| {
+                std::str::from_utf8(&rest[j..j + sign + digits])
+                    .ok()?
+                    .parse::<i32>()
+                    .ok()
+            })
+            .flatten();
+        j += sign + digits;
+        if rest.get(j) == Some(&b' ') {
+            j += 1; // the space that ends a control word is not text
+        }
+        match word {
+            "par" | "line" | "sect" | "page" | "row" => self.push('\n'),
+            "tab" | "cell" => self.push('\t'),
+            "endash" => self.push('–'),
+            "emdash" => self.push('—'),
+            "lquote" => self.push('‘'),
+            "rquote" => self.push('’'),
+            "ldblquote" => self.push('“'),
+            "rdblquote" => self.push('”'),
+            "bullet" => self.push('•'),
+            "uc" => self.group.fallback = number.and_then(|n| usize::try_from(n).ok()).unwrap_or(1),
+            "u" => {
+                if let Some(n) = number {
+                    // Negative values are the high half of a 16-bit code.
+                    let code = if n < 0 { n + 65_536 } else { n };
+                    if let Some(c) = u32::try_from(code).ok().and_then(char::from_u32) {
+                        self.push(c);
+                    }
+                    self.pending_skip = self.group.fallback;
+                }
+            }
+            "title" => self.group.title = true,
+            "info" => self.group.skip = true,
+            w if SKIPPED.contains(&w) => self.group.skip = true,
+            _ => {}
+        }
+        j
+    }
 }
 
 #[cfg(test)]
