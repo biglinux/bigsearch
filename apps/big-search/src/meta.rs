@@ -147,9 +147,9 @@ pub fn is_meta_candidate(path: &Path) -> bool {
 
 /// The extended attribute KDE and this desktop store user tags in.
 const TAGS_XATTR: &str = "user.xdg.tags";
-/// Longest tag list this will read. A tag list is a handful of words; anything
-/// larger is not one.
-const MAX_TAGS_BYTES: usize = 4 * 1024;
+/// Longest extended attribute this reads: a tag list or a source address. A tag
+/// list is a handful of words; anything larger is not one.
+const MAX_XATTR_BYTES: usize = 4 * 1024;
 /// The prefix a tag carries in the index.
 ///
 /// Reserved on purpose: indexing the bare word would make a document *about*
@@ -173,11 +173,11 @@ pub fn read_tags(path: &Path) -> Vec<String> {
 }
 
 /// One extended attribute, bounded, or `None` when it is absent or too large.
-fn read_xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+pub(crate) fn read_xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt as _;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let name = std::ffi::CString::new(name).ok()?;
-    let mut buffer = vec![0_u8; MAX_TAGS_BYTES];
+    let mut buffer = vec![0_u8; MAX_XATTR_BYTES];
     // SAFETY: both strings are NUL-terminated and the buffer is `len` bytes.
     let read = unsafe {
         libc::getxattr(
@@ -355,11 +355,11 @@ fn image_text(path: &Path) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tag_tests {
+pub(crate) mod tag_tests {
     use super::*;
 
     /// Set one extended attribute, reporting whether the filesystem accepted it.
-    fn write_xattr(path: &Path, name: &str, value: &[u8]) -> bool {
+    pub(crate) fn write_xattr(path: &Path, name: &str, value: &[u8]) -> bool {
         use std::os::unix::ffi::OsStrExt as _;
         let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
             return false;

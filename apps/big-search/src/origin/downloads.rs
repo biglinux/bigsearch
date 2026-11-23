@@ -5,8 +5,6 @@
 //! it for a regular file sitting directly in the downloads folder, and
 //! `browser_downloads` passes the addresses from a browser's own list through
 //! [`domain_from_url`]. Only the host of an address is ever kept.
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 pub(super) fn should_probe_xdg_origin(path: &Path) -> bool {
@@ -88,26 +86,8 @@ fn expand_home(path: PathBuf, home: &Path) -> PathBuf {
 }
 
 pub(super) fn read_xdg_origin_domain(path: &Path) -> Option<String> {
-    let path_c = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let attr_c = CString::new("user.xdg.origin.url").ok()?;
-    let mut buffer = vec![0u8; 4096];
-    // SAFETY: `path_c` and `attr_c` are NUL-terminated C strings; `buffer` points
-    // to valid writable memory for its declared length. getxattr does not retain
-    // any pointer after returning.
-    let read = unsafe {
-        libc::getxattr(
-            path_c.as_ptr(),
-            attr_c.as_ptr(),
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-        )
-    };
-    if read <= 0 {
-        return None;
-    }
-    buffer.truncate(read as usize);
-    let url = std::str::from_utf8(&buffer).ok()?.trim();
-    domain_from_url(url)
+    let url = crate::meta::read_xattr(path, "user.xdg.origin.url")?;
+    domain_from_url(std::str::from_utf8(&url).ok()?.trim())
 }
 
 /// The host an address names, and nothing else from it.
@@ -144,6 +124,23 @@ pub(crate) fn domain_from_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The address a browser leaves on the file, read back as its site.
+    #[test]
+    fn origin_attribute_read_as_site() {
+        let dir = crate::test_env::scratch_dir("big-search-origin-xattr");
+        let file = dir.join("a.pdf");
+        std::fs::write(&file, b"pdf").expect("write");
+        assert_eq!(read_xdg_origin_domain(&file), None);
+        let url = b" https://user@Files.Example.org/a.pdf?sig=1\n";
+        if crate::meta::tag_tests::write_xattr(&file, "user.xdg.origin.url", url) {
+            assert_eq!(
+                read_xdg_origin_domain(&file).as_deref(),
+                Some("files.example.org")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Only the site survives: no credential, path or query, and nothing that
     /// is not a host name or IP literal.
