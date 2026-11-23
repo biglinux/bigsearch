@@ -478,7 +478,7 @@ mod tests {
             .unwrap_or_else(|| bin.to_string_lossy().into_owned())
     }
 
-    fn temporary_extract_dir(label: &str) -> std::path::PathBuf {
+    fn temporary_extract_dir(label: &str) -> crate::test_env::ScratchDir {
         crate::test_env::scratch_dir(&format!("lsearch-ex-{label}"))
     }
 

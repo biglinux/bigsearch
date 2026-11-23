@@ -464,7 +464,7 @@ fn hidden_source_indexes_new_files() {
 /// A home with a `docs` folder holding `first.txt` ("alpha"), and the
 /// daemon's data and runtime folders, for tests that stop and start it.
 struct Sandbox {
-    base: PathBuf,
+    base: scratch::ScratchDir,
     home: PathBuf,
     docs: PathBuf,
     data: PathBuf,

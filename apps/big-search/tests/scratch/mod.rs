@@ -2,10 +2,35 @@
 
 use std::path::{Path, PathBuf};
 
-/// An empty directory in `/tmp`, private to the test. The scan refuses a path
-/// under a dot-directory, a git work tree's ignored files or a build directory,
-/// and `TMPDIR` can be any of those (`~/.cache/…`, a repository's `target/`).
-pub fn scratch_dir(name: &str) -> PathBuf {
+/// An empty directory in `/tmp`, private to the test and removed with what it
+/// holds when dropped. The scan refuses a path under a dot-directory, a git
+/// work tree's ignored files or a build directory, and `TMPDIR` can be any of
+/// those (`~/.cache/…`, a repository's `target/`).
+pub struct ScratchDir(PathBuf);
+
+impl std::ops::Deref for ScratchDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for ScratchDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        // A test that removed it already, or a file a daemon still writes,
+        // leaves nothing to report from here.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+pub fn scratch_dir(name: &str) -> ScratchDir {
     use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -23,7 +48,7 @@ pub fn scratch_dir(name: &str) -> PathBuf {
         .mode(0o700)
         .create(&dir)
         .expect("create a fresh scratch directory");
-    dir
+    ScratchDir(dir)
 }
 
 /// Whether the tests run as root, who reads a folder of any mode: a test of a

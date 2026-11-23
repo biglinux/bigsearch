@@ -173,7 +173,7 @@ fn every_object_gets_its_own_name() {
     assert_eq!(&first[2..3], "/");
 }
 
-fn store_with_versions(name: &str, objects: &[&str]) -> (PathBuf, History) {
+fn store_with_versions(name: &str, objects: &[&str]) -> (crate::test_env::ScratchDir, History) {
     let dir = crate::test_env::scratch_dir(name);
     let conn = open_store(&dir.join("history.sqlite")).unwrap();
     conn.execute(

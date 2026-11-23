@@ -119,7 +119,7 @@ fn folding_matches_what_people_type() {
     }
 }
 
-fn temporary_extract_dir(label: &str) -> std::path::PathBuf {
+fn temporary_extract_dir(label: &str) -> crate::test_env::ScratchDir {
     crate::test_env::scratch_dir(&format!("lsearch-ex-{label}"))
 }
 

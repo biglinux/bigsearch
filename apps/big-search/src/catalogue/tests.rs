@@ -298,7 +298,10 @@ fn on_disk_state_uses_wal_journal() {
 }
 
 /// A catalogue database holding `rows` in the name namespace, and a reader of it.
-fn catalogue_of(label: &str, rows: &[(&str, i64, u64)]) -> (PathBuf, CatalogueReader) {
+fn catalogue_of(
+    label: &str,
+    rows: &[(&str, i64, u64)],
+) -> (crate::test_env::ScratchDir, CatalogueReader) {
     let dir = crate::test_env::scratch_dir(&format!("bs-catalogue-{label}"));
     let db = dir.join("state.sqlite");
     let mut names = State::empty(&db, NAME_NAMESPACE);
