@@ -229,8 +229,8 @@ fn renamed_over_folder_relisted() {
     std::fs::remove_dir_all(&sandbox.base).ok();
 }
 
-/// A saved folder that cannot be read at the next start keeps its entries:
-/// a failed lookup is no evidence that another folder took its place.
+/// A saved folder that cannot be read keeps its entries, at the next start and
+/// through a rescan: a failed lookup is no evidence that its files are gone.
 #[test]
 fn unreadable_saved_folder_keeps_entries() {
     if scratch::runs_as_root() {
@@ -252,23 +252,26 @@ fn unreadable_saved_folder_keeps_entries() {
 
     std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o000)).unwrap();
     let daemon = sandbox.start();
+    assert!(sandbox.await_idle(), "the start never finished");
+    let recorded_while_unread = sandbox.run_recorded();
+    // A rescan cannot read it either: what it held stays, and a folder only
+    // this user cannot read does not keep the run from being recorded.
+    assert!(command_accepted(&sandbox.sock, "rescan"));
     sandbox.await_docs_watched();
     let kept = sandbox.catalogued_size(&inside);
-    let recorded_while_unread = sandbox.run_recorded();
-    // Readable again, a rescan reads it, and the run it completes is recorded.
-    std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(command_accepted(&sandbox.sock, "rescan"));
     let recorded_after_rescan = settles(|| sandbox.run_recorded());
     drop(daemon);
-    assert_eq!(kept, Some(5));
+    std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(
         !recorded_while_unread,
         "a run that missed a folder was recorded"
     );
-    assert!(
-        recorded_after_rescan,
-        "a clean rescan did not record its run"
+    assert_eq!(
+        kept,
+        Some(5),
+        "the rescan dropped what the unread folder held"
     );
+    assert!(recorded_after_rescan, "the rescan did not record its run");
     std::fs::remove_dir_all(&sandbox.base).ok();
 }
 

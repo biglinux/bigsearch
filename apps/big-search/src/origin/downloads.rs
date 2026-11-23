@@ -38,23 +38,26 @@ fn is_regular_file(path: &Path) -> bool {
 }
 
 fn downloads_dir() -> PathBuf {
-    downloads_dir_from(std::env::var_os("XDG_DOWNLOAD_DIR").map(PathBuf::from))
+    downloads_dir_from(
+        std::env::var_os("XDG_DOWNLOAD_DIR").map(PathBuf::from),
+        &big_search_config::config_home(),
+        &big_search_config::home_dir(),
+    )
 }
 
 /// The session's download folder when it names one, then the one
-/// `user-dirs.dirs` names, then `~/Downloads`.
-fn downloads_dir_from(session: Option<PathBuf>) -> PathBuf {
+/// `user-dirs.dirs` under `config_home` names, then `Downloads` in `home`.
+fn downloads_dir_from(session: Option<PathBuf>, config_home: &Path, home: &Path) -> PathBuf {
     if let Some(path) = session {
-        return expand_home(path);
+        return expand_home(path, home);
     }
-    let user_dirs = big_search_config::config_home().join("user-dirs.dirs");
-    if let Some(path) = parse_user_download_dir(&user_dirs) {
+    if let Some(path) = parse_user_download_dir(&config_home.join("user-dirs.dirs"), home) {
         return path;
     }
-    big_search_config::home_dir().join("Downloads")
+    home.join("Downloads")
 }
 
-fn parse_user_download_dir(path: &Path) -> Option<PathBuf> {
+fn parse_user_download_dir(path: &Path, home: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(path).ok()?;
     for line in text.lines() {
         let line = line.trim();
@@ -62,24 +65,24 @@ fn parse_user_download_dir(path: &Path) -> Option<PathBuf> {
             continue;
         };
         let value = value.trim_matches('"');
-        return Some(expand_user_dir_value(value));
+        return Some(expand_user_dir_value(value, home));
     }
     None
 }
 
-fn expand_user_dir_value(value: &str) -> PathBuf {
+fn expand_user_dir_value(value: &str, home: &Path) -> PathBuf {
     if let Some(rest) = value.strip_prefix("$HOME/") {
-        return big_search_config::home_dir().join(rest);
+        return home.join(rest);
     }
-    expand_home(PathBuf::from(value))
+    expand_home(PathBuf::from(value), home)
 }
 
-fn expand_home(path: PathBuf) -> PathBuf {
+fn expand_home(path: PathBuf, home: &Path) -> PathBuf {
     let Some(text) = path.to_str() else {
         return path;
     };
     if let Some(rest) = text.strip_prefix("~/") {
-        return big_search_config::home_dir().join(rest);
+        return home.join(rest);
     }
     path
 }
@@ -141,7 +144,6 @@ pub(crate) fn domain_from_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_env::{ENV_LOCK, EnvVarGuard};
 
     /// Only the site survives: no credential, path or query, and nothing that
     /// is not a host name or IP literal.
@@ -176,13 +178,25 @@ mod tests {
     }
 
     #[test]
-    fn downloads_default_to_home_downloads() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _home = EnvVarGuard::set("HOME", "/tmp/bs-origin-home");
-        let _config = EnvVarGuard::unset("XDG_CONFIG_HOME");
+    fn downloads_folder_by_precedence() {
+        let config = crate::test_env::scratch_dir("bs-origin-user-dirs");
+        let home = Path::new("/home/p");
         assert_eq!(
-            downloads_dir_from(None),
-            PathBuf::from("/tmp/bs-origin-home/Downloads")
+            downloads_dir_from(None, &config, home),
+            Path::new("/home/p/Downloads")
+        );
+        std::fs::write(
+            config.join("user-dirs.dirs"),
+            "XDG_DOWNLOAD_DIR=\"$HOME/Baixados\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            downloads_dir_from(None, &config, home),
+            Path::new("/home/p/Baixados")
+        );
+        assert_eq!(
+            downloads_dir_from(Some(PathBuf::from("~/Dl")), &config, home),
+            Path::new("/home/p/Dl")
         );
     }
 

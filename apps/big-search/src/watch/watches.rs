@@ -134,7 +134,7 @@ impl Watches {
     /// transactions a kill can come between. A folder listed but not
     /// catalogued is walked whole by the next start's catch-up; one catalogued
     /// but not listed would look known to it and stay unwatched. After a
-    /// failed watch it also drops the run record.
+    /// failed watch or a missed folder it also drops the run record.
     pub(super) fn persist(&mut self) -> Result<()> {
         self.dirs.persist()?;
         if self.failed.load(Ordering::Relaxed) > 0 || self.missed {
@@ -152,7 +152,8 @@ impl Watches {
     }
 
     /// Record for the next start that every folder is watched since `started`,
-    /// unless a watch failed in this run or indexing is paused.
+    /// unless a watch failed or a folder was missed in this run, or indexing is
+    /// paused.
     pub(super) fn record_run(&mut self, started: SystemTime) -> Result<()> {
         let Some(fingerprint) = self.fingerprint else {
             return Ok(());

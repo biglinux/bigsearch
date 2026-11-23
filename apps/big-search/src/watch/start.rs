@@ -31,7 +31,8 @@ pub(super) fn watch_initial_dirs(
         watched: HashSet::new(),
     };
     let watched = match dirs {
-        StartDirs::Walked(dirs) => {
+        StartDirs::Walked(dirs, unread) => {
+            watches.missed |= unread;
             let since = epoch_secs(started) - 1;
             let dirs = if dirs.is_empty() {
                 roots

@@ -72,7 +72,7 @@ fn print_unknown_choices() {
     }
 }
 
-// shape: declares a view
+// shape: declares a view: one line per effective setting.
 pub(super) fn cmd_config_show() -> Result<()> {
     let requested = settings::content_index_mode().as_str();
     let resolved = settings::resolved_content_index_mode().as_str();

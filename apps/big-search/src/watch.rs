@@ -79,8 +79,9 @@ pub struct WatchScope<'a> {
 
 /// The folders a start watches first.
 pub enum StartDirs {
-    /// What the startup walk found.
-    Walked(Vec<PathBuf>),
+    /// What the startup walk found, and whether it could not read a folder
+    /// for a reason other than permission.
+    Walked(Vec<PathBuf>, bool),
     /// The list the last run saved, each folder with its inode then, in path
     /// order, and when that run started.
     Saved(Vec<(PathBuf, u64)>, SystemTime),
@@ -642,6 +643,9 @@ impl WatchLoop<'_> {
         if outcome.deleted {
             self.content_backfill.note_deletion();
         }
+        if outcome.unread {
+            self.watches.missed = true;
+        }
         self.watches.persist()?;
         if outcome.any() {
             self.state.persist()?;
@@ -745,9 +749,10 @@ fn rebuild(
     close_index_writer(content.writer).context("close content writer after rebuild clear")?;
     state.clear();
     content::clear_content_state().context("clear content state for rebuild")?;
-    scan::reconcile_inline(writer, f, state, roots, &mut |dir| {
+    let walked = scan::reconcile_inline(writer, f, state, roots, &mut |dir| {
         watches.watch(dir);
     })?;
+    watches.missed |= walked.unread;
     // The clear above must reach disk even when the walk found nothing.
     writer.commit().context("commit rebuild")?;
     watches.persist()?;

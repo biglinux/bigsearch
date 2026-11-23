@@ -331,7 +331,7 @@ fn read_capped_line(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>) -> i
     }
 }
 
-// shape: maps fields
+// shape: maps fields: each request to the reply that answers it.
 fn dispatch(
     index: &IndexReader,
     content_index: &IndexReader,

@@ -4,6 +4,7 @@ use crate::catalogue::{self, ScanChange, State};
 use crate::index::Fields;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use std::io::ErrorKind::{NotFound, PermissionDenied};
 use std::path::{Path, PathBuf};
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
@@ -356,6 +357,9 @@ pub struct ReconcileOutcome {
     pub deleted: bool,
     /// Changed files whose content or metadata may need extracting, for the log.
     pub content_candidates: usize,
+    /// A folder the walk could not read for a reason other than permission:
+    /// what changed in it went unseen.
+    pub unread: bool,
 }
 
 impl ReconcileOutcome {
@@ -374,6 +378,7 @@ impl ReconcileOutcome {
         self.index_changed |= other.index_changed;
         self.state_changed |= other.state_changed;
         self.deleted |= other.deleted;
+        self.unread |= other.unread;
         self.content_candidates = self
             .content_candidates
             .saturating_add(other.content_candidates);
@@ -383,6 +388,8 @@ impl ReconcileOutcome {
 pub struct SyncOutcome {
     pub content_candidates: usize,
     pub visible_dirs: Vec<PathBuf>,
+    /// See [`ReconcileOutcome::unread`].
+    pub unread: bool,
 }
 
 /// Reconcile current subtree entries without blindly appending duplicate docs.
@@ -404,7 +411,15 @@ pub fn reconcile_subtree_inline(
     if scope.excluded(root, true) || (!state.contains(root) && repo_ignored(root, true)) {
         return Ok(outcome);
     }
-    for entry in walker(root).flatten() {
+    for entry in walker(root) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                outcome.unread |= unread_folder(&error)
+                    .is_some_and(|(_, kind)| !matches!(kind, NotFound | PermissionDenied));
+                continue;
+            }
+        };
         if entry.depth() == 0 {
             continue;
         }
@@ -460,6 +475,7 @@ pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncO
     Ok(SyncOutcome {
         content_candidates: outcome.content_candidates,
         visible_dirs,
+        unread: outcome.unread,
     })
 }
 
@@ -496,7 +512,7 @@ fn reconcile_roots(
         // The comparison reads the catalogue as persisted.
         state.persist()?;
         state.begin_scan()?;
-        mark_walked_entries(state, roots, on_dir)?;
+        outcome.unread = mark_walked_entries(state, roots, on_dir)?;
         // Offline removable/network sources: keep their catalogue rather than treat
         // the unmounted tree as deleted, so their files stay findable (and, later,
         // are reported as living on that device).
@@ -519,15 +535,32 @@ fn reconcile_roots(
     Ok(outcome)
 }
 
-/// Walk `roots` and mark every entry seen with its `(mtime, size)`.
+/// Walk `roots` and mark every entry seen with its `(mtime, size)`; whether a
+/// folder could not be read for a reason other than permission.
+///
+/// What a folder the walk cannot read held stays marked seen: an unreadable
+/// folder is no evidence that its files are gone.
 fn mark_walked_entries(
     state: &mut State,
     roots: &[PathBuf],
     on_dir: &mut dyn FnMut(&Path),
-) -> Result<()> {
+) -> Result<bool> {
+    let mut unread = false;
     for root in roots {
         on_dir(root);
-        for entry in walker(root).flatten() {
+        for entry in walker(root) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    if let Some((folder, kind)) = unread_folder(&error)
+                        && kind != NotFound
+                    {
+                        state.mark_seen_prefixes(&[folder.to_path_buf()])?;
+                        unread |= kind != PermissionDenied;
+                    }
+                    continue;
+                }
+            };
             if entry.depth() == 0 {
                 continue;
             }
@@ -544,7 +577,17 @@ fn mark_walked_entries(
             state.mark_seen(path, Some(catalogue::meta_pair(&md)))?;
         }
     }
-    Ok(())
+    Ok(unread)
+}
+
+/// The path a walk could not read and why; `None` for an error that is not a
+/// failed read, such as an ignore file that does not parse.
+fn unread_folder(error: &ignore::Error) -> Option<(&Path, std::io::ErrorKind)> {
+    match error {
+        ignore::Error::WithPath { path, err } => Some((path, err.io_error()?.kind())),
+        ignore::Error::WithDepth { err, .. } => unread_folder(err),
+        _ => None,
+    }
 }
 
 /// Bring the name index and `state` in line with one difference the scan found.

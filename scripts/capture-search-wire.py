@@ -29,7 +29,7 @@ DAEMON = ROOT / "target/release/big-search"
 SPELLED = "/home/p"
 
 
-# shape: declares a view
+# shape: declares a view: one request per command the client sends.
 def requests(home: str) -> list[dict]:
     doc = f"{home}/Documents/relatorio.txt"
     copy = f"{home}/Documents/relatorio-copia.txt"

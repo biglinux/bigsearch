@@ -506,7 +506,7 @@ fn startup_sync(
         exit_for_restart(&e.context("forget the saved folders"));
     }
     watch_list.clear();
-    let initial_watch_dirs = walk_at_start(
+    let (initial_watch_dirs, unread) = walk_at_start(
         index,
         content_index,
         &roots,
@@ -517,7 +517,7 @@ fn startup_sync(
     StartupSync {
         roots,
         state,
-        dirs: watch::StartDirs::Walked(initial_watch_dirs),
+        dirs: watch::StartDirs::Walked(initial_watch_dirs, unread),
         watch_list,
         started,
         fingerprint,
@@ -550,7 +550,8 @@ fn run_fingerprint(roots: &[PathBuf]) -> Option<i64> {
 }
 
 /// The startup walk: reconcile the catalogue with the disk, prune stale
-/// content and extract the first content batch. The folders it saw.
+/// content and extract the first content batch. The folders it saw, and
+/// whether one could not be read for a reason other than permission.
 fn walk_at_start(
     index: &tantivy::Index,
     content_index: &tantivy::Index,
@@ -558,7 +559,7 @@ fn walk_at_start(
     state: &mut catalogue::State,
     pending_content: &std::sync::atomic::AtomicU64,
     activity: &std::sync::atomic::AtomicU8,
-) -> Vec<PathBuf> {
+) -> (Vec<PathBuf>, bool) {
     let sync_outcome = match sync_with_retry(index, roots, state) {
         Ok(sync_outcome) => sync_outcome,
         // The index may be missing most of the catalogue: serving it silently
@@ -578,7 +579,7 @@ fn walk_at_start(
     if let Err(e) = state.persist() {
         log::warn!("save the catalogue after the first content batch: {e:#}");
     }
-    sync_outcome.visible_dirs
+    (sync_outcome.visible_dirs, sync_outcome.unread)
 }
 
 /// The saved folders and when their run started, when the record matches
