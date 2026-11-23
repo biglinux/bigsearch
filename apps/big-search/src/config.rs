@@ -96,35 +96,19 @@ pub fn config_file() -> PathBuf {
     big_search_config::path()
 }
 
-/// Query socket. Lives under the shared `biglinux/` runtime subdir as `indexd.sock`
-/// to honor the `big-indexd` microdaemon contract (clients find it by that path).
+/// Query socket: the path clients look for, so the daemon listens where they
+/// connect. `None` without a session runtime directory; a socket under `/tmp`
+/// would listen where no client looks, in a directory any local account can
+/// create first.
 pub fn socket_path() -> Option<PathBuf> {
-    Some(runtime_subdir()?.join("indexd.sock"))
+    big_indexd_client::default_socket()
 }
 
-/// Single-instance daemon lock (`…/biglinux/indexd.lock`). Held for the daemon's
+/// Single-instance daemon lock, beside the socket. Held for the daemon's
 /// lifetime so a second `daemon` invocation refuses instead of stealing the socket
 /// and colliding on the Tantivy writer lock.
 pub fn lock_path() -> Option<PathBuf> {
-    Some(runtime_subdir()?.join("indexd.lock"))
-}
-
-/// The `biglinux/` runtime subdir holding the socket + lock.
-pub fn runtime_subdir() -> Option<PathBuf> {
-    Some(runtime_dir()?.join("biglinux"))
-}
-
-/// The session's private runtime directory, or nothing.
-///
-/// No `/tmp` fallback: `big_indexd_client::default_socket` has none either, so a
-/// socket there would listen where no client looks, in a directory any local
-/// account can create first.
-fn runtime_dir() -> Option<PathBuf> {
-    // An empty or relative value is unset (XDG Base Directory spec), as the
-    // client reads it.
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
+    Some(socket_path()?.with_file_name("indexd.lock"))
 }
 
 #[cfg(test)]

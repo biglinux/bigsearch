@@ -68,8 +68,8 @@ fn apply_deadlines(stream: &UnixStream, deadline: Duration) -> Result<(), Client
 /// refuse it for.
 #[must_use]
 pub fn default_socket() -> Option<PathBuf> {
-    // An empty or relative value is unset (XDG Base Directory spec), as the
-    // daemon reads it; joining it would name a socket under the current folder.
+    // An empty or relative value is unset (XDG Base Directory spec): joining it
+    // would name a socket under the current folder. The daemon binds this path.
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|runtime| runtime.is_absolute())
