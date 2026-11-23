@@ -92,8 +92,8 @@ big-search config preset low-memory     # names-only | low-memory | balanced | c
 big-search config set extract-max-mb 16
 ```
 
-The service reads the file when it starts. `big-search-config.path`, enabled
-with the service, restarts it two seconds after the file changes; without it,
+The service reads the file when it starts. `big-search-config.path`, which the
+service starts, restarts it two seconds after the file changes; without it,
 run `systemctl --user restart big-search`.
 
 Extra exclusions go in `~/.config/big-search/ignore`, in gitignore syntax. A

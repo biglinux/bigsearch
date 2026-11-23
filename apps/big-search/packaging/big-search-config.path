@@ -8,6 +8,3 @@ ConditionUser=!@system
 [Path]
 PathChanged=%E/big-search/config.toml
 Unit=big-search-config.service
-
-[Install]
-WantedBy=default.target
