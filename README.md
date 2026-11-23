@@ -1,17 +1,8 @@
-# BigSearch
+# BigSearch (big-search)
 
-Desktop search for Linux that finds files by name and by content, keeps its
-index current as files change, and stays out of the way on old hardware.
+Find files on Linux by name and by content, kept current as they change, light on old hardware.
 
-BigSearch runs as a user service. It needs no root, watches the folders you can
-see (hidden files and anything a `.gitignore` excludes are skipped) and answers
-queries over a Unix socket. The index is [Tantivy](https://github.com/quickwit-oss/tantivy);
-the bookkeeping around it is SQLite.
-
-[Português](README.pt-BR.md)
-
-> **Status:** pre-release. The socket protocol, the configuration file and the
-> on-disk format may still change between versions.
+Pre-release: the socket protocol, the configuration file and the on-disk format may still change.
 
 ## Features
 
@@ -35,15 +26,32 @@ the bookkeeping around it is SQLite.
   by CPU load, I/O and memory pressure and whether the laptop is on battery.
   An idle daemon sleeps until a file changes.
 
-## Requirements
+BigSearch runs as a user service. It needs no root, watches the folders you can
+see (hidden files and anything a `.gitignore` excludes are skipped) and answers
+queries over a Unix socket. The index is [Tantivy](https://github.com/quickwit-oss/tantivy);
+the bookkeeping around it is SQLite.
+
+## Install
+
+On BigLinux and other systems with the BigLinux repositories:
+
+```sh
+sudo pacman -S big-search
+systemctl --user enable --now big-search.service
+```
+
+`sudo pacman -S big-docinfo` adds "Suggest a name…" to Dolphin's menu for
+documents.
+
+### Build from source
+
+Requirements:
 
 - Linux with inotify, and systemd for the user service.
 - Rust 1.98.1; with rustup, `rust-toolchain.toml` selects it.
 - SQLite 3; poppler (`pdftotext`) for PDF content and `antiword` for Word
   97-2003 documents.
 - shared-mime-info, which names a file's type from its name.
-
-## Build and install
 
 ```sh
 cargo build --release
@@ -59,7 +67,7 @@ writable data directory, `RestrictAddressFamilies=AF_UNIX` and a syscall
 filter. On Arch-based systems, `cd pkgbuild && makepkg -si` builds and
 installs the `big-search` and `big-docinfo` packages from this checkout instead.
 
-## Usage
+## Use
 
 ```sh
 big-search contract                     # file names
@@ -68,7 +76,9 @@ big-search both report -n 20            # both, without duplicates
 big-search contract --ext pdf --under ~/Documents
 
 big-search status                       # what the daemon is doing
-big-search pause | resume | rebuild
+big-search pause                        # stop indexing; searches still answer
+big-search resume
+big-search rebuild                      # read every folder again
 big-search rescan                       # changes made while the service was stopped
 big-search versions ~/notes/todo.md     # earlier versions kept of a file
 big-search origin ~/Downloads/file.zip  # where a file came from
@@ -117,6 +127,14 @@ The indexes and state live in `~/.local/share/big-search/`; the socket is
 the libraries. The settings window that edits `config.toml` belongs to
 [BigDesktop](https://github.com/biglinux/big), which takes the two
 libraries above from this repository.
+
+## Help
+
+Report a problem at
+[github.com/biglinux/bigsearch/issues](https://github.com/biglinux/bigsearch/issues);
+[CONTRIBUTING.md](CONTRIBUTING.md#reporting-a-problem) says what to include.
+`big-search --help` and `big-search config --help` list every command and
+setting.
 
 ## Contributing
 
