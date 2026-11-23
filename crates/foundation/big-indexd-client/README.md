@@ -50,8 +50,9 @@ returns as `ClientError::Daemon`. An unknown command is answered that way too.
   take longer. An answer larger than 8 MiB is refused.
 - `PersistentClient` sends a request again only when a reused connection turns
   out closed (`EPIPE`, `ECONNRESET`). Linux reports `ECONNRESET` on a Unix
-  socket only when the daemon closed it with bytes unread, so the request was
-  not taken. It drops the connection after any other failure, so a late
+  socket only when the daemon closed it with bytes unread: it stopped before
+  the end of the request line, and a request it stopped reading is never
+  carried out. It drops the connection after any other failure, so a late
   answer is never read as the next one. A daemon that stops answering costs
   one deadline.
 - A connection the daemon closes after taking a request, before answering, is
