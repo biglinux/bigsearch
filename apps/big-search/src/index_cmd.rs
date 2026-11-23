@@ -36,7 +36,7 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
 
     let t0 = Instant::now();
     let sync_outcome = scan::sync(&index, &scan_roots, &mut state)?;
-    let names = index.reader()?.searcher().num_docs();
+    let names = index::document_count(&index.reader()?)?;
     println!(
         "indexed {names} names in {:.2}s",
         t0.elapsed().as_secs_f64()
@@ -107,7 +107,7 @@ fn reconcile_plan(
         available,
         sources.all().len()
     );
-    let index_empty = index.reader()?.searcher().num_docs() == 0;
+    let index_empty = index::document_count(&index.reader()?)? == 0;
     let state = if index_empty {
         *content_index = index::recreate_content_on_disk(&config::content_index_dir())?;
         content::clear_content_state()?;
@@ -476,8 +476,9 @@ fn startup_sync(
     let fingerprint = run_fingerprint(&roots);
     let empty = index
         .reader()
-        .map(|r| r.searcher().num_docs() == 0)
-        .unwrap_or(true);
+        .ok()
+        .and_then(|reader| index::document_count(&reader).ok())
+        .is_none_or(|count| count == 0);
     let mut state = startup_name_state(empty, content_index);
     let mut watch_list =
         catalogue::State::load(&config::state_db_path(), catalogue::WATCH_NAMESPACE);
