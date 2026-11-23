@@ -62,6 +62,13 @@ struct Group {
     fallback: usize,
 }
 
+/// The document's own group: text kept, one fallback character after a `\u`.
+const GROUP_START: Group = Group {
+    skip: false,
+    title: false,
+    fallback: 1,
+};
+
 /// The text of an RTF document and its declared title, or `None` when the bytes
 /// are not RTF.
 pub(crate) fn read_rtf(bytes: &[u8]) -> Option<(String, Option<String>)> {
@@ -78,6 +85,9 @@ pub(crate) fn read_rtf(bytes: &[u8]) -> Option<(String, Option<String>)> {
                 if reader.stack.len() < MAX_GROUP_DEPTH {
                     reader.stack.push(reader.group);
                 } else {
+                    if reader.uncounted == 0 {
+                        reader.past_cap = reader.group;
+                    }
                     reader.uncounted += 1;
                 }
                 // "{\*\dest …}": a destination a reader may ignore.
@@ -89,6 +99,9 @@ pub(crate) fn read_rtf(bytes: &[u8]) -> Option<(String, Option<String>)> {
             b'}' => {
                 if reader.uncounted > 0 {
                     reader.uncounted -= 1;
+                    if reader.uncounted == 0 {
+                        reader.group = reader.past_cap;
+                    }
                 } else {
                     reader.group = reader.stack.pop().unwrap_or(reader.group);
                 }
@@ -122,6 +135,8 @@ struct RtfReader {
     group: Group,
     /// Groups opened past [`MAX_GROUP_DEPTH`] and not closed yet.
     uncounted: usize,
+    /// The group the first of them opened in, back when the last one closes.
+    past_cap: Group,
     /// Fallback characters still to drop after a `\u`.
     pending_skip: usize,
 }
@@ -132,12 +147,9 @@ impl Default for RtfReader {
             text: String::new(),
             title: String::new(),
             stack: Vec::new(),
-            group: Group {
-                skip: false,
-                title: false,
-                fallback: 1,
-            },
+            group: GROUP_START,
             uncounted: 0,
+            past_cap: GROUP_START,
             pending_skip: 0,
         }
     }
@@ -287,5 +299,16 @@ Aos onze dias, \u8220?reuni\u227?o\u8221? \endash  pauta\tab item\par
         let (text, title) = read_rtf(&rtf).expect("text");
         assert_eq!(title.as_deref(), Some("T"));
         assert_eq!(text, "deep\nafter");
+    }
+
+    /// A skipped destination opened past the cap hides only its own text.
+    #[test]
+    fn rtf_skip_past_cap_ends() {
+        let mut rtf = br"{\rtf1".to_vec();
+        rtf.extend(std::iter::repeat_n(b'{', MAX_GROUP_DEPTH - 1));
+        rtf.extend_from_slice(br"{\*\ignored hidden}visible");
+        rtf.extend(std::iter::repeat_n(b'}', MAX_GROUP_DEPTH));
+        let (text, _) = read_rtf(&rtf).expect("text");
+        assert_eq!(text, "visible");
     }
 }
