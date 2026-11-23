@@ -616,7 +616,9 @@ fn add_source_to(lines: &mut Vec<String>, source: &SourceEntry, home: &Path) {
 }
 
 fn lists_no_source(lines: &[String]) -> bool {
-    lines.iter().all(|line| header(line) != Some("[[source]]"))
+    lines
+        .iter()
+        .all(|line| header(line).as_deref() != Some("[[source]]"))
 }
 
 /// Take a folder out of the catalogue. A folder the file does not list is
@@ -831,7 +833,10 @@ fn write_atomically(
 
 /// Set keys inside `table`, adding the table itself when the file has none.
 fn set_in_table(lines: &mut Vec<String>, table: &str, values: &[(&str, &str)]) {
-    let start = match lines.iter().position(|line| header(line) == Some(table)) {
+    let start = match lines
+        .iter()
+        .position(|line| header(line).as_deref() == Some(table))
+    {
         Some(index) => index,
         None => {
             if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
@@ -860,9 +865,11 @@ fn next_table(lines: &[String], start: usize) -> usize {
 
 /// The `[table]` or `[[array]]` header on this line, without its trailing
 /// comment, or `None` when the line is not a header.
-fn header(line: &str) -> Option<&str> {
+/// A table header with the spaces TOML allows inside its brackets removed, so
+/// `[[ source ]]` reads as `[[source]]`.
+fn header(line: &str) -> Option<String> {
     let code = without_comment(line).trim();
-    (code.starts_with('[') && code.ends_with(']')).then_some(code)
+    (code.starts_with('[') && code.ends_with(']')).then(|| code.split_whitespace().collect())
 }
 
 /// The line up to a `#` comment that is not inside a string.
@@ -923,7 +930,7 @@ fn find_source(lines: &[String], path: &Path) -> Option<std::ops::Range<usize>> 
     let wanted = path.to_string_lossy();
     let mut index = 0;
     while index < lines.len() {
-        if header(&lines[index]) == Some("[[source]]") {
+        if header(&lines[index]).as_deref() == Some("[[source]]") {
             let end = next_table(lines, index);
             let block = lines[index + 1..end].join("\n").parse::<toml::Table>();
             let is_wanted = block

@@ -69,6 +69,26 @@ fn folder_removal_drops_whole_block() {
 }
 
 #[test]
+fn spaced_source_header_recognised() {
+    let mut lines: Vec<String> = "[[ source ]]\npath = \"/mnt/disk\"\n"
+        .lines()
+        .map(String::from)
+        .collect();
+    assert!(find_source(&lines, Path::new("/mnt/disk")).is_some());
+    add_source_to(
+        &mut lines,
+        &SourceEntry::new(PathBuf::from("/mnt/new")),
+        Path::new("/home/p"),
+    );
+    let sources = read_text(&lines.join("\n")).sources;
+    let paths: Vec<_> = sources.iter().map(|source| source.path.clone()).collect();
+    assert_eq!(
+        paths,
+        [PathBuf::from("/mnt/disk"), PathBuf::from("/mnt/new")]
+    );
+}
+
+#[test]
 fn implicit_home_removal_refused() {
     let mut lines: Vec<String> = "[defaults]\ncontent = true\n"
         .lines()
