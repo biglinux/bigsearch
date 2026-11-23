@@ -304,8 +304,7 @@ fn cgroup_limit_bytes(text: &str) -> Option<u64> {
 
 /// Adaptive per-file extracted text cap.
 pub fn extract_max_bytes() -> usize {
-    let configured_mb = env_u64("BIG_SEARCH_EXTRACT_MAX_MB")
-        .unwrap_or_else(|| read_config().defaults.extract_max_mb);
+    let configured_mb = configured_extract_max_mb();
     let mb = if configured_mb > 0 {
         configured_mb
     } else {
@@ -315,13 +314,17 @@ pub fn extract_max_bytes() -> usize {
 }
 
 pub fn extract_max_mb_label() -> String {
-    let configured_mb = env_u64("BIG_SEARCH_EXTRACT_MAX_MB")
-        .unwrap_or_else(|| read_config().defaults.extract_max_mb);
+    let configured_mb = configured_extract_max_mb();
     if configured_mb > 0 {
         format!("{configured_mb} MiB")
     } else {
         format!("auto ({} MiB)", adaptive_extract_max_mb())
     }
+}
+
+/// The extraction cap asked for, in MiB; 0 asks for the adaptive one.
+fn configured_extract_max_mb() -> u64 {
+    env_u64("BIG_SEARCH_EXTRACT_MAX_MB").unwrap_or_else(|| read_config().defaults.extract_max_mb)
 }
 
 fn adaptive_extract_max_mb() -> u64 {
