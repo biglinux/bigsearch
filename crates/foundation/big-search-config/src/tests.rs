@@ -411,6 +411,21 @@ fn concurrent_writers_keep_both() {
 
 /// A file written with Windows line endings keeps them.
 #[test]
+fn quoted_header_edit_refused() {
+    let original = "[\"defaults\"]\ncontent = true\n";
+    let (dir, file) = scratch_file("quoted", original);
+    let refused = edit_file(&file, |lines| {
+        set_in_table(lines, "[defaults]", &[("content", "false")]);
+        Ok(())
+    })
+    .expect_err("a second [defaults] table is invalid TOML");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(text, original);
+}
+
+#[test]
 fn crlf_file_stays_crlf() {
     let (dir, file) = scratch_file("crlf", "# mine\r\n[defaults]\r\ncontent = true\r\n");
     edit_file(&file, |lines| {

@@ -768,11 +768,13 @@ fn edit_file(
     let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     change(&mut lines)?;
-    write_atomically(
-        &path,
-        &format!("{}{ending}", lines.join(ending)),
-        permissions,
-    )
+    let edited = format!("{}{ending}", lines.join(ending));
+    // A header spelled in a way the line editor does not read (a quoted key)
+    // could get a second table; the file is never left unreadable.
+    if let Err(error) = parse(&edited) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, error));
+    }
+    write_atomically(&path, &edited, permissions)
 }
 
 /// The lock beside the file a link points at, so two names for one config
@@ -864,9 +866,8 @@ fn next_table(lines: &[String], start: usize) -> usize {
 }
 
 /// The `[table]` or `[[array]]` header on this line, without its trailing
-/// comment, or `None` when the line is not a header.
-/// A table header with the spaces TOML allows inside its brackets removed, so
-/// `[[ source ]]` reads as `[[source]]`.
+/// comment and the spaces TOML allows inside the brackets, so `[[ source ]]`
+/// reads as `[[source]]`. `None` when the line is not a header.
 fn header(line: &str) -> Option<String> {
     let code = without_comment(line).trim();
     (code.starts_with('[') && code.ends_with(']')).then(|| code.split_whitespace().collect())
