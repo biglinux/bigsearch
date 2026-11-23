@@ -28,11 +28,7 @@ const USAGE: &str = "usage: big-docinfo [--json | --name] FILE | big-docinfo ren
 /// Longest file name most Linux file systems accept, in bytes.
 const NAME_MAX: usize = 255;
 
-/// The catalogs: `/usr/share/locale` unless the build names another place.
-const LOCALE_DIR: &str = match option_env!("LOCALEDIR") {
-    Some(dir) => dir,
-    None => "/usr/share/locale",
-};
+const LOCALE_DIR: &str = "/usr/share/locale";
 
 fn main() -> ExitCode {
     // SAFETY: called once, before any thread exists that could read the locale.
