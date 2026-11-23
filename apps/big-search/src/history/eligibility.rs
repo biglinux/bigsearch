@@ -108,34 +108,6 @@ pub(super) fn git_work_tree(path: &Path) -> Option<&Path> {
     None
 }
 
-/// Whether git ignores `path` inside `work_tree`.
-///
-/// Git's precedence: the `.gitignore` nearest the file first, up to the top of
-/// the work tree, then `.git/info/exclude`, then the person's global excludes
-/// file. The first file with an opinion decides, `!` re-includes included.
-pub(super) fn gitignored(work_tree: &Path, path: &Path) -> bool {
-    use ignore::gitignore::{Gitignore, GitignoreBuilder};
-    for dir in path.ancestors().skip(1) {
-        let (rules, _) = Gitignore::new(dir.join(".gitignore"));
-        match rules.matched_path_or_any_parents(path, false) {
-            ignore::Match::Ignore(_) => return true,
-            ignore::Match::Whitelist(_) => return false,
-            ignore::Match::None => {}
-        }
-        if dir == work_tree {
-            break;
-        }
-    }
-    let mut builder = GitignoreBuilder::new(work_tree);
-    if let Some(global) = ignore::gitignore::gitconfig_excludes_path() {
-        builder.add(global);
-    }
-    builder.add(work_tree.join(".git/info/exclude"));
-    builder
-        .build()
-        .is_ok_and(|rules| rules.matched_path_or_any_parents(path, false).is_ignore())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,7 +135,7 @@ mod tests {
         );
         assert_eq!(git_work_tree(&root.join("loose.md")), None);
 
-        let ignored = |relative: &str| gitignored(&repo, &repo.join(relative));
+        let ignored = |relative: &str| crate::scan::repo_ignored(&repo.join(relative), false);
         assert!(ignored("build/report.md"));
         assert!(ignored("docs/drafts/log.txt"));
         assert!(ignored("private.md"));

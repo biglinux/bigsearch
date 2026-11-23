@@ -48,7 +48,7 @@ pub use eligibility::{eligible_metadata, may_be_a_document};
 pub use worker::{HistoryEvent, Pending, run_worker};
 
 use disk::disk_capacity;
-use eligibility::{eligible_name, git_work_tree, gitignored};
+use eligibility::{eligible_name, git_work_tree};
 use store::{
     file_id_for_path, follow_rename, is_live_session, now_secs, object_name, open_store,
     prepare_store,
@@ -454,10 +454,8 @@ impl History {
         if !self.skip_git_repositories && !self.respect_gitignore {
             return false;
         }
-        let Some(work_tree) = git_work_tree(path) else {
-            return false;
-        };
-        self.skip_git_repositories || gitignored(work_tree, path)
+        git_work_tree(path).is_some()
+            && (self.skip_git_repositories || crate::scan::repo_ignored(path, false))
     }
 
     /// Call the newest kept version what it is about to become: the way back.

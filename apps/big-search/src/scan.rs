@@ -181,9 +181,12 @@ impl Scope {
     }
 }
 
-/// Whether a `.gitignore` of the repository holding `path`, or the global git
-/// ignore file, excludes it, as the walker would have decided had it come to
-/// `path` from the repository's root.
+/// Whether git ignores `path` in the repository holding it, as the walker would
+/// have decided had it come to `path` from the repository's root.
+///
+/// Git's precedence: the `.gitignore` nearest the path first, up to the root of
+/// the work tree, then `.git/info/exclude`, then the global excludes file. The
+/// first with an opinion decides, `!` re-includes included.
 ///
 /// The walker never tests the root it is given, so a directory its repository
 /// ignores, created again after the scan (`cargo fuzz` recreating
@@ -191,22 +194,22 @@ impl Scope {
 /// paths the catalogue does not hold yet, so an event on a known file costs
 /// nothing more.
 pub fn repo_ignored(path: &Path, is_dir: bool) -> bool {
-    // Nearest first: a deeper `.gitignore` overrides a shallower one.
+    use ignore::gitignore::{Gitignore, GitignoreBuilder};
     let mut rules = Vec::new();
     for dir in path.ancestors().skip(1) {
         let file = dir.join(".gitignore");
         if file.is_file() {
-            rules.push(ignore::gitignore::Gitignore::new(&file).0);
+            rules.push(Gitignore::new(&file).0);
         }
         // Outside a repository its ignore files do not apply (the walker's
-        // `require_git`). The global git ignore file, lowest in precedence,
-        // applies relative to the repository.
-        if dir.join(".git").exists() {
-            rules.push(
-                ignore::gitignore::GitignoreBuilder::new(dir)
-                    .build_global()
-                    .0,
-            );
+        // `require_git`). A linked worktree or a submodule has a `.git` file.
+        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+            let mut exclude = GitignoreBuilder::new(dir);
+            exclude.add(dir.join(".git/info/exclude"));
+            if let Ok(exclude) = exclude.build() {
+                rules.push(exclude);
+            }
+            rules.push(GitignoreBuilder::new(dir).build_global().0);
             return rules
                 .iter()
                 .map(|rules| rules.matched_path_or_any_parents(path, is_dir))
