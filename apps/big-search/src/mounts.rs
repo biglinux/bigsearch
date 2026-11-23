@@ -28,7 +28,8 @@ fn innermost(table: &str, path: &Path) -> Option<Mount> {
 }
 
 fn innermost_entry(table: &str, path: &Path) -> Option<(PathBuf, Mount)> {
-    let mut best: Option<(PathBuf, Mount)> = None;
+    // The later of two mounts at one depth is the one on top.
+    let mut best: Option<(usize, PathBuf, Mount)> = None;
     for line in table.lines() {
         let Some((point, mount)) = parse_line(line) else {
             continue;
@@ -37,14 +38,11 @@ fn innermost_entry(table: &str, path: &Path) -> Option<(PathBuf, Mount)> {
             continue;
         }
         let depth = point.components().count();
-        if best
-            .as_ref()
-            .is_none_or(|(deepest, _)| depth >= deepest.components().count())
-        {
-            best = Some((point, mount));
+        if best.as_ref().is_none_or(|(deepest, _, _)| depth >= *deepest) {
+            best = Some((depth, point, mount));
         }
     }
-    best
+    best.map(|(_, point, mount)| (point, mount))
 }
 
 /// Whether the tree at `root` may change where this machine does not see it,
