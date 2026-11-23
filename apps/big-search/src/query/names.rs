@@ -258,62 +258,43 @@ pub(super) fn filter_clauses(
     if let Some(dir) = filter.under.as_deref().map(|d| d.trim_end_matches('/'))
         && !dir.is_empty()
     {
-        clauses.push((
-            Occur::Must,
-            Box::new(TermQuery::new(
-                Term::from_field_text(f.dir, dir),
-                IndexRecordOption::Basic,
-            )),
-        ));
+        clauses.push((Occur::Must, term(f.dir, dir)));
     }
     if !filter.ext.is_empty() {
-        let any_ext: Vec<(Occur, Box<dyn Query>)> = filter
+        let exts = filter
             .ext
             .iter()
-            .map(|ext| {
-                let ext = ext.trim_start_matches('.').to_lowercase();
-                (
-                    Occur::Should,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(f.ext, &ext),
-                        IndexRecordOption::Basic,
-                    )) as Box<dyn Query>,
-                )
-            })
-            .collect();
-        clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_ext))));
+            .map(|ext| ext.trim_start_matches('.').to_lowercase());
+        clauses.push((Occur::Must, any_of(f.ext, exts)));
     }
     // A type or a `major/*` group: the document holds both as terms.
     if !filter.mime.is_empty() {
-        let any_mime: Vec<(Occur, Box<dyn Query>)> = filter
-            .mime
-            .iter()
-            .map(|mime| {
-                (
-                    Occur::Should,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(f.mime, mime),
-                        IndexRecordOption::Basic,
-                    )) as Box<dyn Query>,
-                )
-            })
-            .collect();
-        clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_mime))));
+        clauses.push((Occur::Must, any_of(f.mime, filter.mime.iter().cloned())));
     }
     if let Some(kind) = filter.kind {
         let occur = match kind {
             EntryKind::Folder => Occur::Must,
             EntryKind::File => Occur::MustNot,
         };
-        clauses.push((
-            occur,
-            Box::new(TermQuery::new(
-                Term::from_field_text(f.mime, crate::mime::DIRECTORY),
-                IndexRecordOption::Basic,
-            )),
-        ));
+        clauses.push((occur, term(f.mime, crate::mime::DIRECTORY)));
     }
     clauses
+}
+
+/// Documents whose `field` holds `text` as one term.
+fn term(field: tantivy::schema::Field, text: &str) -> Box<dyn Query> {
+    Box::new(TermQuery::new(
+        Term::from_field_text(field, text),
+        IndexRecordOption::Basic,
+    ))
+}
+
+/// Documents whose `field` holds any of `texts`.
+fn any_of(field: tantivy::schema::Field, texts: impl Iterator<Item = String>) -> Box<dyn Query> {
+    let any: Vec<(Occur, Box<dyn Query>)> = texts
+        .map(|text| (Occur::Should, term(field, &text)))
+        .collect();
+    Box::new(BooleanQuery::new(any))
 }
 
 /// The exact media type a name document stores; empty for none.

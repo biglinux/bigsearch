@@ -44,6 +44,29 @@ pub struct QueryIndexes<'a> {
     pub catalogue: &'a crate::catalogue::CatalogueReader,
 }
 
+/// One page of the catalogue in `order`, its exact total and the page size.
+/// The page is what gets `stat`ed, so it stays under the same ceiling as the
+/// candidates of the other modes; the client pages past it.
+fn catalogue_page(
+    indexes: &QueryIndexes<'_>,
+    filter: &Filter,
+    order: ListOrder,
+    page: &Page,
+) -> Result<(Vec<Hit>, usize, usize)> {
+    let limit = page.limit.min(CANDIDATE_CEILING);
+    let (total, paths) = indexes.catalogue.list(filter, order, page.offset, limit)?;
+    let hits = paths
+        .into_iter()
+        .map(|path| Hit {
+            name: file_name(&path),
+            source: crate::settings::source_name(Path::new(&path)),
+            path,
+            ..Default::default()
+        })
+        .collect();
+    Ok((hits, total, limit))
+}
+
 /// Run a full query: base search → cheap path filters → `stat`-based date/size
 /// filters → page → metadata enrichment. Everything the GUI would otherwise do
 /// (and leak over) happens here, server-side and bounded.
@@ -83,20 +106,7 @@ pub fn run_query(
         && filter.mime.is_empty()
         && filter.kind.is_none()
     {
-        // The page is what gets `stat`ed, so it stays under the same ceiling as
-        // the candidates of the other modes; the client pages past it.
-        let limit = page.limit.min(CANDIDATE_CEILING);
-        let (total, paths) = indexes.catalogue.list(filter, order, page.offset, limit)?;
-        let hits: Vec<Hit> = paths
-            .into_iter()
-            .map(|path| Hit {
-                name: file_name(&path),
-                source: crate::settings::source_name(Path::new(&path)),
-                path,
-                ..Default::default()
-            })
-            .collect();
-        (hits, total, limit)
+        catalogue_page(&indexes, filter, order, page)?
     } else {
         let (kept, total) = ranked(&indexes, q, mode, filter, page, &names, &name_fields)?;
         let hits = kept
