@@ -25,8 +25,7 @@ cargo test --workspace --all-features
 The integration tests start real daemons in temporary directories; they need
 no running session and touch nothing under your home.
 
-Three files at the root hold what a review already accepted, so a change that
-goes past them has to say why:
+Three files at the root hold limits a change may not pass without saying why:
 
 - `deny.toml`: `cargo deny check` (advisories, licenses, sources).
 - `approved-crates.txt`: every crate name `Cargo.lock` may hold. A new name is

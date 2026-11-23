@@ -197,7 +197,6 @@ pub struct Filter {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
-    /// A folder.
     Folder,
     /// Anything that is not a folder.
     File,
@@ -352,7 +351,6 @@ pub struct ReindexRequest {
     pub path: String,
 }
 
-/// The fields of [`RequestBody::Query`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryRequest {
     pub q: String,
@@ -375,13 +373,11 @@ fn default_mode() -> String {
     "name".to_string()
 }
 
-/// The fields of [`RequestBody::Origin`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OriginRequest {
     pub path: String,
 }
 
-/// The fields of [`RequestBody::RegisterCopy`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterCopyRequest {
     pub src: String,
@@ -390,7 +386,6 @@ pub struct RegisterCopyRequest {
     pub app_id: Option<String>,
 }
 
-/// The fields of [`RequestBody::RegisterMove`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterMoveRequest {
     pub src: String,
@@ -399,7 +394,6 @@ pub struct RegisterMoveRequest {
     pub app_id: Option<String>,
 }
 
-/// The fields of [`RequestBody::RegisterCreated`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterCreatedRequest {
     pub path: String,
@@ -407,7 +401,6 @@ pub struct RegisterCreatedRequest {
     pub app_id: Option<String>,
 }
 
-/// The fields of [`RequestBody::RegisterDerived`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterDerivedRequest {
     pub src: String,
@@ -423,7 +416,6 @@ pub struct RegisterDerivedRequest {
 pub enum Reply {
     /// The answer to [`RequestBody::Query`].
     Query {
-        /// Protocol version.
         v: u32,
         /// The page of results.
         #[serde(flatten)]
@@ -432,7 +424,6 @@ pub enum Reply {
     /// The answer to [`RequestBody::Status`]; [`Status`] says what each field
     /// holds.
     Status {
-        /// Protocol version.
         v: u32,
         /// Entries in the catalogue.
         indexed: u64,
@@ -462,34 +453,29 @@ pub enum Reply {
     },
     /// The answer to [`RequestBody::Origin`].
     Origin {
-        /// Protocol version.
         v: u32,
         /// The file's origin; `None` when none is recorded.
         origin: Option<OriginProvenance>,
     },
     /// A command that returns nothing was carried out.
     Ok {
-        /// Protocol version.
         v: u32,
     },
     /// The daemon refused the request; the client returns
     /// [`ClientError::Daemon`].
     Error {
-        /// Protocol version.
         v: u32,
         /// Why, in the daemon's words.
         message: String,
     },
     /// The answer to [`RequestBody::Sources`].
     Sources {
-        /// Protocol version.
         v: u32,
         /// Every catalogued directory.
         roots: Vec<IndexedRoot>,
     },
     /// The answer to [`RequestBody::Versions`].
     Versions {
-        /// Protocol version.
         v: u32,
         /// The versions kept, newest first.
         versions: Vec<FileVersion>,

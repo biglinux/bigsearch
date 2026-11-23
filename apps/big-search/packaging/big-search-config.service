@@ -1,6 +1,5 @@
 # Started by big-search-config.path. The pause gathers the writes of one change
-# (a settings window may save several keys) into one restart; a trigger while
-# this runs joins the running job.
+# (a settings window may save several keys) into one restart.
 [Unit]
 Description=Restart big-search to apply its configuration
 Documentation=https://github.com/biglinux/bigsearch

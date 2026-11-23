@@ -23,9 +23,9 @@ pub const NGRAM: &str = "name_nfkc";
 /// character alone too, word-splitting otherwise, folded like names
 /// ([`ScriptFold`] then ASCII folding). Renamed the same way, and when
 /// extraction changes the text it is handed, so the content index rebuilds
-/// and every file is read again. A name is never reused (earlier:
-/// `body_folded`, `body_nfkc`, `body_text`, `body_words`): an index left by an
-/// older build would match it.
+/// and every file is read again. Names already used, never to
+/// be used again since an index left by an older build would match them:
+/// `body_folded`, `body_nfkc`, `body_text`, `body_words`.
 pub const BODY: &str = "body_readable";
 /// The analyzer content queries go through: [`BODY`] without the single
 /// characters of a CJK run (see [`CjkFriendlyTokenizer`]).
