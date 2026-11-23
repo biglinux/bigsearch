@@ -96,21 +96,23 @@ impl MountTable {
         })
     }
 
-    /// The mount points now, sorted. Reading through this handle is also what
-    /// clears the change the kernel flagged on it.
+    /// The mounts now, as mount point and mount id, sorted. Reading through
+    /// this handle is also what clears the change the kernel flagged on it.
     ///
     /// # Errors
     ///
     /// The table cannot be read.
-    pub fn points(&mut self) -> std::io::Result<Vec<PathBuf>> {
+    pub fn points(&mut self) -> std::io::Result<Vec<(PathBuf, u64)>> {
         use std::io::{Read, Seek};
         let mut table = String::new();
         self.file.rewind()?;
         self.file.read_to_string(&mut table)?;
-        let mut points: Vec<PathBuf> = table
+        let mut points: Vec<(PathBuf, u64)> = table
             .lines()
-            .filter_map(parse_line)
-            .map(|(point, _)| point)
+            .filter_map(|line| {
+                let id = line.split(' ').next()?.parse().ok()?;
+                Some((parse_line(line)?.0, id))
+            })
             .collect();
         points.sort_unstable();
         Ok(points)

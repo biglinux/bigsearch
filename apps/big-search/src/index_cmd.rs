@@ -294,8 +294,17 @@ pub(super) fn cmd_daemon() -> Result<()> {
     // alike: a source that comes between two readings would be in neither.
     let available = settings::available_sources();
     let started: Vec<PathBuf> = available.iter().map(|s| s.path.clone()).collect();
+    // The mount baseline is read before the walk starts: a disk mounted during
+    // the walk differs from it and starts a rescan.
+    let mounts = mounts::MountTable::open().and_then(|mut table| {
+        let points = table.points()?;
+        Ok((table, points))
+    });
     spawn_watcher(&index, &content_index, &control, rx, &history, available)?;
-    spawn_mount_watch(control.commands.clone(), started);
+    match mounts {
+        Ok((table, points)) => spawn_mount_watch(control.commands.clone(), started, table, points),
+        Err(e) => log::warn!("mounts are not followed: {e}"),
+    }
 
     let (name_reader, content_reader) = open_query_readers()?;
     ipc::serve(
@@ -319,6 +328,8 @@ const EXIT_RESTART: i32 = 75;
 fn spawn_mount_watch(
     commands: std::sync::mpsc::Sender<watch::WatchMessage>,
     started: Vec<PathBuf>,
+    mut table: mounts::MountTable,
+    mut before: Vec<(PathBuf, u64)>,
 ) {
     let available = || -> Vec<PathBuf> {
         settings::available_sources()
@@ -329,23 +340,9 @@ fn spawn_mount_watch(
     let spawned = std::thread::Builder::new()
         .name("mounts".into())
         .spawn(move || {
-            let mut table = match mounts::MountTable::open() {
-                Ok(table) => table,
-                Err(e) => {
-                    log::warn!("mounts are not followed: {e}");
-                    return;
-                }
-            };
-            let mut before = match table.points() {
-                Ok(points) => points,
-                Err(e) => {
-                    log::warn!("mounts are not followed: {e}");
-                    return;
-                }
-            };
             let mut now = before.clone();
-            // Checked before the first wait too: a source that came while the
-            // table was opened raises no later event.
+            // Checked before the first wait too: a source that came after the
+            // sources were read raises no later event.
             loop {
                 if available() != started {
                     log::info!("a source came or went; restarting to follow it");
@@ -378,12 +375,13 @@ fn spawn_mount_watch(
     }
 }
 
-/// Whether a mount point in only one of two sorted tables lies inside a root.
-fn mounted_inside(before: &[PathBuf], now: &[PathBuf], roots: &[PathBuf]) -> bool {
-    let only_in = |a: &[PathBuf], b: &[PathBuf]| {
+/// Whether a mount in only one of two sorted tables lies inside a root. The
+/// mount id tells apart a disk mounted over another at the same point.
+fn mounted_inside(before: &[(PathBuf, u64)], now: &[(PathBuf, u64)], roots: &[PathBuf]) -> bool {
+    let only_in = |a: &[(PathBuf, u64)], b: &[(PathBuf, u64)]| {
         a.iter()
-            .filter(|point| b.binary_search(point).is_err())
-            .any(|point| roots.iter().any(|root| point.starts_with(root)))
+            .filter(|mount| b.binary_search(mount).is_err())
+            .any(|(point, _)| roots.iter().any(|root| point.starts_with(root)))
     };
     only_in(now, before) || only_in(before, now)
 }
@@ -593,18 +591,15 @@ fn startup_name_state(empty: bool, content_index: &tantivy::Index) -> catalogue:
     // recreates the name index) must not re-extract every document,
     // hours on a slow disk. Rows of files gone by then are pruned after
     // the walk.
+    if let Err(e) = ensure_content_state_matches_index(content_index) {
+        log::warn!("check content index state: {e:#}");
+    }
     if empty {
-        if let Err(e) = ensure_content_state_matches_index(content_index) {
-            log::warn!("check content index state: {e:#}");
-        }
         catalogue::State::empty(
             &crate::config::state_db_path(),
             crate::catalogue::NAME_NAMESPACE,
         )
     } else {
-        if let Err(e) = ensure_content_state_matches_index(content_index) {
-            log::warn!("check content index state: {e:#}");
-        }
         catalogue::State::load(
             &crate::config::state_db_path(),
             crate::catalogue::NAME_NAMESPACE,
@@ -767,4 +762,27 @@ fn recover_inflated_index(index: &mut tantivy::Index) -> Result<()> {
     cached_state.clear();
     cached_state.persist()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mounted_inside;
+    use std::path::PathBuf;
+
+    #[test]
+    fn stacked_mount_inside_source() {
+        let roots = [PathBuf::from("/home/p")];
+        let disk = (PathBuf::from("/home/p/disk"), 40);
+        let elsewhere = (PathBuf::from("/mnt/other"), 41);
+        let before = vec![(PathBuf::from("/"), 1), disk.clone()];
+        let mut stacked = vec![before[0].clone(), disk, (PathBuf::from("/home/p/disk"), 42)];
+        stacked.sort_unstable();
+        assert!(mounted_inside(&before, &stacked, &roots));
+        assert!(mounted_inside(&stacked, &before, &roots));
+        assert!(!mounted_inside(&before, &before, &roots));
+        let mut outside = before.clone();
+        outside.push(elsewhere);
+        outside.sort_unstable();
+        assert!(!mounted_inside(&before, &outside, &roots));
+    }
 }
