@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::edit::*;
 
 /// The lines of the `[[source]]` block for `path`, if the file has one.
 fn find_source(lines: &[String], path: &Path) -> Option<std::ops::Range<usize>> {
-    source_blocks(lines)
-        .ok()?
-        .into_iter()
-        .find_map(|(listed, block)| (listed.as_deref() == Some(path)).then_some(block))
+    source_blocks(lines).ok()?.into_iter().find_map(|block| {
+        block
+            .is_folder(path)
+            .then(|| block.body.start - 1..block.whole.end)
+    })
 }
 
 /// A machine nobody has configured shows the recommended amount of work.
@@ -128,9 +130,10 @@ fn edits_follow_parsed_folders() {
         sources.into_iter().map(|source| source.path).collect()
     };
 
-    let mut quoted = lines_of("[[\"source\"]]\npath = \"/mnt/disk/\"\n");
+    let mut quoted =
+        lines_of("[[\"source\"]]\npath = \"/mnt/disk/\"\n\n[[source]]\npath = \"/home/p\"\n");
     remove_source_from(&mut quoted, Path::new("/mnt/disk"), home).unwrap();
-    assert!(folders(&quoted).is_empty(), "{quoted:?}");
+    assert_eq!(folders(&quoted), [PathBuf::from("/home/p")]);
 
     let other = "[[\"sour ce\"]]\npath = \"/home/p\"\nkeep = 1\n";
     let mut lines = lines_of(other);
@@ -157,21 +160,82 @@ fn edits_follow_parsed_folders() {
     let refused = set_content_in(&mut lines_of(at_value), Path::new("/mnt/disk"), home, false);
     assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidData);
 
-    let twice =
-        "[[source]]\npath = \"/mnt/disk\"\n\n[[source]]\npath = \"/mnt/disk/\"\ncontent = true\n";
+    let twice = "[[source]]\npath = \"/mnt/disk\"\n\n[[source]]\npath = \"/mnt/disk/\"\ncontent = true\n\n[[source]]\npath = \"/home/p\"\n";
     let mut lines = lines_of(twice);
     assert!(set_content_in(&mut lines, Path::new("/mnt/disk"), home, false).unwrap());
     let sources = read_text(&lines.join("\n")).sources;
-    assert!(
-        sources.iter().all(|source| source.content == Some(false)),
-        "{lines:?}"
-    );
+    let disk: Vec<_> = sources
+        .iter()
+        .filter(|source| source.path == Path::new("/mnt/disk"))
+        .map(|source| source.content)
+        .collect();
+    assert_eq!(disk, [Some(false), Some(false)], "{lines:?}");
     remove_source_from(&mut lines, Path::new("/mnt/disk"), home).unwrap();
-    assert!(folders(&lines).is_empty(), "{lines:?}");
+    assert_eq!(folders(&lines), [PathBuf::from("/home/p")]);
 
-    let mut marked = lines_of("\u{feff}[[source]]\npath = \"/mnt/disk\"\n");
+    let mut marked =
+        lines_of("\u{feff}[[source]]\npath = \"/mnt/disk\"\n[[source]]\npath = \"/home/p\"\n");
     remove_source_from(&mut marked, Path::new("/mnt/disk"), home).unwrap();
-    assert!(folders(&marked).is_empty(), "{marked:?}");
+    assert_eq!(folders(&marked), [PathBuf::from("/home/p")]);
+
+    let mut not_a_number = lines_of("[[source]]\npath = \"/mnt/disk\"\n\n[extra]\nratio = nan\n");
+    add_source_to(&mut not_a_number, &SourceEntry::new("/mnt/new"), home).unwrap();
+    assert_eq!(
+        folders(&not_a_number),
+        [PathBuf::from("/mnt/disk"), PathBuf::from("/mnt/new")]
+    );
+}
+
+#[test]
+fn unknown_choices_named() {
+    let text = "[defaults]\ncontent_index_mode = \"freq\"\nsymlink_policy = \"local-exact\"\n\n[[source]]\npath = \"/mnt/disk\"\nsymlink_policy = \"everywhere\"\n";
+    assert_eq!(
+        unknown_choices(text),
+        [
+            "content_index_mode = \"freq\"",
+            "symlink_policy = \"everywhere\""
+        ]
+    );
+    assert!(unknown_choices("[defaults]\ncontent_index_mode = \"basic\"\n").is_empty());
+}
+
+#[test]
+fn last_folder_kept() {
+    let only = "[[source]]\npath = \"/mnt/disk\"\n";
+    let mut lines: Vec<String> = only.lines().map(String::from).collect();
+    let refused = remove_source_from(&mut lines, Path::new("/mnt/disk"), Path::new("/home/p"));
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(lines, ["[[source]]", "path = \"/mnt/disk\""]);
+}
+
+/// Comments right above a header belong to its table: removing a folder
+/// takes its own and leaves the next table's.
+#[test]
+fn removal_keeps_neighbor_comments() {
+    let text = "[[source]]\npath = \"/home/p\"\n\n# external disk\n[[source]]\npath = \"/mnt/disk\"\ncontent = false\n\n# where files came from\n[origin]\nenabled = true\n";
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    remove_source_from(&mut lines, Path::new("/mnt/disk"), Path::new("/home/p")).unwrap();
+    assert_eq!(
+        lines.join("\n"),
+        "[[source]]\npath = \"/home/p\"\n\n# where files came from\n[origin]\nenabled = true"
+    );
+}
+
+#[test]
+fn mixed_line_endings_kept() {
+    let original = "[origin]\r\nnote = \"\"\"a\nb\"\"\"\n[[source]]\npath = \"/mnt/disk\"\n";
+    let (dir, file) = scratch_file("mixed", original);
+    edit_file(&file, |lines| {
+        add_source_to(lines, &SourceEntry::new("/mnt/new"), Path::new("/home/p"))
+    })
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        text.starts_with("[origin]\r\nnote = \"\"\"a\nb\"\"\"\n"),
+        "{text:?}"
+    );
+    assert_eq!(read_text(&text).sources.len(), 2);
 }
 
 #[test]
@@ -213,7 +277,7 @@ fn one_folder_stops_being_read_inside() {
 /// A file that is not TOML at all keeps the search running, with nothing
 /// recorded about the person.
 #[test]
-fn a_broken_file_turns_privacy_features_off() {
+fn broken_file_disables_privacy() {
     let parsed = read_text("this is not = = toml [[[");
     assert!(parsed.sources.is_empty());
     assert_eq!(parsed.defaults, Defaults::default());
@@ -224,7 +288,7 @@ fn a_broken_file_turns_privacy_features_off() {
 
 /// One bad value loses its own table, not the rest of the file.
 #[test]
-fn a_bad_value_keeps_the_valid_tables() {
+fn bad_value_keeps_valid_tables() {
     let text = "[defaults]\ncontent = false\n\n[origin]\nenabled = true\n\n\
                 [history]\nkeep_days = \"30\"\n\n[[source]]\npath = \"/mnt/data\"\n";
     assert!(parse(text).is_err());

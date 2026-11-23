@@ -436,6 +436,9 @@ fn read_config_uncached() -> ConfigFile {
                     "config.toml: {error}; keeping the tables that parse, origin and history off"
                 );
             }
+            for choice in big_search_config::unknown_choices(&text) {
+                log::warn!("config.toml: {choice} is not a known value; read as the default");
+            }
             big_search_config::read_text(&text)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ConfigFile::default(),

@@ -108,6 +108,19 @@ pub(super) fn cmd_config_show() -> Result<()> {
         "{} BIG_SEARCH_* variables override these; DESIGN.md lists them",
         bold("Environment:"),
     );
+    match std::fs::read_to_string(config::config_file()) {
+        Ok(text) => {
+            for choice in big_search_config::unknown_choices(&text) {
+                println!(
+                    "{} {} is not a known value; read as the default",
+                    yellow("Unknown:"),
+                    terminal_text(&choice)
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => println!("{} {error}", yellow("Unreadable:")),
+    }
     Ok(())
 }
 
