@@ -502,9 +502,10 @@ fn startup_sync(
             fingerprint,
         };
     }
-    // A start cut short during the walk must walk again.
+    // A start cut short during the walk must walk again, so a record that
+    // cannot be dropped must not outlive this start.
     if let Err(e) = watch::forget_saved_run(&watch_list) {
-        log::warn!("forget the saved folders: {e:#}");
+        exit_for_restart(&e.context("forget the saved folders"));
     }
     watch_list.clear();
     let initial_watch_dirs = match sync_with_retry(index, &roots, &mut state) {
@@ -519,18 +520,9 @@ fn startup_sync(
             let _ = state.persist();
             sync_outcome.visible_dirs
         }
-        Err(e) => {
-            // A failed startup sync means the index may be missing most
-            // of the catalogue (e.g. a sandbox/filesystem fault). Serving
-            // a near-empty index silently is worse than dying: exit so
-            // systemd restarts the unit (visible failure, fresh attempt).
-            log::error!("sync failed after retries — exiting for restart: {e:#}");
-            #[expect(
-                clippy::exit,
-                reason = "systemd restarts the unit; nothing above owns a cleanup"
-            )]
-            std::process::exit(1);
-        }
+        // The index may be missing most of the catalogue: serving it silently
+        // is worse than a visible failure and a fresh attempt.
+        Err(e) => exit_for_restart(&e.context("sync failed after retries")),
     };
     StartupSync {
         roots,
@@ -540,6 +532,16 @@ fn startup_sync(
         started,
         fingerprint,
     }
+}
+
+/// End a start that cannot go on safely; systemd restarts the unit.
+fn exit_for_restart(error: &anyhow::Error) -> ! {
+    log::error!("{error:#}; exiting for restart");
+    #[expect(
+        clippy::exit,
+        reason = "systemd restarts the unit; nothing above owns a cleanup"
+    )]
+    std::process::exit(1)
 }
 
 /// Every folder of the saved list with its inode, in path order, or None when
