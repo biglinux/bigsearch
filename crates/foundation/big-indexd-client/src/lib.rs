@@ -457,7 +457,9 @@ pub enum Reply {
         /// The file's origin; `None` when none is recorded.
         origin: Option<OriginProvenance>,
     },
-    /// A command that returns nothing was carried out.
+    /// A command that returns nothing was carried out; `pause`, `resume`,
+    /// `rescan` and `rebuild` were accepted, and the daemon carries them out
+    /// after this reply.
     Ok { v: u32 },
     /// The daemon refused the request; the client returns
     /// [`ClientError::Daemon`].

@@ -45,12 +45,15 @@ returns as `ClientError::Daemon`. An unknown command is answered that way too.
 
 ### What the client promises the daemon
 
-- Each request waits at most 15 seconds for its answer, and an answer larger
-  than 8 MiB is refused.
+- Each read and write on the socket waits at most 15 seconds, so a daemon
+  that stops answering fails the request; an answer that keeps arriving may
+  take longer. An answer larger than 8 MiB is refused.
 - `PersistentClient` sends a request again only when a reused connection turns
-  out closed (`EPIPE`, `ECONNRESET`), and drops the connection after any other
-  failure, so a late answer is never read as the next one. A daemon that stops
-  answering costs one deadline.
+  out closed (`EPIPE`, `ECONNRESET`). Linux reports `ECONNRESET` on a Unix
+  socket only when the daemon closed it with bytes unread, so the request was
+  not taken. It drops the connection after any other failure, so a late
+  answer is never read as the next one. A daemon that stops answering costs
+  one deadline.
 - A connection the daemon closes after taking a request, before answering, is
   an error to the caller and is not sent again: the request may have been
   carried out.
