@@ -22,6 +22,14 @@ fn daemon_exchanges_round_trip() {
             Err(_) => assert_eq!(command, "no_such_command"),
         }
         let answer = &exchange["reply"];
+        // Refused on purpose: an unknown command, and a version copy on the
+        // capture's file system, which cannot clone a file.
+        let refused_on_purpose = ["no_such_command", "save_version"];
+        assert_eq!(
+            answer["kind"] == "error",
+            refused_on_purpose.contains(&command.as_str()),
+            "{command}: {answer}"
+        );
         let reply: Reply = serde_json::from_value(answer.clone())
             .unwrap_or_else(|error| panic!("{command}: {error}"));
         let kind = serde_json::to_value(&reply).expect("reply serializes")["kind"].clone();
