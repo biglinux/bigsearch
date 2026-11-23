@@ -542,7 +542,6 @@ mod tests {
         use std::os::unix::net::UnixListener;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::time::Instant;
 
         // In `/tmp`: a socket path must fit `sun_path` (108 bytes), and `TMPDIR` can be long.
         let socket_path = std::path::Path::new("/tmp")
@@ -567,20 +566,22 @@ mod tests {
             }
         });
 
-        let deadline = Duration::from_secs(1);
         let mut client = PersistentClient {
-            deadline,
+            deadline: Duration::from_secs(1),
             ..PersistentClient::new(socket_path.clone())
         };
-        let started = Instant::now();
-        let outcome = client.forget_versions("/home/p/a");
-        let took = started.elapsed();
+        let (sent, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sent.send(client.forget_versions("/home/p/a")));
+        // Half the default deadline: a client that kept the default, or hangs,
+        // fails here instead of holding the test; the connection count below
+        // tells a resend.
+        let outcome = outcome.recv_timeout(IO_TIMEOUT / 2);
         done.store(true, Ordering::Relaxed);
         std::fs::remove_file(&socket_path).ok();
-        assert!(matches!(outcome, Err(ClientError::Io(_))), "{outcome:?}");
-        // Well under the default deadline, with room for a busy runner; the
-        // connection count below tells a resend.
-        assert!(took < deadline * 5, "{took:?}");
+        assert!(
+            matches!(outcome, Ok(Err(ClientError::Io(_)))),
+            "{outcome:?}"
+        );
         assert_eq!(server.join().unwrap(), 1);
     }
 }
