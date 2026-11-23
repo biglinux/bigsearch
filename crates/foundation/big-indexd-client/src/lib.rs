@@ -458,9 +458,7 @@ pub enum Reply {
         origin: Option<OriginProvenance>,
     },
     /// A command that returns nothing was carried out.
-    Ok {
-        v: u32,
-    },
+    Ok { v: u32 },
     /// The daemon refused the request; the client returns
     /// [`ClientError::Daemon`].
     Error {

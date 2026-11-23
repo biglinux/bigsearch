@@ -98,10 +98,8 @@ fn reconcile_plan(
     // removable/network sources catalogued (a reindex while a device is
     // unplugged must not drop it). A fresh/recreated index starts empty.
     let sources = settings::sources();
-    let available: Vec<PathBuf> = sources
-        .all()
+    let available: Vec<PathBuf> = settings::available_sources()
         .iter()
-        .filter(|s| settings::is_available(s))
         .map(|s| s.path.clone())
         .collect();
     log::info!(
@@ -294,11 +292,7 @@ pub(super) fn cmd_daemon() -> Result<()> {
     }
     // One reading of the sources present, for the walk and the mount watch
     // alike: a source that comes between two readings would be in neither.
-    let available: Vec<&'static settings::Source> = settings::sources()
-        .all()
-        .iter()
-        .filter(|s| settings::is_available(s))
-        .collect();
+    let available = settings::available_sources();
     let started: Vec<PathBuf> = available.iter().map(|s| s.path.clone()).collect();
     spawn_watcher(&index, &content_index, &control, rx, &history, available)?;
     spawn_mount_watch(control.commands.clone(), started);
@@ -327,10 +321,8 @@ fn spawn_mount_watch(
     started: Vec<PathBuf>,
 ) {
     let available = || -> Vec<PathBuf> {
-        settings::sources()
-            .all()
+        settings::available_sources()
             .iter()
-            .filter(|s| settings::is_available(s))
             .map(|s| s.path.clone())
             .collect()
     };

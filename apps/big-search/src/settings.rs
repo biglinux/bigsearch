@@ -173,6 +173,11 @@ pub fn is_available(source: &Source) -> bool {
         .unwrap_or(false)
 }
 
+/// The configured sources available now, in configuration order.
+pub fn available_sources() -> Vec<&'static Source> {
+    sources().all().iter().filter(|s| is_available(s)).collect()
+}
+
 /// Whether `source` may change where this machine does not see it: marked
 /// removable or network, or on such a mount, or holding one.
 pub fn is_detachable(source: &Source) -> bool {
