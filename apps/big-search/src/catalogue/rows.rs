@@ -1,7 +1,12 @@
-//! The writes behind [`State::persist`]: a scan's rows merged into the table,
-//! and the pending changes applied in one transaction.
+//! Row work on the catalogue table: a page of a scan's rows merged with the
+//! stored ones, and [`State::persist`]'s pending changes applied in one
+//! transaction.
 
-use super::*;
+use super::{PendingChange, ScanChange, db_size_to_u64, u64_to_db_size};
+use anyhow::{Context, Result};
+use rusqlite::params;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Merge one page of seen rows with one page of catalogue rows, both in path
 /// order, into what changed; rows past `end` wait for the next page.

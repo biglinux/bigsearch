@@ -1,7 +1,16 @@
 //! A start's catch-up: the saved or walked folders watched again, and what
 //! changed while no watch covered them compared with the catalogue.
 
-use super::*;
+use super::{StartDirs, Watches, active_index_writer, epoch_secs, evict, reconcile};
+use crate::catalogue::State;
+use crate::index::Fields;
+use crate::scan;
+use anyhow::{Context, Result};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::time::SystemTime;
+use tantivy::IndexWriter;
 
 /// What a start's catch-up compares again.
 pub(super) struct CatchUp {

@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+mod rows;
+use rows::{merge_scan_rows, write_pending};
+
 /// Namespace of the content-extraction state inside the shared state database.
 pub const CONTENT_NAMESPACE: &str = "content";
 /// Namespace of the name-catalogue state inside the shared state database.
@@ -934,9 +937,6 @@ pub fn meta_pair(m: &std::fs::Metadata) -> (i64, u64) {
 pub fn meta(path: &Path) -> Option<(i64, u64)> {
     Some(meta_pair(&std::fs::symlink_metadata(path).ok()?))
 }
-
-mod persist;
-use persist::{merge_scan_rows, write_pending};
 
 #[cfg(test)]
 mod tests;

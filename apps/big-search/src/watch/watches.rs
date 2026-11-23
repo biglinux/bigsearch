@@ -1,7 +1,14 @@
 //! The folders watched and the record of the run that watched them: what
 //! lets the next start trust the saved list instead of walking.
 
-use super::*;
+use crate::catalogue::State;
+use anyhow::Result;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// `meta` keys of the last run's record: the [`fingerprint`] its watches were
 /// placed under and when it started. A start whose fingerprint matches watches
