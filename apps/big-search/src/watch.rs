@@ -465,8 +465,25 @@ fn watch_initial_dirs(
                 // A root is never a catalogue entry, so it is never evicted: one
                 // made anew is a changed folder, its old entries leave by its
                 // pass, and its folders all have new inodes.
-                let same_folder = std::fs::symlink_metadata(&dir)
-                    .is_ok_and(|m| m.is_dir() && (roots.contains(&dir) || m.ino() == saved_inode));
+                let same_folder = match std::fs::symlink_metadata(&dir) {
+                    Ok(m) => m.is_dir() && (roots.contains(&dir) || m.ino() == saved_inode),
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        false
+                    }
+                    // Not readable now (EACCES, EIO on a disk going away): its
+                    // entries stay, and a failed watch keeps this run from being
+                    // recorded, so the next start walks.
+                    Err(e) => {
+                        log::warn!("cannot read {}: {e}", dir.display());
+                        watches.failed.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                };
                 if !same_folder {
                     watches.dirs.remove(&dir);
                     catch_up.replaced.push(dir);

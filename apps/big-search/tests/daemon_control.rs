@@ -704,6 +704,34 @@ fn unreadable_folder_keeps_the_record() {
     std::fs::remove_dir_all(&sandbox.base).ok();
 }
 
+/// A saved folder that cannot be read at the next start keeps its entries:
+/// a failed lookup is no evidence that another folder took its place.
+#[test]
+fn unreadable_saved_folder_keeps_entries() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new("bs-unreadable-saved");
+    let outer = sandbox.docs.join("outer");
+    let inner = outer.join("inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    let inside = inner.join("inside.txt");
+    std::fs::write(&inside, "alpha").unwrap();
+    sandbox.age_folders();
+    let daemon = sandbox.start();
+    let recorded = settles(|| sandbox.run_recorded());
+    drop(daemon);
+    std::fs::remove_file(&sandbox.sock).ok();
+    assert!(recorded, "the run did not record its folders");
+
+    std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let daemon = sandbox.start();
+    sandbox.await_docs_watched();
+    let kept = sandbox.catalogued_size(&inside);
+    drop(daemon);
+    std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(kept, Some(5));
+    std::fs::remove_dir_all(&sandbox.base).ok();
+}
+
 /// A folder made readable while the daemon runs is watched and indexed.
 #[test]
 fn folder_made_readable_is_indexed() {
