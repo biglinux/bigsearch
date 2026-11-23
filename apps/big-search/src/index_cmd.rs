@@ -473,19 +473,7 @@ fn startup_sync(
     // folder times need not move (FAT and exFAT written by Windows).
     let detachable = available.iter().any(|s| settings::is_detachable(s));
     log::debug!("scan sources: {roots:?}");
-    let fingerprint = match scan::write_effective_ignore() {
-        Ok(rules) => {
-            // The walker honors the global git ignore file too.
-            let git_excludes = ignore::gitignore::gitconfig_excludes_path()
-                .and_then(|path| std::fs::read(path).ok())
-                .unwrap_or_default();
-            Some(watch::fingerprint(&roots, &rules, &git_excludes))
-        }
-        Err(e) => {
-            log::warn!("ignore file: {e:#}");
-            None
-        }
-    };
+    let fingerprint = run_fingerprint(&roots);
     let empty = index
         .reader()
         .map(|r| r.searcher().num_docs() == 0)
@@ -500,10 +488,7 @@ fn startup_sync(
     // useless for the catch-up.
     if !empty
         && !detachable
-        && let Some(last_started) =
-            fingerprint.and_then(|fingerprint| watch::saved_run_started(&watch_list, fingerprint))
-        && last_started <= started
-        && let Some(dirs) = saved_watch_dirs(&watch_list)
+        && let Some((dirs, last_started)) = trusted_saved_list(&watch_list, fingerprint, started)
     {
         log::info!("watching {} saved folders; no startup walk", dirs.len());
         return StartupSync {
@@ -521,22 +506,14 @@ fn startup_sync(
         exit_for_restart(&e.context("forget the saved folders"));
     }
     watch_list.clear();
-    let initial_watch_dirs = match sync_with_retry(index, &roots, &mut state) {
-        Ok(sync_outcome) => {
-            log::debug!(
-                "sync: {} changed files may need content",
-                sync_outcome.content_candidates
-            );
-            let _ = state.persist();
-            prune_content_at_start(content_index);
-            backfill_first_batch(content_index, pending_content, activity);
-            let _ = state.persist();
-            sync_outcome.visible_dirs
-        }
-        // The index may be missing most of the catalogue: serving it silently
-        // is worse than a visible failure and a fresh attempt.
-        Err(e) => exit_for_restart(&e.context("sync failed after retries")),
-    };
+    let initial_watch_dirs = walk_at_start(
+        index,
+        content_index,
+        &roots,
+        &mut state,
+        pending_content,
+        activity,
+    );
     StartupSync {
         roots,
         state,
@@ -545,6 +522,77 @@ fn startup_sync(
         started,
         fingerprint,
     }
+}
+
+/// The fingerprint a run is recorded under: the sources, the effective ignore
+/// rules and the global git ignore file the walker honors too. `None` when the
+/// rules could not be written, and then the run records nothing.
+fn run_fingerprint(roots: &[PathBuf]) -> Option<i64> {
+    let rules = match scan::write_effective_ignore() {
+        Ok(rules) => rules,
+        Err(e) => {
+            log::warn!("ignore file: {e:#}");
+            return None;
+        }
+    };
+    let git_excludes = match ignore::gitignore::gitconfig_excludes_path() {
+        Some(path) => match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                log::warn!("{}: {e}", path.display());
+                return None;
+            }
+        },
+        None => Vec::new(),
+    };
+    Some(watch::fingerprint(roots, &rules, &git_excludes))
+}
+
+/// The startup walk: reconcile the catalogue with the disk, prune stale
+/// content and extract the first content batch. The folders it saw.
+fn walk_at_start(
+    index: &tantivy::Index,
+    content_index: &tantivy::Index,
+    roots: &[PathBuf],
+    state: &mut catalogue::State,
+    pending_content: &std::sync::atomic::AtomicU64,
+    activity: &std::sync::atomic::AtomicU8,
+) -> Vec<PathBuf> {
+    let sync_outcome = match sync_with_retry(index, roots, state) {
+        Ok(sync_outcome) => sync_outcome,
+        // The index may be missing most of the catalogue: serving it silently
+        // is worse than a visible failure and a fresh attempt.
+        Err(e) => exit_for_restart(&e.context("sync failed after retries")),
+    };
+    log::debug!(
+        "sync: {} changed files may need content",
+        sync_outcome.content_candidates
+    );
+    // What a failed save leaves stays in memory, and the next save writes it.
+    if let Err(e) = state.persist() {
+        log::warn!("save the catalogue after the walk: {e:#}");
+    }
+    prune_content_at_start(content_index);
+    backfill_first_batch(content_index, pending_content, activity);
+    if let Err(e) = state.persist() {
+        log::warn!("save the catalogue after the first content batch: {e:#}");
+    }
+    sync_outcome.visible_dirs
+}
+
+/// The saved folders and when their run started, when the record matches
+/// `fingerprint` and the clock has not gone back past that start.
+fn trusted_saved_list(
+    watch_list: &catalogue::State,
+    fingerprint: Option<i64>,
+    started: std::time::SystemTime,
+) -> Option<(Vec<(PathBuf, u64)>, std::time::SystemTime)> {
+    let last_started = watch::saved_run_started(watch_list, fingerprint?)?;
+    if last_started > started {
+        return None;
+    }
+    Some((saved_watch_dirs(watch_list)?, last_started))
 }
 
 /// End a start that cannot go on safely; systemd restarts the unit.
