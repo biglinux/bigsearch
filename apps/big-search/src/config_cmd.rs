@@ -191,10 +191,9 @@ pub(super) fn set_config_key(key: &str, value: &str) -> Result<()> {
 /// A literal, not a parsed value: what goes into the file is text, and building
 /// a `toml::Value` only to print it again would need a TOML parser here.
 pub(super) fn parse_bool_value(value: &str) -> Result<String> {
-    match value.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok("true".to_string()),
-        "0" | "false" | "no" | "off" => Ok("false".to_string()),
-        _ => anyhow::bail!("expected boolean: true|false"),
+    match settings::parse_bool(value) {
+        Some(value) => Ok(value.to_string()),
+        None => anyhow::bail!("expected boolean: true|false"),
     }
 }
 

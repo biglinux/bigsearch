@@ -457,10 +457,15 @@ fn resolve_follow(defaults: &Defaults) -> bool {
     env_bool("BIG_SEARCH_FOLLOW_LINKS").unwrap_or(defaults.follow_symlinks)
 }
 
-/// A boolean variable, in any case; `None` when unset or not a boolean.
+/// A boolean variable; `None` when unset or not a boolean.
 pub(crate) fn env_bool(name: &str) -> Option<bool> {
-    let value = std::env::var(name).ok()?.to_ascii_lowercase();
-    match value.as_str() {
+    parse_bool(&std::env::var(name).ok()?)
+}
+
+/// `1`, `true`, `yes`, `on` or their opposites, in any case.
+#[must_use]
+pub fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
