@@ -16,8 +16,8 @@ mod scratch;
 
 use daemon::*;
 
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::Duration;
 
 #[test]
 fn pause_resume_rebuild_cycle() {
@@ -146,17 +146,7 @@ fn departed_tree_leaves_every_index() {
     let outside = base.join("outside");
     let docs = home.join("docs");
     for tree in ["deleted", "away", "moving"] {
-        std::fs::create_dir_all(docs.join(tree).join("deep")).unwrap();
-        std::fs::write(
-            docs.join(tree).join(format!("{tree}-top.txt")),
-            format!("{tree}wordtop"),
-        )
-        .unwrap();
-        std::fs::write(
-            docs.join(tree).join(format!("deep/{tree}-deep.txt")),
-            format!("{tree}worddeep"),
-        )
-        .unwrap();
+        plant_tree(&docs.join(tree), tree);
     }
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::create_dir_all(&run).unwrap();
@@ -186,42 +176,10 @@ fn departed_tree_leaves_every_index() {
     std::fs::rename(docs.join("away"), outside.join("away")).unwrap();
     std::fs::rename(docs.join("moving"), docs.join("moved")).unwrap();
 
-    // Each check polls: the watcher debounces, and the content side follows
-    // in the next backfill pass, which a busy machine delays (see
-    // `await_content_result`).
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let settled = |check: &dyn Fn() -> bool| {
-        while Instant::now() < deadline {
-            if check() {
-                return true;
-            }
-            sleep(Duration::from_millis(100));
-        }
-        false
-    };
     for tree in ["deleted", "away", "moving"] {
-        let old = docs.join(tree);
-        assert!(
-            settled(&|| query_paths(&sock, "list", "", &old).0 == 0),
-            "{tree}: the catalogue still lists {:?}",
-            query_paths(&sock, "list", "", &old)
-        );
-        assert!(
-            settled(&|| query_paths(&sock, "name", tree, &old).0 == 0),
-            "{tree}: the name index still holds {:?}",
-            query_paths(&sock, "name", tree, &old)
-        );
-        let word = format!("{tree}worddeep");
-        assert!(
-            settled(&|| query_paths(&sock, "content", &word, &old).0 == 0),
-            "{tree}: the content index still answers for the old path"
-        );
-        assert!(
-            settled(&|| catalogue_rows(&xdg_storage_home, "content", &old) == 0),
-            "{tree}: the content catalogue still holds rows under the old path"
-        );
-        assert_eq!(catalogue_rows(&xdg_storage_home, "name", &old), 0);
+        assert_tree_gone(&sock, &xdg_storage_home, &docs.join(tree), tree);
     }
+    let settled = |check: &dyn Fn() -> bool| settles_within(SETTLE, check);
     let moved = docs.join("moved");
     let deep = moved.join("deep/moving-deep.txt").display().to_string();
     assert!(
@@ -234,6 +192,51 @@ fn departed_tree_leaves_every_index() {
     );
 
     std::fs::remove_dir_all(&base).ok();
+}
+
+/// How long a tree's departure may take to reach every index: the watcher
+/// debounces, and the content side follows in the next backfill pass, which a
+/// busy machine delays (see `await_content_result`).
+const SETTLE: Duration = Duration::from_secs(45);
+
+/// A tree `tree` at `dir`: a file on top and one a folder down, each with a
+/// word of its own.
+fn plant_tree(dir: &Path, tree: &str) {
+    std::fs::create_dir_all(dir.join("deep")).unwrap();
+    std::fs::write(
+        dir.join(format!("{tree}-top.txt")),
+        format!("{tree}wordtop"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(format!("deep/{tree}-deep.txt")),
+        format!("{tree}worddeep"),
+    )
+    .unwrap();
+}
+
+/// Nothing of the tree that was at `old` is left in any index or catalogue.
+fn assert_tree_gone(sock: &Path, data: &Path, old: &Path, tree: &str) {
+    assert!(
+        settles_within(SETTLE, || query_paths(sock, "list", "", old).0 == 0),
+        "{tree}: the catalogue still lists {:?}",
+        query_paths(sock, "list", "", old)
+    );
+    assert!(
+        settles_within(SETTLE, || query_paths(sock, "name", tree, old).0 == 0),
+        "{tree}: the name index still holds {:?}",
+        query_paths(sock, "name", tree, old)
+    );
+    let word = format!("{tree}worddeep");
+    assert!(
+        settles_within(SETTLE, || query_paths(sock, "content", &word, old).0 == 0),
+        "{tree}: the content index still answers for the old path"
+    );
+    assert!(
+        settles_within(SETTLE, || catalogue_rows(data, "content", old) == 0),
+        "{tree}: the content catalogue still holds rows under the old path"
+    );
+    assert_eq!(catalogue_rows(data, "name", old), 0);
 }
 
 /// A file that appears in a repository while the daemon runs is left out when

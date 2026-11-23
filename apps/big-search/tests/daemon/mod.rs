@@ -164,7 +164,12 @@ pub fn catalogue_rows(xdg_storage_home: &Path, namespace: &str, dir: &Path) -> i
 
 /// Polls `check` for up to 20 s.
 pub fn settles(check: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    settles_within(Duration::from_secs(20), check)
+}
+
+/// Whether `check` holds within `wait`, polled every 100 ms.
+pub fn settles_within(wait: Duration, check: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + wait;
     while Instant::now() < deadline {
         if check() {
             return true;
