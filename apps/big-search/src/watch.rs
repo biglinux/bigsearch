@@ -613,7 +613,7 @@ impl WatchLoop<'_> {
         // over the catalogue starts again from the top.
         self.history_pass_done = false;
         self.history_cursor = None;
-        outcome.absorb(scan::reconcile_inline(
+        let walked = scan::reconcile_inline(
             active_index_writer(&mut self.writer),
             &self.f,
             &mut self.state,
@@ -621,7 +621,11 @@ impl WatchLoop<'_> {
             &mut |dir| {
                 self.watches.watch(dir);
             },
-        )?);
+        )?;
+        // A folder the walk could not read leaves this run unable to vouch
+        // for it.
+        self.watches.missed |= walked.unread;
+        outcome.absorb(walked);
         Ok(started)
     }
 
