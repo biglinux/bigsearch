@@ -38,7 +38,10 @@ fn innermost_entry(table: &str, path: &Path) -> Option<(PathBuf, Mount)> {
             continue;
         }
         let depth = point.components().count();
-        if best.as_ref().is_none_or(|(deepest, _, _)| depth >= *deepest) {
+        if best
+            .as_ref()
+            .is_none_or(|(deepest, _, _)| depth >= *deepest)
+        {
             best = Some((depth, point, mount));
         }
     }

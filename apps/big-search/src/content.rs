@@ -206,13 +206,18 @@ pub(crate) fn default_workers() -> usize {
     let cores = std::thread::available_parallelism()
         .map(std::num::NonZero::get)
         .unwrap_or(1);
-    let default = if crate::settings::low_memory_machine() || cores <= 2 {
-        1
-    } else {
-        2
-    };
-    std::env::var("BIG_SEARCH_CONTENT_WORKERS")
-        .ok()
+    let requested = std::env::var("BIG_SEARCH_CONTENT_WORKERS").ok();
+    pool_width(
+        cores,
+        crate::settings::low_memory_machine(),
+        requested.as_deref(),
+    )
+}
+
+/// One worker on a small machine, two otherwise; a request of 1 to 4 wins.
+fn pool_width(cores: usize, low_memory: bool, requested: Option<&str>) -> usize {
+    let default = if low_memory || cores <= 2 { 1 } else { 2 };
+    requested
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|workers| *workers > 0)
         .unwrap_or(default)

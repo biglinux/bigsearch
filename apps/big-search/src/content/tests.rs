@@ -373,29 +373,21 @@ fn content_knobs_resolve_overrides() {
 
 #[test]
 fn worker_pool_width_follows_machine() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _clear = EnvVarGuard::unset("BIG_SEARCH_CONTENT_WORKERS");
-    let cores = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(1);
-    let expected = if crate::settings::low_memory_machine() || cores <= 2 {
-        1
-    } else {
-        2
-    };
-    assert_eq!(default_workers(), expected);
-    {
-        let _zero = EnvVarGuard::set("BIG_SEARCH_CONTENT_WORKERS", "0");
-        assert_eq!(default_workers(), expected, "0 workers is not usable");
-    }
-    {
-        let _three = EnvVarGuard::set("BIG_SEARCH_CONTENT_WORKERS", "3");
-        assert_eq!(default_workers(), 3);
-    }
-    {
-        let _nine = EnvVarGuard::set("BIG_SEARCH_CONTENT_WORKERS", "9");
-        assert_eq!(default_workers(), 4, "pool width is capped at 4");
-    }
+    assert_eq!(pool_width(8, false, None), 2);
+    assert_eq!(pool_width(2, false, None), 1);
+    assert_eq!(pool_width(8, true, None), 1);
+    assert_eq!(
+        pool_width(8, false, Some("0")),
+        2,
+        "0 workers is not usable"
+    );
+    assert_eq!(pool_width(8, false, Some("three")), 2);
+    assert_eq!(pool_width(2, false, Some("3")), 3);
+    assert_eq!(
+        pool_width(8, false, Some("9")),
+        4,
+        "pool width is capped at 4"
+    );
 }
 
 #[test]

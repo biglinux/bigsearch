@@ -38,7 +38,13 @@ fn is_regular_file(path: &Path) -> bool {
 }
 
 fn downloads_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("XDG_DOWNLOAD_DIR").map(PathBuf::from) {
+    downloads_dir_from(std::env::var_os("XDG_DOWNLOAD_DIR").map(PathBuf::from))
+}
+
+/// The session's download folder when it names one, then the one
+/// `user-dirs.dirs` names, then `~/Downloads`.
+fn downloads_dir_from(session: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = session {
         return expand_home(path);
     }
     let user_dirs = big_search_config::config_home().join("user-dirs.dirs");
@@ -174,9 +180,8 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         let _home = EnvVarGuard::set("HOME", "/tmp/bs-origin-home");
         let _config = EnvVarGuard::unset("XDG_CONFIG_HOME");
-        let _download = EnvVarGuard::unset("XDG_DOWNLOAD_DIR");
         assert_eq!(
-            downloads_dir(),
+            downloads_dir_from(None),
             PathBuf::from("/tmp/bs-origin-home/Downloads")
         );
     }
