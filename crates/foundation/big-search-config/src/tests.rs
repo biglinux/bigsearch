@@ -200,6 +200,27 @@ fn unknown_choices_named() {
     assert!(unknown_choices(per_folder).is_empty());
 }
 
+/// A folder added with its own link settings keeps them over the defaults.
+#[test]
+fn added_folder_keeps_overrides() {
+    let text = "[defaults]\nfollow_symlinks = true\n\n[[source]]\npath = \"/home/p\"\n";
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    let source = SourceEntry {
+        follow_symlinks: Some(false),
+        symlink_policy: Some(SymlinkPolicy::LocalExact),
+        ..SourceEntry::new("/mnt/disk")
+    };
+    add_source_to(&mut lines, &source, Path::new("/home/p")).unwrap();
+    let config = read_text(&lines.join("\n"));
+    let added = config
+        .sources
+        .iter()
+        .find(|entry| entry.path == Path::new("/mnt/disk"))
+        .expect("the folder was added");
+    assert_eq!(added.follow_symlinks, Some(false));
+    assert_eq!(added.symlink_policy, Some(SymlinkPolicy::LocalExact));
+}
+
 #[test]
 fn last_folder_kept() {
     let only = "[[source]]\npath = \"/mnt/disk\"\n";

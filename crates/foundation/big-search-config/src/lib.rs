@@ -256,6 +256,16 @@ pub enum SymlinkPolicy {
     PersonalLocal,
 }
 
+impl SymlinkPolicy {
+    /// The value written in the file.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalExact => "local-exact",
+            Self::PersonalLocal => "personal-local",
+        }
+    }
+}
+
 /// One `[[source]]` block: a folder to catalogue, and what to read in it.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]

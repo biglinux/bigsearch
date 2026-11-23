@@ -100,13 +100,11 @@ pub(crate) fn add_source_to(
         added.push(SourceEntry::new(home));
     }
     added.push(source.clone());
-    let mut appended = Vec::new();
-    for entry in &added {
-        append_source(&mut appended, entry);
-    }
+    // Built from the entries, not from the lines the writer makes, so a field
+    // the writer leaves out is refused.
     let expected = with_sources(
         before,
-        [sources, source_entries(&parsed(&appended)?).to_vec()].concat(),
+        [sources, added.iter().map(source_value).collect()].concat(),
     );
     edit_lines_to(lines, &expected, |lines| {
         for entry in &added {
@@ -670,10 +668,47 @@ pub(crate) fn append_source(lines: &mut Vec<String>, source: &SourceEntry) {
     if let Some(metadata) = source.metadata {
         lines.push(format!("metadata = {metadata}"));
     }
+    if let Some(follow) = source.follow_symlinks {
+        lines.push(format!("follow_symlinks = {follow}"));
+    }
+    if let Some(policy) = source.symlink_policy {
+        lines.push(format!(
+            "symlink_policy = {}",
+            string_literal(policy.as_str())
+        ));
+    }
     if source.removable {
         lines.push("removable = true".to_owned());
     }
     if source.network {
         lines.push("network = true".to_owned());
     }
+}
+
+/// `source` as the file holds it: each field it sets, and none it leaves to
+/// the defaults.
+fn source_value(source: &SourceEntry) -> toml::Value {
+    let mut entry = toml::Table::new();
+    let path = source.path.to_string_lossy().into_owned();
+    entry.insert("path".to_owned(), toml::Value::String(path));
+    if let Some(name) = &source.name {
+        entry.insert("name".to_owned(), toml::Value::String(name.clone()));
+    }
+    let flags = [
+        ("content", source.content),
+        ("metadata", source.metadata),
+        ("follow_symlinks", source.follow_symlinks),
+        ("removable", source.removable.then_some(true)),
+        ("network", source.network.then_some(true)),
+    ];
+    for (key, value) in flags {
+        if let Some(value) = value {
+            entry.insert(key.to_owned(), toml::Value::Boolean(value));
+        }
+    }
+    if let Some(policy) = source.symlink_policy {
+        let policy = toml::Value::String(policy.as_str().to_owned());
+        entry.insert("symlink_policy".to_owned(), policy);
+    }
+    toml::Value::Table(entry)
 }
