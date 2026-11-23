@@ -252,9 +252,7 @@ fn read_replaced_anew(
             false,
             &mut offline_sources,
         ) {
-            outcome.index_changed = true;
-            outcome.state_changed = true;
-            outcome.deleted = true;
+            outcome.removed();
         }
         outcome.absorb(reconcile(
             index_writer,

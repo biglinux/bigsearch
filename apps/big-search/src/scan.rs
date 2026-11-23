@@ -359,6 +359,13 @@ pub struct ReconcileOutcome {
 }
 
 impl ReconcileOutcome {
+    /// A catalogued path left the index and the catalogue.
+    pub fn removed(&mut self) {
+        self.index_changed = true;
+        self.state_changed = true;
+        self.deleted = true;
+    }
+
     pub fn any(self) -> bool {
         self.index_changed || self.state_changed
     }
@@ -575,9 +582,7 @@ fn apply_scan_change(
         ScanChange::Gone(path) => {
             delete_path(writer, f, &path);
             state.remove(&path);
-            outcome.index_changed = true;
-            outcome.state_changed = true;
-            outcome.deleted = true;
+            outcome.removed();
         }
     }
     Ok(())

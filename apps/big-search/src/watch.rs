@@ -770,95 +770,134 @@ fn reconcile(
     batch: HashSet<PathBuf>,
     watched: Option<&HashSet<PathBuf>>,
 ) -> Result<scan::ReconcileOutcome> {
-    let mut outcome = scan::ReconcileOutcome::default();
-    let mut offline_sources = None;
+    let mut pass = ReconcilePass {
+        writer,
+        f,
+        scope,
+        watched,
+        outcome: scan::ReconcileOutcome::default(),
+        offline_sources: None,
+    };
     for path in batch {
+        pass.path(watches, state, &path)?;
+    }
+    Ok(pass.outcome)
+}
+
+/// One batch's reconcile: what stays the same from path to path.
+struct ReconcilePass<'a> {
+    writer: &'a IndexWriter,
+    f: &'a Fields,
+    scope: &'a scan::Scope,
+    watched: Option<&'a HashSet<PathBuf>>,
+    outcome: scan::ReconcileOutcome,
+    offline_sources: Option<crate::query::OfflineSources>,
+}
+
+impl ReconcilePass<'_> {
+    fn path(&mut self, watches: &mut Watches, state: &mut State, path: &Path) -> Result<()> {
         // Catalogue keys are text: a name with invalid bytes shares its key
         // with others, and acting on it would touch theirs.
         if path.to_str().is_none() {
-            continue;
+            return Ok(());
         }
-        let stat = std::fs::symlink_metadata(&path);
+        let stat = std::fs::symlink_metadata(path);
         let gone = matches!(&stat, Err(error) if error.kind() == std::io::ErrorKind::NotFound);
         let metadata = stat.ok();
         let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
-        let recorded = state.recorded(&path);
-        let out_of_scope = scope.excluded(&path, is_dir)
-            || (recorded.is_none() && scan::repo_ignored(&path, is_dir));
+        let recorded = state.recorded(path);
+        let out_of_scope = self.scope.excluded(path, is_dir)
+            || (recorded.is_none() && scan::repo_ignored(path, is_dir));
         if out_of_scope && recorded.is_none() {
-            continue; // out of scope and never catalogued: nothing to do
+            return Ok(()); // out of scope and never catalogued: nothing to do
         }
         // Below this line an excluded path is treated exactly like a vanished
         // one, so the rules also evict what an earlier version indexed before
         // they covered it. Skipping it instead would strand those documents.
         if let Some(metadata) = metadata.filter(|_| !out_of_scope) {
-            use std::os::unix::fs::MetadataExt;
-            let mut recorded = recorded;
-            // A folder renamed over a listed one can match its time and size
-            // (a small ext4 folder is one block): the inode tells them apart,
-            // and the old folder's rows leave before the new one is read.
-            let replaced = metadata.is_dir()
-                && recorded.is_some()
-                && watches
-                    .dirs
-                    .recorded(&path)
-                    .is_some_and(|(_, inode)| inode != metadata.ino());
-            if replaced {
-                evict(
-                    writer,
-                    f,
-                    state,
-                    watches,
-                    &path,
-                    false,
-                    &mut offline_sources,
-                );
-                outcome.index_changed = true;
-                outcome.state_changed = true;
-                outcome.deleted = true;
-                recorded = None;
-            }
-            let (mtime, size) = catalogue::meta_pair(&metadata);
-            // A listed folder this user could not read may have been made
-            // readable (chmod, chown): only its change time moved.
-            let reopened = metadata.is_dir() && watches.unreadable.contains(&path);
-            if recorded == Some((mtime, size)) && !reopened {
-                continue; // metadata-only event (e.g. ATTRIB) → nothing to reindex
-            }
-            if scan::name_doc_stale(recorded, mtime) {
-                // A new path, or one changed on another day: (re)index its name.
-                // A file rewritten the same day keeps its name doc (content
-                // work is scheduled through the state change below).
-                scan::upsert_path(writer, f, &path, Some(&metadata))?;
-                outcome.index_changed = true;
-            }
-            state.set(&path, mtime, size);
-            outcome.state_changed = true;
-            let own_pass =
-                recorded.is_some() && watched.is_some_and(|watched| watched.contains(&path));
-            if metadata.is_dir() && !own_pass {
-                // New or moved-in dir: watch it before reading it, and each
-                // subfolder as the walk reaches it, so an entry created during
-                // the walk is either read or reported.
-                watches.watch(&path);
-                let subtree_outcome =
-                    scan::reconcile_subtree_inline(writer, f, state, scope, &path, &mut |dir| {
-                        watches.watch(dir);
-                    })?;
-                outcome.absorb(subtree_outcome);
-            }
-        } else if recorded.is_some()
+            return self.present(watches, state, path, &metadata, recorded);
+        }
+        if recorded.is_some()
             && (gone || out_of_scope)
-            && evict(writer, f, state, watches, &path, gone, &mut offline_sources)
+            && evict(
+                self.writer,
+                self.f,
+                state,
+                watches,
+                path,
+                gone,
+                &mut self.offline_sources,
+            )
         {
-            outcome.index_changed = true;
-            outcome.state_changed = true;
-            outcome.deleted = true;
+            self.outcome.removed();
         }
         // Otherwise never catalogued, or not readable now (EACCES, EIO on a
         // disk going away): nothing to drop on that evidence.
+        Ok(())
     }
-    Ok(outcome)
+
+    /// A path that exists and is in scope: index what changed about it.
+    fn present(
+        &mut self,
+        watches: &mut Watches,
+        state: &mut State,
+        path: &Path,
+        metadata: &std::fs::Metadata,
+        mut recorded: Option<(i64, u64)>,
+    ) -> Result<()> {
+        // A folder renamed over a listed one can match its time and size (a
+        // small ext4 folder is one block): the inode tells them apart, and the
+        // old folder's rows leave before the new one is read.
+        if recorded.is_some() && watches.listed_as_other(path, metadata) {
+            evict(
+                self.writer,
+                self.f,
+                state,
+                watches,
+                path,
+                false,
+                &mut self.offline_sources,
+            );
+            self.outcome.removed();
+            recorded = None;
+        }
+        let (mtime, size) = catalogue::meta_pair(metadata);
+        // A listed folder this user could not read may have been made
+        // readable (chmod, chown): only its change time moved.
+        let reopened = metadata.is_dir() && watches.unreadable.contains(path);
+        if recorded == Some((mtime, size)) && !reopened {
+            return Ok(()); // metadata-only event (e.g. ATTRIB): nothing to reindex
+        }
+        if scan::name_doc_stale(recorded, mtime) {
+            // A new path, or one changed on another day: (re)index its name.
+            // A file rewritten the same day keeps its name doc (content work
+            // is scheduled through the state change below).
+            scan::upsert_path(self.writer, self.f, path, Some(metadata))?;
+            self.outcome.index_changed = true;
+        }
+        state.set(path, mtime, size);
+        self.outcome.state_changed = true;
+        let own_pass =
+            recorded.is_some() && self.watched.is_some_and(|watched| watched.contains(path));
+        if metadata.is_dir() && !own_pass {
+            // New or moved-in dir: watch it before reading it, and each
+            // subfolder as the walk reaches it, so an entry created during the
+            // walk is either read or reported.
+            watches.watch(path);
+            let subtree_outcome = scan::reconcile_subtree_inline(
+                self.writer,
+                self.f,
+                state,
+                self.scope,
+                path,
+                &mut |dir| {
+                    watches.watch(dir);
+                },
+            )?;
+            self.outcome.absorb(subtree_outcome);
+        }
+        Ok(())
+    }
 }
 
 /// Drop a catalogued path that vanished or left the scope, with its tree.

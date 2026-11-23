@@ -90,6 +90,17 @@ impl Watches {
         placed
     }
 
+    /// Whether `dir` is a folder listed with another inode: one renamed over
+    /// the folder that was watched there.
+    pub(super) fn listed_as_other(&self, dir: &Path, metadata: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        metadata.is_dir()
+            && self
+                .dirs
+                .recorded(dir)
+                .is_some_and(|(_, inode)| inode != metadata.ino())
+    }
+
     /// Place the watch on `dir`. An unreadable folder stays listed for the
     /// catch-up; any other failure but a vanished folder keeps this run from
     /// being recorded, and only the first is logged.
