@@ -853,10 +853,7 @@ mod tests {
     #[test]
     fn read_only_content_keeps_stored_profile() {
         for record in [IndexRecordOption::Basic, IndexRecordOption::WithFreqs] {
-            let dir = crate::test_env::scratch_dir(&format!(
-                "big-search-read-profile-{}-{record:?}",
-                std::process::id()
-            ));
+            let dir = crate::test_env::scratch_dir(&format!("big-search-read-profile-{record:?}"));
             let index = create_content_fixture(&dir, record).unwrap();
             let fields = content_fields(&index).unwrap();
             let mut writer = index.writer::<TantivyDocument>(15_000_000).unwrap();
@@ -886,7 +883,7 @@ mod tests {
 
     #[test]
     fn corrupt_index_is_recreated() {
-        let dir = crate::test_env::scratch_dir(&format!("bs-index-corrupt-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir("bs-index-corrupt");
         std::fs::write(dir.join("meta.json"), b"not tantivy metadata").unwrap();
 
         let index = open_or_create(&dir).unwrap();
@@ -897,7 +894,7 @@ mod tests {
 
     #[test]
     fn deflated_index_repair_adds_missing_paths() {
-        let dir = crate::test_env::scratch_dir(&format!("bs-index-repair-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir("bs-index-repair");
 
         let index = open_or_create(&dir.join("idx")).unwrap();
         let f = fields(&index).unwrap();

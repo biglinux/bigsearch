@@ -183,10 +183,7 @@ mod tests {
 
     #[test]
     fn probe_accepts_completed_direct_downloads() {
-        let base = crate::test_env::scratch_dir(&format!(
-            "bs-origin-download-probe-{}",
-            std::process::id()
-        ));
+        let base = crate::test_env::scratch_dir("bs-origin-download-probe");
         let downloads = base.join("Downloads");
         let nested = downloads.join("project");
         std::fs::create_dir_all(&nested).unwrap();

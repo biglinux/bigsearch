@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn atomic_write_leaves_no_temp() {
-        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir("bs-nosync");
         let directory = NoFsyncDirectory::open(&dir).unwrap();
 
         directory
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn only_commits_wake_the_watch() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-watch-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir("bs-nosync-watch");
         let directory = NoFsyncDirectory::open(&dir).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
@@ -318,7 +318,7 @@ mod tests {
     /// the daemon's query readers live for its whole life.
     #[test]
     fn a_long_lived_reader_follows_commits() {
-        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-reload-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir("bs-nosync-reload");
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = crate::index::fields(&index).unwrap();
         let reader = index.reader().unwrap();
@@ -341,7 +341,7 @@ mod tests {
     /// each commit, and its files must carry the advice (`rr` in smaps).
     #[test]
     fn query_instance_follows_the_writer() {
-        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-query-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir("bs-nosync-query");
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = crate::index::fields(&index).unwrap();
         let mut writer = crate::index::background_writer(&index).unwrap();
@@ -390,7 +390,7 @@ mod tests {
     /// either way: dropping the syncs must not drop the data.
     #[test]
     fn commits_through_the_index_stay_searchable() {
-        let dir = crate::test_env::scratch_dir(&format!("bs-nosync-idx-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir("bs-nosync-idx");
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = crate::index::fields(&index).unwrap();
         let mut writer = crate::index::background_writer(&index).unwrap();

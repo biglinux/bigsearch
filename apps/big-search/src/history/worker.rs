@@ -492,7 +492,6 @@ mod tests {
     #[test]
     fn missing_documents_expire_after_the_grace() {
         let dir = crate::test_env::scratch_dir("bs-history-missing");
-        std::fs::create_dir_all(&dir).unwrap();
         let present = dir.join("present.md");
         std::fs::write(&present, b"x").unwrap();
         let conn = open_store(&dir.join("history.sqlite")).unwrap();

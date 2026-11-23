@@ -364,10 +364,7 @@ mod tests {
 
     #[test]
     fn content_signatures_skip_shared_physical_identity() {
-        let base = crate::test_env::scratch_dir(&format!(
-            "lsearch-content-signatures-{}",
-            std::process::id()
-        ));
+        let base = crate::test_env::scratch_dir("lsearch-content-signatures");
         let first = base.join("first.md");
         let second = base.join("second.md");
         std::fs::write(&first, b"same personal note").unwrap();
@@ -411,9 +408,7 @@ mod tests {
 
     #[test]
     fn edited_representative_loses_its_identity() {
-        let base =
-            crate::test_env::scratch_dir(&format!("lsearch-content-edited-{}", std::process::id()));
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::test_env::scratch_dir("lsearch-content-edited");
         let (first, second) = (base.join("first.md"), base.join("second.md"));
         std::fs::write(&first, b"edited note").unwrap();
         std::fs::write(&second, b"old note").unwrap();
@@ -439,10 +434,7 @@ mod tests {
 
     #[test]
     fn equal_text_needs_physical_identity() {
-        let base = crate::test_env::scratch_dir(&format!(
-            "lsearch-content-no-identity-{}",
-            std::process::id()
-        ));
+        let base = crate::test_env::scratch_dir("lsearch-content-no-identity");
         let first = base.join("first.md");
         let second = base.join("second.md");
         std::fs::write(&first, b"same personal note").unwrap();

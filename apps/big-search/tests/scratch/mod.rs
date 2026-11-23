@@ -1,10 +1,10 @@
-//! Scratch directories for the integration tests.
+//! Scratch directories for the tests.
 
 use std::path::{Path, PathBuf};
 
-/// An empty directory in `/tmp` for the home the binary indexes. The walk
-/// skips dot-directories and honours the `.gitignore` of a repository above
-/// it, and `TMPDIR` can be either (`~/.cache/…`, a repository's `target/`).
+/// An empty directory in `/tmp`, private to the test. The scan refuses a path
+/// under a dot-directory, a git work tree's ignored files or a build directory,
+/// and `TMPDIR` can be any of those (`~/.cache/…`, a repository's `target/`).
 pub fn scratch_dir(name: &str) -> PathBuf {
     use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU32, Ordering};

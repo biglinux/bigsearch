@@ -479,10 +479,7 @@ mod tests {
     }
 
     fn temporary_extract_dir(label: &str) -> std::path::PathBuf {
-        let dir =
-            crate::test_env::scratch_dir(&format!("lsearch-ex-{}-{label}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_env::scratch_dir(&format!("lsearch-ex-{label}"))
     }
 
     fn temporary_executable_dir(label: &str) -> std::path::PathBuf {

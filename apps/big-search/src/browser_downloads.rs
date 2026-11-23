@@ -215,7 +215,6 @@ mod tests {
     #[test]
     fn only_the_newest_unchanged_download_counts() {
         let dir = crate::test_env::scratch_dir("bs-browser-downloads");
-        std::fs::create_dir_all(&dir).unwrap();
         let file = |name: &str| {
             let path = dir.join(name);
             std::fs::write(&path, b"x").unwrap();

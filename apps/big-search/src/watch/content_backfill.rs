@@ -345,7 +345,7 @@ mod tests {
     /// land, and an index with nothing to tidy must be left alone.
     #[test]
     fn compaction_merges_into_one_segment() {
-        let dir = crate::test_env::scratch_dir(&format!("bs-compact-{}", std::process::id()));
+        let dir = crate::test_env::scratch_dir("bs-compact");
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = fields(&index).unwrap();
         let mut writer = crate::index::background_writer(&index).unwrap();

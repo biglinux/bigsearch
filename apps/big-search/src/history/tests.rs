@@ -63,7 +63,6 @@ fn rename_over_a_kept_document() {
 #[test]
 fn reused_inode_starts_a_new_history() {
     let dir = crate::test_env::scratch_dir("bs-history-inode");
-    std::fs::create_dir_all(&dir).unwrap();
     let store = store_with(open_store(&dir.join("history.sqlite")).unwrap(), &dir);
     let conn = store.conn.as_ref().unwrap();
     let notes = dir.join("notes.odt");
@@ -113,7 +112,7 @@ fn non_utf8_path_has_no_row() {
 /// version does not already hold, without touching the disk.
 #[test]
 fn catalogue_pass_skips_kept_documents() {
-    let dir = crate::test_env::scratch_dir(&format!("bs-history-unkept-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir("bs-history-unkept");
     let conn = open_store(&dir.join("history.sqlite")).unwrap();
     for (id, path) in [(1, "/d/kept.md"), (2, "/d/edited.md")] {
         conn.execute(

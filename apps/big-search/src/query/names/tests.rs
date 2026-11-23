@@ -109,7 +109,7 @@ fn names_rank_by_how_they_match() {
 /// Among names that match equally, the one changed most recently first.
 #[test]
 fn equal_names_rank_newest_first() {
-    let dir = crate::test_env::scratch_dir(&format!("lsearch-recent-{}", std::process::id()));
+    let dir = crate::test_env::scratch_dir("lsearch-recent");
     let day = std::time::Duration::from_secs(86_400);
     let now = std::time::SystemTime::now();
     let mut paths = Vec::new();

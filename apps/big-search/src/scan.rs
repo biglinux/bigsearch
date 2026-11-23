@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn user_ignore_seed_keeps_edits() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let base = crate::test_env::scratch_dir(&format!("lsearch-ignore-{}", std::process::id()));
+        let base = crate::test_env::scratch_dir("lsearch-ignore");
         let _config = EnvVarGuard::set("XDG_CONFIG_HOME", base.to_str().unwrap());
 
         let path = crate::config::user_ignore();
