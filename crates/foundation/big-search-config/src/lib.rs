@@ -601,29 +601,90 @@ pub fn add_source(source: &SourceEntry) -> io::Result<()> {
 /// Decided on the lines read under the write lock, so a folder another writer
 /// added a moment ago is not added twice.
 fn add_source_to(lines: &mut Vec<String>, source: &SourceEntry, home: &Path) -> io::Result<()> {
-    let listed = listed_sources(lines)?;
-    if listed.contains(&source.path) {
+    // TOML strings are UTF-8: another name would be written as a different path.
+    if source.path.to_str().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a UTF-8 path", source.path.display()),
+        ));
+    }
+    let before = parsed(lines)?;
+    let sources = source_entries(&before).to_vec();
+    if sources.iter().any(|entry| is_folder(entry, &source.path)) {
         return Ok(());
     }
     // No `[[source]]` means the home folder alone; adding a folder must keep
     // it, unless the folder is home itself.
-    if listed.is_empty() && source.path != home {
-        append_source(lines, &SourceEntry::new(home));
+    let mut added = Vec::new();
+    if sources.is_empty() && source.path != home {
+        added.push(SourceEntry::new(home));
     }
-    append_source(lines, source);
-    Ok(())
+    added.push(source.clone());
+    let mut appended = Vec::new();
+    for entry in &added {
+        append_source(&mut appended, entry);
+    }
+    let expected = with_sources(
+        before,
+        [sources, source_entries(&parsed(&appended)?).to_vec()].concat(),
+    );
+    edit_lines_to(lines, &expected, |lines| {
+        for entry in &added {
+            append_source(lines, entry);
+        }
+    })
 }
 
-/// The folders the file lists, as TOML reads it: a header in any spelling
-/// counts, and a header-like line inside a string does not.
-fn listed_sources(lines: &[String]) -> io::Result<Vec<PathBuf>> {
-    let config = parse(&lines.join("\n"))
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(config
-        .sources
-        .into_iter()
-        .map(|source| source.path)
-        .collect())
+/// The file as TOML reads it, every key kept.
+fn parsed(lines: &[String]) -> io::Result<toml::Table> {
+    lines
+        .join("\n")
+        .parse::<toml::Table>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// The `[[source]]` entries of a parsed file, in file order.
+fn source_entries(table: &toml::Table) -> &[toml::Value] {
+    table
+        .get("source")
+        .and_then(toml::Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+fn is_folder(entry: &toml::Value, path: &Path) -> bool {
+    entry
+        .get("path")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|listed| Path::new(listed) == path)
+}
+
+/// `table` with these `[[source]]` entries; none leaves no `source` key.
+fn with_sources(mut table: toml::Table, sources: Vec<toml::Value>) -> toml::Table {
+    if sources.is_empty() {
+        table.remove("source");
+    } else {
+        table.insert("source".to_owned(), toml::Value::Array(sources));
+    }
+    table
+}
+
+/// Apply an edit by line and keep it only when the file then reads as
+/// `expected`, key for key: the line editor sees headers, TOML also sees
+/// strings and inline arrays, so an edit that touched anything else is refused.
+fn edit_lines_to(
+    lines: &mut Vec<String>,
+    expected: &toml::Table,
+    edit: impl FnOnce(&mut Vec<String>),
+) -> io::Result<()> {
+    let mut edited = lines.clone();
+    edit(&mut edited);
+    // A NaN value never equals itself, so a file holding one is not edited;
+    // no setting here is a float.
+    if parsed(&edited)? != *expected {
+        return Err(unchanged_form());
+    }
+    *lines = edited;
+    Ok(())
 }
 
 /// Take a folder out of the catalogue. A folder the file does not list is
@@ -639,13 +700,29 @@ pub fn remove_source(path: &Path) -> io::Result<()> {
 }
 
 fn remove_source_from(lines: &mut Vec<String>, path: &Path, home: &Path) -> io::Result<()> {
-    let blocks = source_blocks(lines)?;
-    if let Some((_, block)) = blocks.iter().find(|(listed, _)| listed == path) {
-        lines.drain(block.clone());
-    } else if path == home && blocks.is_empty() {
-        return Err(missing_source(path));
+    let before = parsed(lines)?;
+    let sources = source_entries(&before).to_vec();
+    if !sources.iter().any(|entry| is_folder(entry, path)) {
+        if path == home && sources.is_empty() {
+            return Err(missing_source(path));
+        }
+        return Ok(());
     }
-    Ok(())
+    let blocks = source_blocks(lines)?;
+    let kept = sources
+        .into_iter()
+        .filter(|entry| !is_folder(entry, path))
+        .collect();
+    let expected = with_sources(before, kept);
+    edit_lines_to(lines, &expected, |lines| {
+        for (_, block) in blocks
+            .iter()
+            .rev()
+            .filter(|(listed, _)| listed.as_deref() == Some(path))
+        {
+            lines.drain(block.clone());
+        }
+    })
 }
 
 /// Turn reading the text inside a folder's files on or off.
@@ -675,23 +752,47 @@ fn set_content_in(
     home: &Path,
     content: bool,
 ) -> io::Result<bool> {
-    let blocks = source_blocks(lines)?;
-    if let Some((_, block)) = blocks.iter().find(|(listed, _)| listed == path) {
+    let before = parsed(lines)?;
+    let mut sources = source_entries(&before).to_vec();
+    if sources.iter().any(|entry| is_folder(entry, path)) {
+        for entry in sources.iter_mut().filter(|entry| is_folder(entry, path)) {
+            if let Some(entry) = entry.as_table_mut() {
+                entry.insert("content".to_owned(), toml::Value::Boolean(content));
+            }
+        }
+        let blocks = source_blocks(lines)?;
         let literal = if content { "true" } else { "false" };
-        upsert_line(lines, block.start + 1, block.end, "content", literal);
+        let expected = with_sources(before, sources);
+        edit_lines_to(lines, &expected, |lines| {
+            for (_, block) in blocks
+                .iter()
+                .rev()
+                .filter(|(listed, _)| listed.as_deref() == Some(path))
+            {
+                upsert_line(lines, block.start + 1, block.end, "content", literal);
+            }
+        })?;
         return Ok(true);
     }
-    if path == home && blocks.is_empty() {
-        append_source(
-            lines,
-            &SourceEntry {
-                content: Some(content),
-                ..SourceEntry::new(home)
-            },
-        );
+    if path == home && sources.is_empty() {
+        let entry = SourceEntry {
+            content: Some(content),
+            ..SourceEntry::new(home)
+        };
+        let mut appended = Vec::new();
+        append_source(&mut appended, &entry);
+        let expected = with_sources(before, source_entries(&parsed(&appended)?).to_vec());
+        edit_lines_to(lines, &expected, |lines| append_source(lines, &entry))?;
         return Ok(true);
     }
     Ok(false)
+}
+
+fn unchanged_form() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "the search settings file lists its folders in a form this editor does not change",
+    )
 }
 
 fn missing_source(path: &Path) -> io::Error {
@@ -882,7 +983,7 @@ fn next_table(lines: &[String], start: usize) -> usize {
 /// `[[ source ]]` and `[["source"]]` read as `[[source]]`. `None` when the
 /// line is not a header.
 fn header(line: &str) -> Option<String> {
-    let code = without_comment(line).trim();
+    let code = without_comment(line).trim_start_matches('\u{feff}').trim();
     let (open, close) = if code.starts_with("[[") && code.ends_with("]]") {
         ("[[", "]]")
     } else if code.starts_with('[') && code.ends_with(']') && code.len() > 1 {
@@ -948,12 +1049,20 @@ fn rewrite_assignment(line: &str, key: &str, literal: &str) -> String {
     }
 }
 
-/// The `[[source]]` blocks by line, in file order, each with the folder TOML
-/// reads from it. Refused when the lines and the parse disagree (a folder in
-/// an inline array, a header-like line inside a string), since an edit by
-/// line would then change another block than the one meant.
-fn source_blocks(lines: &[String]) -> io::Result<Vec<(PathBuf, std::ops::Range<usize>)>> {
-    let listed = listed_sources(lines)?;
+/// The `[[source]]` blocks by line, in file order, each paired with the path
+/// TOML reads from the entry in the same place. Where the lines and the parse
+/// disagree (an inline array, a header-like line inside a string) the pairing
+/// is wrong, and [`edit_lines_to`] refuses the edit built on it.
+fn source_blocks(lines: &[String]) -> io::Result<Vec<(Option<PathBuf>, std::ops::Range<usize>)>> {
+    let listed: Vec<Option<PathBuf>> = source_entries(&parsed(lines)?)
+        .iter()
+        .map(|entry| {
+            entry
+                .get("path")
+                .and_then(toml::Value::as_str)
+                .map(PathBuf::from)
+        })
+        .collect();
     let mut blocks = Vec::new();
     let mut index = 0;
     while index < lines.len() {
@@ -964,12 +1073,6 @@ fn source_blocks(lines: &[String]) -> io::Result<Vec<(PathBuf, std::ops::Range<u
         } else {
             index += 1;
         }
-    }
-    if blocks.len() != listed.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the search settings file lists its folders in a form this editor does not change",
-        ));
     }
     Ok(listed.into_iter().zip(blocks).collect())
 }

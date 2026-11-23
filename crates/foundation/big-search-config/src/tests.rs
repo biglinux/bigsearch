@@ -8,7 +8,7 @@ fn find_source(lines: &[String], path: &Path) -> Option<std::ops::Range<usize>> 
     source_blocks(lines)
         .ok()?
         .into_iter()
-        .find_map(|(listed, block)| (listed == path).then_some(block))
+        .find_map(|(listed, block)| (listed.as_deref() == Some(path)).then_some(block))
 }
 
 /// A machine nobody has configured shows the recommended amount of work.
@@ -123,7 +123,10 @@ fn listed_folders_read_as_toml() {
 fn edits_follow_parsed_folders() {
     let home = Path::new("/home/p");
     let lines_of = |text: &str| -> Vec<String> { text.lines().map(String::from).collect() };
-    let folders = |lines: &[String]| -> Vec<PathBuf> { listed_sources(lines).unwrap() };
+    let folders = |lines: &[String]| -> Vec<PathBuf> {
+        let sources = read_text(&lines.join("\n")).sources;
+        sources.into_iter().map(|source| source.path).collect()
+    };
 
     let mut quoted = lines_of("[[\"source\"]]\npath = \"/mnt/disk/\"\n");
     remove_source_from(&mut quoted, Path::new("/mnt/disk"), home).unwrap();
@@ -138,9 +141,47 @@ fn edits_follow_parsed_folders() {
 
     let in_string = "[origin]\nnote = \"\"\"\n[[source]]\npath = \"/mnt/x\"\n\"\"\"\n";
     let mut lines = lines_of(in_string);
-    let refused = remove_source_from(&mut lines, Path::new("/mnt/x"), home).unwrap_err();
-    assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(lines, lines_of(in_string));
+    remove_source_from(&mut lines, Path::new("/mnt/x"), home).unwrap();
+    assert_eq!(
+        lines,
+        lines_of(in_string),
+        "a folder TOML does not list is out already"
+    );
+
+    // As many header-like lines as folders, but not the same ones: only the
+    // file read after the edit tells.
+    let disguised = "source = [{ path = \"/a\" }, { path = \"/b\" }]\n[origin]\nnote = \"\"\"\n[[source]]\ncontent = true\n[[source]]\n\"\"\"\n";
+    let refused = remove_source_from(&mut lines_of(disguised), Path::new("/a"), home);
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    let at_value = "source = [{ path = \"/mnt/disk\", content = false }]\n[origin]\nnote = \"\"\"\n[[source]]\npath = \"/mnt/disk\"\n\"\"\"\n";
+    let refused = set_content_in(&mut lines_of(at_value), Path::new("/mnt/disk"), home, false);
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidData);
+
+    let twice =
+        "[[source]]\npath = \"/mnt/disk\"\n\n[[source]]\npath = \"/mnt/disk/\"\ncontent = true\n";
+    let mut lines = lines_of(twice);
+    assert!(set_content_in(&mut lines, Path::new("/mnt/disk"), home, false).unwrap());
+    let sources = read_text(&lines.join("\n")).sources;
+    assert!(
+        sources.iter().all(|source| source.content == Some(false)),
+        "{lines:?}"
+    );
+    remove_source_from(&mut lines, Path::new("/mnt/disk"), home).unwrap();
+    assert!(folders(&lines).is_empty(), "{lines:?}");
+
+    let mut marked = lines_of("\u{feff}[[source]]\npath = \"/mnt/disk\"\n");
+    remove_source_from(&mut marked, Path::new("/mnt/disk"), home).unwrap();
+    assert!(folders(&marked).is_empty(), "{marked:?}");
+}
+
+#[test]
+fn non_utf8_folder_refused() {
+    use std::os::unix::ffi::OsStrExt;
+    let folder = PathBuf::from(std::ffi::OsStr::from_bytes(b"/mnt/caf\xe9"));
+    let mut lines = Vec::new();
+    let refused = add_source_to(&mut lines, &SourceEntry::new(folder), Path::new("/home/p"));
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    assert!(lines.is_empty());
 }
 
 #[test]
