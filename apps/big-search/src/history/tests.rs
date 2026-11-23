@@ -222,6 +222,9 @@ fn sweep_drops_only_orphans() {
 /// are gone: taking it for one would drop the rows, then the objects.
 #[test]
 fn unreadable_shard_keeps_versions() {
+    if crate::test_env::runs_as_root() {
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let (dir, mut store) = store_with_versions("bs-history-sweep-denied", &["bb/one"]);
     let shard = dir.join("objects/bb");

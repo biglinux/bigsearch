@@ -51,4 +51,4 @@ impl Drop for EnvVarGuard {
 
 #[path = "../tests/scratch/mod.rs"]
 mod scratch;
-pub use scratch::scratch_dir;
+pub use scratch::{runs_as_root, scratch_dir};

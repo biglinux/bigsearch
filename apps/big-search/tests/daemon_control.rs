@@ -683,6 +683,9 @@ fn symlinked_folder_not_followed() {
 /// once made readable it is indexed by the next start.
 #[test]
 fn unreadable_folder_keeps_the_record() {
+    if scratch::runs_as_root() {
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new("bs-unreadable");
     let locked = sandbox.docs.join("locked");
@@ -786,6 +789,9 @@ fn renamed_over_folder_relisted() {
 /// a failed lookup is no evidence that another folder took its place.
 #[test]
 fn unreadable_saved_folder_keeps_entries() {
+    if scratch::runs_as_root() {
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new("bs-unreadable-saved");
     let outer = sandbox.docs.join("outer");
@@ -804,15 +810,30 @@ fn unreadable_saved_folder_keeps_entries() {
     let daemon = sandbox.start();
     sandbox.await_docs_watched();
     let kept = sandbox.catalogued_size(&inside);
-    drop(daemon);
+    let recorded_while_unread = sandbox.run_recorded();
+    // Readable again, a rescan reads it, and the run it completes is recorded.
     std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(command_accepted(&sandbox.sock, "rescan"));
+    let recorded_after_rescan = settles(|| sandbox.run_recorded());
+    drop(daemon);
     assert_eq!(kept, Some(5));
+    assert!(
+        !recorded_while_unread,
+        "a run that missed a folder was recorded"
+    );
+    assert!(
+        recorded_after_rescan,
+        "a clean rescan did not record its run"
+    );
     std::fs::remove_dir_all(&sandbox.base).ok();
 }
 
 /// A folder made readable while the daemon runs is watched and indexed.
 #[test]
 fn folder_made_readable_is_indexed() {
+    if scratch::runs_as_root() {
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new("bs-made-readable");
     let locked = sandbox.docs.join("locked");

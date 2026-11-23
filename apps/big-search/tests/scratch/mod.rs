@@ -25,3 +25,14 @@ pub fn scratch_dir(name: &str) -> PathBuf {
         .expect("create a fresh scratch directory");
     dir
 }
+
+/// Whether the tests run as root, who reads a folder of any mode: a test of a
+/// permission refusal has nothing to show then.
+#[allow(
+    dead_code,
+    reason = "every test binary compiles this module; only some test permissions"
+)]
+pub fn runs_as_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").is_ok_and(|process| process.uid() == 0)
+}
