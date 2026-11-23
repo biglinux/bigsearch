@@ -11,7 +11,7 @@ pkgver=0.1.0
 pkgrel=1
 arch=('x86_64')
 url="https://github.com/biglinux/bigsearch"
-license=('MIT')
+license=('MIT' 'Unicode-3.0')
 makedepends=('cargo' 'gettext' 'git' 'pkgconf' 'python' 'rsync')
 
 _local_root=""
@@ -94,6 +94,7 @@ package_big-search() {
     install -Dm644 README.md "${pkgdir}/usr/share/doc/big-search/README.md"
     install -Dm644 apps/big-search/DESIGN.md "${pkgdir}/usr/share/doc/big-search/DESIGN.md"
     install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/big-search/LICENSE"
+    install -Dm644 LICENSES/Unicode-3.0.txt "${pkgdir}/usr/share/licenses/big-search/Unicode-3.0.txt"
     CARGO_NET_OFFLINE=true python scripts/third-party-notices.py \
         --target "$(rustc -vV | sed -n 's/host: //p')" \
         >"${pkgdir}/usr/share/licenses/big-search/THIRD-PARTY-NOTICES"
@@ -119,6 +120,7 @@ package_big-docinfo() {
     done <apps/big-docinfo/po/LINGUAS
 
     install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/big-docinfo/LICENSE"
+    install -Dm644 LICENSES/Unicode-3.0.txt "${pkgdir}/usr/share/licenses/big-docinfo/Unicode-3.0.txt"
     CARGO_NET_OFFLINE=true python scripts/third-party-notices.py \
         --package big-docinfo-cli \
         --target "$(rustc -vV | sed -n 's/host: //p')" \

@@ -418,9 +418,9 @@ fn start_inotify(
 
 /// What a start's catch-up compares again.
 struct CatchUp {
-    /// Saved folders that are no longer the folder watched: another folder
-    /// took their place while the daemon was stopped (`mv proj.new proj`), or a
-    /// file, a symlink or nothing did. Their catalogue rows describe the old one.
+    /// Saved folders another folder took the place of while the daemon was
+    /// stopped (`mv proj.new proj`), or a file, a symlink or nothing did. Their
+    /// catalogue rows describe the old one.
     replaced: Vec<PathBuf>,
     /// Folders whose entries changed since a watch last covered them.
     changed: Vec<PathBuf>,
