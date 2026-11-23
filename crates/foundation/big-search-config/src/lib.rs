@@ -624,14 +624,20 @@ fn lists_no_source(lines: &[String]) -> bool {
 ///
 /// # Errors
 ///
-/// When the file cannot be read or written.
+/// [`io::ErrorKind::NotFound`] for the home folder of a file that lists no
+/// folder, since that file catalogues home; otherwise when the file cannot be
+/// read or written.
 pub fn remove_source(path: &Path) -> io::Result<()> {
-    edit(|lines| {
-        if let Some(block) = find_source(lines, path) {
-            lines.drain(block);
-        }
-        Ok(())
-    })
+    edit(|lines| remove_source_from(lines, path, &home_dir()))
+}
+
+fn remove_source_from(lines: &mut Vec<String>, path: &Path, home: &Path) -> io::Result<()> {
+    if let Some(block) = find_source(lines, path) {
+        lines.drain(block);
+    } else if lists_no_source(lines) && path == home {
+        return Err(missing_source(path));
+    }
+    Ok(())
 }
 
 /// Turn reading the text inside a folder's files on or off.

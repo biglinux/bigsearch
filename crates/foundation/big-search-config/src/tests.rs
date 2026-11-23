@@ -69,6 +69,20 @@ fn folder_removal_drops_whole_block() {
 }
 
 #[test]
+fn implicit_home_removal_refused() {
+    let mut lines: Vec<String> = "[defaults]\ncontent = true\n"
+        .lines()
+        .map(String::from)
+        .collect();
+    let home = Path::new("/home/p");
+    let refused = remove_source_from(&mut lines, home, home).expect_err("home stays catalogued");
+    assert_eq!(refused.kind(), io::ErrorKind::NotFound);
+    remove_source_from(&mut lines, Path::new("/mnt/disk"), home)
+        .expect("an unlisted folder is out");
+    assert_eq!(lines, ["[defaults]", "content = true"]);
+}
+
+#[test]
 fn one_folder_stops_being_read_inside() {
     let text = "[[source]]\npath = \"/home/p\"\n\n[[source]]\npath = \"/mnt/disk\"\n";
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
