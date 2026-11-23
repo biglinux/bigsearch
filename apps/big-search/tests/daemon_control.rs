@@ -18,7 +18,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 struct KillOnDrop(Child);
 impl Drop for KillOnDrop {
@@ -740,17 +740,22 @@ fn emptied_content_index_refilled() {
     std::fs::remove_dir_all(&sandbox.base).ok();
 }
 
-/// A folder renamed over a listed one while the daemon runs is read and listed
-/// with its own inode, also when it has the old folder's time and size.
+/// A folder renamed over a listed one with the same time and size (two empty
+/// folders) is watched and listed with its own inode.
 #[test]
 fn renamed_over_folder_relisted() {
     use std::os::unix::fs::MetadataExt;
     let sandbox = Sandbox::new("bs-renamed-over");
     let project = sandbox.docs.join("proj");
     let replacement = sandbox.docs.join("proj.new");
-    std::fs::create_dir(&project).unwrap();
-    std::fs::create_dir(&replacement).unwrap();
-    std::fs::write(replacement.join("plan.txt"), "delta").unwrap();
+    let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
+    for folder in [&project, &replacement] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::File::open(folder)
+            .unwrap()
+            .set_modified(an_hour_ago)
+            .unwrap();
+    }
     let _daemon = sandbox.start();
     sandbox.await_docs_watched();
     std::fs::rename(&replacement, &project).unwrap();
@@ -769,9 +774,10 @@ fn renamed_over_folder_relisted() {
             .is_ok_and(|size| u64::try_from(size) == Ok(inode))),
         "the folder renamed into place is listed with the old inode"
     );
+    std::fs::write(project.join("plan.txt"), "delta").unwrap();
     assert!(
-        settles(|| sandbox.catalogued_size(&project.join("plan.txt")) == Some(5)),
-        "the file of the folder renamed into place was not catalogued"
+        settles(|| sandbox.name_hits("plan") == 1),
+        "the folder renamed into place is not watched"
     );
     std::fs::remove_dir_all(&sandbox.base).ok();
 }

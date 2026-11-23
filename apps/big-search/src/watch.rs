@@ -1164,16 +1164,16 @@ fn reconcile(
             use std::os::unix::fs::MetadataExt;
             let mut recorded = recorded;
             // A folder renamed over a listed one can match its time and size
-            // (ext4 folders are 4096 bytes): the inode tells them apart, and
-            // the old folder's rows leave before the new one is read.
+            // (a small ext4 folder is one block): the inode tells them apart,
+            // and the old folder's rows leave before the new one is read.
             let replaced = metadata.is_dir()
                 && recorded.is_some()
                 && watches
                     .dirs
                     .recorded(&path)
                     .is_some_and(|(_, inode)| inode != metadata.ino());
-            if replaced
-                && evict(
+            if replaced {
+                evict(
                     writer,
                     f,
                     state,
@@ -1181,8 +1181,7 @@ fn reconcile(
                     &path,
                     false,
                     &mut offline_sources,
-                )
-            {
+                );
                 outcome.index_changed = true;
                 outcome.state_changed = true;
                 outcome.deleted = true;
