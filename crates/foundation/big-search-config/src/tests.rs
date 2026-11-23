@@ -6,7 +6,7 @@ fn find_source(lines: &[String], path: &Path) -> Option<std::ops::Range<usize>> 
     source_blocks(lines).ok()?.into_iter().find_map(|block| {
         block
             .is_folder(path)
-            .then(|| block.body.start - 1..block.whole.end)
+            .then_some(block.header..block.whole.end)
     })
 }
 
@@ -216,6 +216,56 @@ fn removal_keeps_neighbor_comments() {
         lines.join("\n"),
         "[[source]]\npath = \"/home/p\"\n\n# where files came from\n[origin]\nenabled = true"
     );
+}
+
+/// Comments are kept with what they describe: the file's own at its top, a
+/// setting commented out under its table, a folder's note above its block.
+#[test]
+fn removal_keeps_other_comments() {
+    let home = Path::new("/home/p");
+    let removed = |text: &str, path: &str| {
+        let mut lines: Vec<String> = text.lines().map(String::from).collect();
+        remove_source_from(&mut lines, Path::new(path), home).unwrap();
+        lines.join("\n")
+    };
+    assert_eq!(
+        removed(
+            "# Search settings\n[[source]]\npath = \"/mnt/disk\"\n\n[[source]]\npath = \"/home/p\"\n",
+            "/mnt/disk"
+        ),
+        "# Search settings\n[[source]]\npath = \"/home/p\""
+    );
+    assert_eq!(
+        removed(
+            "[defaults]\ncontent = true\n# metadata = true\n[[source]]\npath = \"/mnt/disk\"\n[[source]]\npath = \"/home/p\"\n",
+            "/mnt/disk"
+        ),
+        "[defaults]\ncontent = true\n# metadata = true\n[[source]]\npath = \"/home/p\""
+    );
+    let commented =
+        "[[source]]\npath = \"/mnt/disk\"\n# content = false\n[[source]]\npath = \"/home/p\"\n";
+    assert_eq!(
+        removed(commented, "/home/p"),
+        "[[source]]\npath = \"/mnt/disk\"\n# content = false"
+    );
+    assert_eq!(
+        removed(commented, "/mnt/disk"),
+        "[[source]]\npath = \"/home/p\""
+    );
+}
+
+#[test]
+fn mixed_file_ending_in_crlf_edited() {
+    let original = "[origin]\r\nnote = \"\"\"a\nb\"\"\"\r\n[[source]]\r\npath = \"/mnt/disk\"\r\ncontent = true # keep\r\n";
+    let (dir, file) = scratch_file("mixed-crlf", original);
+    edit_file(&file, |lines| {
+        set_content_in(lines, Path::new("/mnt/disk"), Path::new("/home/p"), false).map(|_| ())
+    })
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(text.contains("content = false      # keep\r\n"), "{text:?}");
+    assert!(text.contains("\"\"\"a\nb\"\"\"\r\n"), "{text:?}");
 }
 
 #[test]

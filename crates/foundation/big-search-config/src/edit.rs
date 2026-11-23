@@ -117,8 +117,8 @@ pub(crate) fn add_source_to(
 
 /// The file as TOML reads it, every key kept.
 pub(crate) fn parsed(lines: &[String]) -> io::Result<toml::Table> {
-    lines
-        .join("\n")
+    // Ended like the file, so a last line's `\r` is part of a line ending.
+    format!("{}\n", lines.join("\n"))
         .parse::<toml::Table>()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
@@ -276,7 +276,7 @@ pub(crate) fn set_content_in(
         let expected = with_sources(before, sources);
         edit_lines_to(lines, &expected, |lines| {
             for block in blocks.iter().rev().filter(|block| block.is_folder(path)) {
-                upsert_line(lines, block.body.start, block.body.end, "content", literal);
+                upsert_line(lines, block.header + 1, block.whole.end, "content", literal);
             }
         })?;
         return Ok(true);
@@ -563,11 +563,13 @@ pub(crate) fn upsert_line(
 
 fn rewrite_assignment(line: &str, key: &str, literal: &str) -> String {
     let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    // A line of a file that mixes endings keeps its own `\r`.
+    let cr = if line.ends_with('\r') { "\r" } else { "" };
     match line.get(without_comment(line).len()..).map(str::trim_end) {
         Some(comment) if !comment.is_empty() => {
-            format!("{indent}{key} = {literal}      {comment}")
+            format!("{indent}{key} = {literal}      {comment}{cr}")
         }
-        _ => format!("{indent}{key} = {literal}"),
+        _ => format!("{indent}{key} = {literal}{cr}"),
     }
 }
 
@@ -577,11 +579,10 @@ fn rewrite_assignment(line: &str, key: &str, literal: &str) -> String {
 /// [`edit_lines_to`] refuses the edit built on it.
 pub(crate) struct SourceBlock {
     pub(crate) folder: Option<PathBuf>,
-    /// The comments right above the header through the blank lines after the
-    /// last setting: what leaves with the block.
+    pub(crate) header: usize,
+    /// The block's own comments above the header through the line before the
+    /// next table's: what leaves with the block.
     pub(crate) whole: std::ops::Range<usize>,
-    /// The lines after the header through the last setting.
-    pub(crate) body: std::ops::Range<usize>,
 }
 
 impl SourceBlock {
@@ -590,10 +591,8 @@ impl SourceBlock {
     }
 }
 
-/// The `[[source]]` blocks in file order. Comments right above a header belong
-/// to its table, so the next table's comments stay with it.
+/// The `[[source]]` blocks in file order.
 pub(crate) fn source_blocks(lines: &[String]) -> io::Result<Vec<SourceBlock>> {
-    let is_comment = |line: &String| line.trim_start().starts_with('#');
     let folders = source_entries(&parsed(lines)?)
         .iter()
         .map(|entry| {
@@ -611,30 +610,39 @@ pub(crate) fn source_blocks(lines: &[String]) -> io::Result<Vec<SourceBlock>> {
             continue;
         }
         let next = next_table(lines, index);
-        let mut start = index;
-        while start > 0 && is_comment(&lines[start - 1]) {
-            start -= 1;
-        }
-        let mut end = next;
-        while end > index + 1 && is_comment(&lines[end - 1]) {
-            end -= 1;
-        }
-        let mut body_end = end;
-        while body_end > index + 1 && lines[body_end - 1].trim().is_empty() {
-            body_end -= 1;
-        }
-        blocks.push((start..end, index + 1..body_end));
+        let end = if next < lines.len() {
+            owned_comments_start(lines, next)
+        } else {
+            next
+        };
+        blocks.push((index, owned_comments_start(lines, index)..end));
         index = next;
     }
     Ok(folders
         .into_iter()
         .zip(blocks)
-        .map(|(folder, (whole, body))| SourceBlock {
+        .map(|(folder, (header, whole))| SourceBlock {
             folder,
+            header,
             whole,
-            body,
         })
         .collect())
+}
+
+/// Where the comments that belong to the table at `header` begin: the comment
+/// lines right above it, when a blank line parts them from what comes before.
+/// Comments that follow a setting with no blank line are that table's (a
+/// setting commented out), and those at the top of the file are the file's.
+fn owned_comments_start(lines: &[String], header: usize) -> usize {
+    let mut start = header;
+    while start > 0 && lines[start - 1].trim_start().starts_with('#') {
+        start -= 1;
+    }
+    if start > 0 && start < header && lines[start - 1].trim().is_empty() {
+        start
+    } else {
+        header
+    }
 }
 
 /// Write a whole `[[source]]` block at the end of the file.
