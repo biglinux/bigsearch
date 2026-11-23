@@ -704,8 +704,8 @@ fn unreadable_folder_keeps_the_record() {
     std::fs::remove_dir_all(&sandbox.base).ok();
 }
 
-/// A folder renamed over a listed one while the daemon runs is listed with its
-/// own inode, or the next start would take it for a replaced folder.
+/// A folder renamed over a listed one while the daemon runs is read and listed
+/// with its own inode, also when it has the old folder's time and size.
 #[test]
 fn renamed_over_folder_relisted() {
     use std::os::unix::fs::MetadataExt;
@@ -732,6 +732,10 @@ fn renamed_over_folder_relisted() {
             .and_then(listed)
             .is_ok_and(|size| u64::try_from(size) == Ok(inode))),
         "the folder renamed into place is listed with the old inode"
+    );
+    assert!(
+        settles(|| sandbox.catalogued_size(&project.join("plan.txt")) == Some(5)),
+        "the file of the folder renamed into place was not catalogued"
     );
     std::fs::remove_dir_all(&sandbox.base).ok();
 }

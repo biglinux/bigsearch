@@ -1161,6 +1161,33 @@ fn reconcile(
         // one, so the rules also evict what an earlier version indexed before
         // they covered it. Skipping it instead would strand those documents.
         if let Some(metadata) = metadata.filter(|_| !out_of_scope) {
+            use std::os::unix::fs::MetadataExt;
+            let mut recorded = recorded;
+            // A folder renamed over a listed one can match its time and size
+            // (ext4 folders are 4096 bytes): the inode tells them apart, and
+            // the old folder's rows leave before the new one is read.
+            let replaced = metadata.is_dir()
+                && recorded.is_some()
+                && watches
+                    .dirs
+                    .recorded(&path)
+                    .is_some_and(|(_, inode)| inode != metadata.ino());
+            if replaced
+                && evict(
+                    writer,
+                    f,
+                    state,
+                    watches,
+                    &path,
+                    false,
+                    &mut offline_sources,
+                )
+            {
+                outcome.index_changed = true;
+                outcome.state_changed = true;
+                outcome.deleted = true;
+                recorded = None;
+            }
             let (mtime, size) = catalogue::meta_pair(&metadata);
             // A listed folder this user could not read may have been made
             // readable (chmod, chown): only its change time moved.
