@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! An e-mail message saved as a file (`.eml`, RFC 5322 with MIME): its headers
 //! and the text of its body, decoded.
 //!

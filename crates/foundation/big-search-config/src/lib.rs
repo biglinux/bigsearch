@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! The big-search configuration file: what it says, and how to change it.
 //!
 //! One file, `$XDG_CONFIG_HOME/big-search/config.toml`, read by the search

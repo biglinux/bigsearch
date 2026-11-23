@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! The date that identifies a document, chosen by the words around each date.
 //!
 //! A contract mentions its signature, its start, its end and the tenant's birth;

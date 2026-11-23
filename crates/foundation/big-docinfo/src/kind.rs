@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! Document kind from the words at its top, in Portuguese, English and Spanish.
 //!
 //! A document usually names itself in its first lines ("CONTRATO DE LOCAÇÃO",

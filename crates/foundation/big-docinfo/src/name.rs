@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! The suggested file name: `[date] [kind] title.ext`, built from fields, never
 //! guessed.
 //!

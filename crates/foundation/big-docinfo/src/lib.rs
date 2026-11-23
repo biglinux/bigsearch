@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! What a document is, read from its text alone, and a file name built from that.
 //!
 //! Given the text a desktop extractor gets out of a file (`pdftotext`, the XML of

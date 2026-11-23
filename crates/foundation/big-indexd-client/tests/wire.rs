@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! The big-search daemon's own answers, captured by
 //! `scripts/capture-search-wire.py`: every request this client can send goes
 //! through its types unchanged, and every answer decodes.

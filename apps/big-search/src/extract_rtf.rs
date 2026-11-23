@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! The text of an RTF document, and the title its `{\info{\title …}}` declares.
 //!
 //! RTF is text with control words: `\par` ends a paragraph, `\'e9` is a byte in

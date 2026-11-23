@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! `big-docinfo`: suggest a name for a document from what it says.
 //!
 //! ```text

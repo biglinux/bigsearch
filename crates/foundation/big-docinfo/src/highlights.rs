@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! A few sentences of the document itself, as a preview ("trechos principais").
 //!
 //! Nothing is rewritten, so nothing can be invented: sentences are scored by how

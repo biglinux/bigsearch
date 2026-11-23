@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! The lines a document sets in large type at its opening: what a reader takes
 //! for its title, and what `big-docinfo` weighs as one.
 //!

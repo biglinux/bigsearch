@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! Who a document belongs to, and its title.
 //!
 //! The entity comes from the first evidence found, in this order: a labeled

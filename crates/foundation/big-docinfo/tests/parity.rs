@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! Every field of every fixture document, against a recorded answer.
 //!
 //! `fixtures/expected.jsonl` holds the recorded answers. A behavior change is
