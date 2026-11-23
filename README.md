@@ -62,10 +62,8 @@ install -Dm644 -t ~/.config/systemd/user apps/big-search/packaging/big-search.se
 systemctl --user enable --now big-search.service
 ```
 
-The unit is hardened: `ProtectSystem=strict`, `ProtectHome=read-only` with a
-writable data directory, `RestrictAddressFamilies=AF_UNIX` and a syscall
-filter. On Arch-based systems, `cd pkgbuild && makepkg -si` builds and
-installs the `big-search` and `big-docinfo` packages from this checkout instead.
+On Arch-based systems, `cd pkgbuild && makepkg -si` builds and installs the
+`big-search` and `big-docinfo` packages from this checkout instead.
 
 ## Use
 
