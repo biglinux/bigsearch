@@ -164,22 +164,7 @@ pub(super) fn run_content_backfill_batch(
     crate::throttle::begin_cpu_window();
     prune_orphans_after_deletion(content_index, writer, content_backfill)?;
 
-    let cooldown = if content_backfill.bypass_cooldown {
-        Duration::ZERO
-    } else {
-        crate::settings::content_cooldown()
-    };
-    let (batch, next_cursor) = content::pending_catalog_batch_after(
-        content_backfill.cursor.take(),
-        content_backfill.batch_limit,
-        cooldown,
-    )?;
-    content_backfill.cursor = next_cursor;
-    content_backfill
-        .deferred_gauge
-        .store(batch.deferred as u64, Ordering::Relaxed);
-    content::record_skipped_candidates(&batch.non_candidates)
-        .context("record policy-skipped entries")?;
+    let batch = next_batch(content_backfill)?;
 
     let processed = if batch.files.is_empty() {
         None
@@ -215,6 +200,28 @@ pub(super) fn run_content_backfill_batch(
         return Ok(false);
     }
     end_pass(writer, content_backfill, batch.deferred, batch.retry_in)
+}
+
+/// The next files to read, the cursor moved past them; the files the policy
+/// skips are recorded as such.
+fn next_batch(content_backfill: &mut ContentBackfill) -> Result<content::PendingContentBatch> {
+    let cooldown = if content_backfill.bypass_cooldown {
+        Duration::ZERO
+    } else {
+        crate::settings::content_cooldown()
+    };
+    let (batch, next_cursor) = content::pending_catalog_batch_after(
+        content_backfill.cursor.take(),
+        content_backfill.batch_limit,
+        cooldown,
+    )?;
+    content_backfill.cursor = next_cursor;
+    content_backfill
+        .deferred_gauge
+        .store(batch.deferred as u64, Ordering::Relaxed);
+    content::record_skipped_candidates(&batch.non_candidates)
+        .context("record policy-skipped entries")?;
+    Ok(batch)
 }
 
 /// At the start of a pass, drop content documents whose files left the

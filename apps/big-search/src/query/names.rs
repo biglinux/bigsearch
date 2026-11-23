@@ -110,12 +110,6 @@ fn newest_first_on_ties(
 /// start or end where the query does, are lifted above the rest, so they are
 /// among the candidates even when only a page of them is read.
 fn name_query(f: &crate::index::Fields, words: &[String], filter: &Filter) -> Option<BooleanQuery> {
-    let term = |field, text: &str| -> Box<dyn Query> {
-        Box::new(TermQuery::new(
-            Term::from_field_text(field, text),
-            IndexRecordOption::Basic,
-        ))
-    };
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     for word in words {
         let chars: Vec<char> = word.chars().collect();
