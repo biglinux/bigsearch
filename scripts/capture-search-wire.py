@@ -153,9 +153,6 @@ def main() -> int:
                     print("the daemon did not open its socket", file=sys.stderr)
                     return 1
                 time.sleep(0.1)
-            # The daemon catalogues only what changes until it is asked to
-            # build the list; the query below has to find the file.
-            ask(sock_path, '{"v":2,"cmd":"rebuild"}')
             while (
                 json.loads(ask(sock_path, '{"v":2,"cmd":"status"}')).get("indexed", 0)
                 == 0
