@@ -193,7 +193,12 @@ def main() -> int:
             pairs = failure or exchanges(sock_path, home)
         finally:
             server.terminate()
-            server.wait(timeout=10)
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                # Still running: it would outlive its removed scratch folder.
+                server.kill()
+                server.wait()
     if isinstance(pairs, str):
         print(pairs, file=sys.stderr)
         return 1
