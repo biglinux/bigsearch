@@ -269,7 +269,7 @@ fn mixed_file_ending_in_crlf_edited() {
 }
 
 #[test]
-fn unchanged_settings_not_rewritten() {
+fn no_op_edit_keeps_file() {
     use std::os::unix::fs::MetadataExt;
     let (dir, file) = scratch_file("unchanged", "[[source]]\npath = \"/mnt/disk\"\n");
     let before = std::fs::metadata(&file).unwrap().ino();
