@@ -3,7 +3,6 @@ use super::{EntryKind, Filter, Hit, count_capped, file_name};
 use crate::index::fields;
 use anyhow::Result;
 use std::collections::HashSet;
-use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
@@ -228,12 +227,10 @@ pub(super) fn name_match(name: &str, words: &[String]) -> Option<NameMatch> {
             return None;
         };
     }
-    let stem = Path::new(name)
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_default();
     Some(NameMatch {
-        whole_name: crate::index::name_words(&stem) == words,
+        // The key the index stores for the name, so a hit ranks as whole
+        // exactly when the stem query would find it.
+        whole_name: crate::index::stem_key(name) == words.join(" "),
         words: quality,
     })
 }
