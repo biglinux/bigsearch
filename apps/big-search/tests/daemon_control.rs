@@ -704,6 +704,42 @@ fn unreadable_folder_keeps_the_record() {
     std::fs::remove_dir_all(&sandbox.base).ok();
 }
 
+/// A content index left empty at start, as a new analyzer leaves it, is filled
+/// again on a start that watches the saved folders.
+#[test]
+fn emptied_content_index_refilled() {
+    let sandbox = Sandbox::new("bs-content-refilled");
+    std::fs::write(sandbox.docs.join("note.md"), "epsilon-unique-word").unwrap();
+    sandbox.age_folders();
+    let daemon = sandbox.start();
+    let found = |what: &str| {
+        await_content_result(
+            &sandbox.home,
+            &sandbox.data,
+            &sandbox.run,
+            "epsilon-unique-word",
+            what,
+        )
+    };
+    assert!(found("note.md"), "the note was never indexed");
+    sandbox.stop(daemon);
+    for entry in std::fs::read_dir(sandbox.data.join("big-search/content-index")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    let _daemon = sandbox.start();
+    assert!(
+        found("note.md"),
+        "the emptied content index was not filled again"
+    );
+    std::fs::remove_dir_all(&sandbox.base).ok();
+}
+
 /// A folder renamed over a listed one while the daemon runs is read and listed
 /// with its own inode, also when it has the old folder's time and size.
 #[test]
