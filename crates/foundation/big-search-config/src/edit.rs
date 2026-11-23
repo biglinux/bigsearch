@@ -29,10 +29,7 @@ pub fn apply_preset(preset: Preset) -> io::Result<()> {
 ///
 /// When the file cannot be written.
 pub fn set_defaults(values: &[(&str, &str)]) -> io::Result<()> {
-    edit(|lines| {
-        set_in_table(lines, "[defaults]", values);
-        Ok(())
-    })
+    edit(|lines| set_table_values(lines, "[defaults]", values))
 }
 
 /// Set keys in `[origin]`, the block that says what may be remembered about
@@ -42,10 +39,7 @@ pub fn set_defaults(values: &[(&str, &str)]) -> io::Result<()> {
 ///
 /// When the file cannot be written.
 pub fn set_origin(values: &[(&str, &str)]) -> io::Result<()> {
-    edit(|lines| {
-        set_in_table(lines, "[origin]", values);
-        Ok(())
-    })
+    edit(|lines| set_table_values(lines, "[origin]", values))
 }
 
 /// Set keys in `[history]`, the block that says whether earlier versions of
@@ -55,10 +49,7 @@ pub fn set_origin(values: &[(&str, &str)]) -> io::Result<()> {
 ///
 /// When the file cannot be written.
 pub fn set_history(values: &[(&str, &str)]) -> io::Result<()> {
-    edit(|lines| {
-        set_in_table(lines, "[history]", values);
-        Ok(())
-    })
+    edit(|lines| set_table_values(lines, "[history]", values))
 }
 
 /// Add a folder to the catalogue.
@@ -296,7 +287,7 @@ pub(crate) fn set_content_in(
 fn unchanged_form() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "the search settings file lists its folders in a form this editor does not change",
+        "the search settings file is written in a form this editor does not change",
     )
 }
 
@@ -467,6 +458,45 @@ pub(crate) fn write_atomically(
 }
 
 /// Set keys inside `table`, adding the table itself when the file has none.
+/// Set `values` in `table`, kept only when the file then reads with exactly
+/// those values there and nothing else changed; values it holds already leave
+/// the file as it was.
+pub(crate) fn set_table_values(
+    lines: &mut Vec<String>,
+    table: &str,
+    values: &[(&str, &str)],
+) -> io::Result<()> {
+    let before = parsed(lines)?;
+    let mut expected = before.clone();
+    let block = expected
+        .entry(table.trim_matches(['[', ']']))
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let Some(block) = block.as_table_mut() else {
+        return Err(unchanged_form());
+    };
+    for (key, literal) in values {
+        block.insert((*key).to_owned(), literal_value(literal)?);
+    }
+    if same_table(&expected, &before) {
+        return Ok(());
+    }
+    edit_lines_to(lines, &expected, |lines| set_in_table(lines, table, values))
+}
+
+/// The value a TOML literal stands for.
+fn literal_value(literal: &str) -> io::Result<toml::Value> {
+    format!("value = {literal}")
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|mut table| table.remove("value"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{literal} is not a TOML value"),
+            )
+        })
+}
+
 pub(crate) fn set_in_table(lines: &mut Vec<String>, table: &str, values: &[(&str, &str)]) {
     let start = match lines
         .iter()

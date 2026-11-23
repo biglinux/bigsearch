@@ -200,6 +200,30 @@ fn unknown_choices_named() {
     assert!(unknown_choices(per_folder).is_empty());
 }
 
+/// A setting is changed where the service reads it or not at all; a header
+/// quoted inside a multi-line string is text.
+#[test]
+fn setting_edit_reads_as_asked() {
+    let text = "[origin]\nnote = \"\"\"\n[\"defaults\"]\ncontent = true\n\"\"\"\n\n[defaults]\ncontent=true # keep\n";
+    let lines = || text.lines().map(String::from).collect::<Vec<String>>();
+    let mut changed = lines();
+    let outcome = set_table_values(&mut changed, "[defaults]", &[("content", "false")]);
+    let config = read_text(&changed.join("\n"));
+    assert!(
+        outcome.is_err() || !config.defaults.content,
+        "reported done while the service still reads content = true: {changed:?}"
+    );
+    assert_eq!(
+        parsed(&changed).unwrap()["origin"],
+        parsed(&lines()).unwrap()["origin"]
+    );
+
+    let set = vec!["[defaults]".to_owned(), "content=true # keep".to_owned()];
+    let mut same = set.clone();
+    set_table_values(&mut same, "[defaults]", &[("content", "true")]).unwrap();
+    assert_eq!(same, set, "a value already set was rewritten");
+}
+
 /// A folder added with its own link settings keeps them over the defaults.
 #[test]
 fn added_folder_keeps_overrides() {
