@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// The lines of the `[[source]]` block for `path`, if the file has one.
+fn find_source(lines: &[String], path: &Path) -> Option<std::ops::Range<usize>> {
+    source_blocks(lines)
+        .ok()?
+        .into_iter()
+        .find_map(|(listed, block)| (listed == path).then_some(block))
+}
+
 /// A machine nobody has configured shows the recommended amount of work.
 #[test]
 fn untouched_machine_is_balanced() {
@@ -89,8 +97,6 @@ fn spaced_source_header_recognised() {
     );
 }
 
-/// Whether the file lists a folder is what TOML reads: a quoted header counts,
-/// and a header-like line inside a string does not.
 #[test]
 fn listed_folders_read_as_toml() {
     let home = Path::new("/home/p");
@@ -111,6 +117,30 @@ fn listed_folders_read_as_toml() {
         added("[origin]\nnote = \"\"\"\n[[source]]\n\"\"\"\n"),
         [PathBuf::from("/home/p"), PathBuf::from("/mnt/new")]
     );
+}
+
+#[test]
+fn edits_follow_parsed_folders() {
+    let home = Path::new("/home/p");
+    let lines_of = |text: &str| -> Vec<String> { text.lines().map(String::from).collect() };
+    let folders = |lines: &[String]| -> Vec<PathBuf> { listed_sources(lines).unwrap() };
+
+    let mut quoted = lines_of("[[\"source\"]]\npath = \"/mnt/disk/\"\n");
+    remove_source_from(&mut quoted, Path::new("/mnt/disk"), home).unwrap();
+    assert!(folders(&quoted).is_empty(), "{quoted:?}");
+
+    let other = "[[\"sour ce\"]]\npath = \"/home/p\"\nkeep = 1\n";
+    let mut lines = lines_of(other);
+    remove_source_from(&mut lines, home, home).expect_err("home is catalogued implicitly");
+    assert_eq!(lines, lines_of(other));
+    assert!(set_content_in(&mut lines, home, home, false).unwrap());
+    assert_eq!(folders(&lines), [PathBuf::from("/home/p")]);
+
+    let in_string = "[origin]\nnote = \"\"\"\n[[source]]\npath = \"/mnt/x\"\n\"\"\"\n";
+    let mut lines = lines_of(in_string);
+    let refused = remove_source_from(&mut lines, Path::new("/mnt/x"), home).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(lines, lines_of(in_string));
 }
 
 #[test]
@@ -428,11 +458,10 @@ fn concurrent_writers_keep_both() {
     assert_eq!(table["defaults"].as_table().unwrap().len(), 80, "{text}");
 }
 
-/// A file written with Windows line endings keeps them.
 #[test]
 fn inline_table_edit_refused() {
     let original = "defaults = { content = true }\n";
-    let (dir, file) = scratch_file("quoted", original);
+    let (dir, file) = scratch_file("inline", original);
     let refused = edit_file(&file, |lines| {
         set_in_table(lines, "[defaults]", &[("content", "false")]);
         Ok(())
@@ -444,6 +473,7 @@ fn inline_table_edit_refused() {
     assert_eq!(text, original);
 }
 
+/// A file written with Windows line endings keeps them.
 #[test]
 fn crlf_file_stays_crlf() {
     let (dir, file) = scratch_file("crlf", "# mine\r\n[defaults]\r\ncontent = true\r\n");

@@ -639,9 +639,10 @@ pub fn remove_source(path: &Path) -> io::Result<()> {
 }
 
 fn remove_source_from(lines: &mut Vec<String>, path: &Path, home: &Path) -> io::Result<()> {
-    if let Some(block) = find_source(lines, path) {
-        lines.drain(block);
-    } else if path == home && listed_sources(lines)?.is_empty() {
+    let blocks = source_blocks(lines)?;
+    if let Some((_, block)) = blocks.iter().find(|(listed, _)| listed == path) {
+        lines.drain(block.clone());
+    } else if path == home && blocks.is_empty() {
         return Err(missing_source(path));
     }
     Ok(())
@@ -674,12 +675,13 @@ fn set_content_in(
     home: &Path,
     content: bool,
 ) -> io::Result<bool> {
-    if let Some(block) = find_source(lines, path) {
+    let blocks = source_blocks(lines)?;
+    if let Some((_, block)) = blocks.iter().find(|(listed, _)| listed == path) {
         let literal = if content { "true" } else { "false" };
         upsert_line(lines, block.start + 1, block.end, "content", literal);
         return Ok(true);
     }
-    if path == home && listed_sources(lines)?.is_empty() {
+    if path == home && blocks.is_empty() {
         append_source(
             lines,
             &SourceEntry {
@@ -876,16 +878,24 @@ fn next_table(lines: &[String], start: usize) -> usize {
 }
 
 /// The `[table]` or `[[array]]` header on this line, without its trailing
-/// comment and the spaces and quotes TOML allows around the name, so
+/// comment, the spaces around the name and one pair of quotes around it, so
 /// `[[ source ]]` and `[["source"]]` read as `[[source]]`. `None` when the
 /// line is not a header.
 fn header(line: &str) -> Option<String> {
     let code = without_comment(line).trim();
-    (code.starts_with('[') && code.ends_with(']')).then(|| {
-        code.chars()
-            .filter(|c| !c.is_whitespace() && !matches!(c, '"' | '\''))
-            .collect()
-    })
+    let (open, close) = if code.starts_with("[[") && code.ends_with("]]") {
+        ("[[", "]]")
+    } else if code.starts_with('[') && code.ends_with(']') && code.len() > 1 {
+        ("[", "]")
+    } else {
+        return None;
+    };
+    let name = code[open.len()..code.len() - close.len()].trim();
+    let name = ['"', '\'']
+        .into_iter()
+        .find_map(|quote| name.strip_prefix(quote)?.strip_suffix(quote))
+        .unwrap_or(name);
+    Some(format!("{open}{name}{close}"))
 }
 
 /// The line up to a `#` comment that is not inside a string.
@@ -938,30 +948,30 @@ fn rewrite_assignment(line: &str, key: &str, literal: &str) -> String {
     }
 }
 
-/// The lines of the `[[source]]` block for `path`, if the file has one.
-///
-/// The block is parsed as TOML, so a path written as a literal string, with
-/// escapes or with a trailing comment is found like any other.
-fn find_source(lines: &[String], path: &Path) -> Option<std::ops::Range<usize>> {
-    let wanted = path.to_string_lossy();
+/// The `[[source]]` blocks by line, in file order, each with the folder TOML
+/// reads from it. Refused when the lines and the parse disagree (a folder in
+/// an inline array, a header-like line inside a string), since an edit by
+/// line would then change another block than the one meant.
+fn source_blocks(lines: &[String]) -> io::Result<Vec<(PathBuf, std::ops::Range<usize>)>> {
+    let listed = listed_sources(lines)?;
+    let mut blocks = Vec::new();
     let mut index = 0;
     while index < lines.len() {
         if header(&lines[index]).as_deref() == Some("[[source]]") {
             let end = next_table(lines, index);
-            let block = lines[index + 1..end].join("\n").parse::<toml::Table>();
-            let is_wanted = block
-                .ok()
-                .and_then(|block| block.get("path")?.as_str().map(|found| found == wanted))
-                .unwrap_or(false);
-            if is_wanted {
-                return Some(index..end);
-            }
+            blocks.push(index..end);
             index = end;
         } else {
             index += 1;
         }
     }
-    None
+    if blocks.len() != listed.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the search settings file lists its folders in a form this editor does not change",
+        ));
+    }
+    Ok(listed.into_iter().zip(blocks).collect())
 }
 
 /// Write a whole `[[source]]` block at the end of the file.
