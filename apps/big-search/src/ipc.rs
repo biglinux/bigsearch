@@ -65,7 +65,7 @@ fn err(message: impl Into<String>) -> Reply {
 
 /// Serve requests on `sock` until killed. Holds the index open; clients may send
 /// multiple newline-delimited requests per connection. Only same-UID peers are
-/// admitted (defence in depth over 0600).
+/// admitted (defense in depth over 0600).
 pub fn serve(
     index: IndexReader,
     content_index: IndexReader,

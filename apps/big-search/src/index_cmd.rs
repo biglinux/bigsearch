@@ -475,7 +475,7 @@ fn startup_sync(
     log::debug!("scan sources: {roots:?}");
     let fingerprint = match scan::write_effective_ignore() {
         Ok(rules) => {
-            // The walker honours the global git ignore file too.
+            // The walker honors the global git ignore file too.
             let git_excludes = ignore::gitignore::gitconfig_excludes_path()
                 .and_then(|path| std::fs::read(path).ok())
                 .unwrap_or_default();

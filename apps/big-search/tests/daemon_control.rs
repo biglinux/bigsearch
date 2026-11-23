@@ -1052,7 +1052,7 @@ fn hidden_source_keeps_its_files() {
 }
 
 /// A change to the global git ignore file makes the next start walk, and the
-/// start's catch-up honours it as the walk does.
+/// start's catch-up honors it as the walk does.
 #[test]
 fn global_git_ignore_change_walks() {
     let sandbox = Sandbox::new("bs-git-excludes");
@@ -1137,7 +1137,7 @@ fn recreated_root_leaves_no_ghosts() {
 /// A folder listed but not catalogued, as a kill between the two saves leaves
 /// it, is walked whole by the next start's catch-up.
 #[test]
-fn listed_uncatalogued_folder_is_walked() {
+fn listed_uncataloged_folder_is_walked() {
     let sandbox = Sandbox::new("bs-listed-only");
     let sub = sandbox.docs.join("sub");
     std::fs::create_dir(&sub).unwrap();

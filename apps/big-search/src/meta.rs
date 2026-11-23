@@ -449,7 +449,7 @@ mod tests {
         png.extend_from_slice(b"IHDR");
         png.extend_from_slice(&width.to_be_bytes());
         png.extend_from_slice(&height.to_be_bytes());
-        png.extend_from_slice(&[8, 2, 0, 0, 0]); // bit depth, colour type, etc.
+        png.extend_from_slice(&[8, 2, 0, 0, 0]); // bit depth, color type, etc.
         png.extend_from_slice(&[0, 0, 0, 0]); // CRC placeholder (imagesize ignores it)
         png
     }

@@ -20,7 +20,7 @@ fn untouched_machine_is_balanced() {
 }
 
 #[test]
-fn every_preset_recognises_its_own_values() {
+fn every_preset_recognizes_its_own_values() {
     for preset in Preset::all() {
         let mut defaults = Defaults::default();
         apply_preset_in_memory(&mut defaults, preset);
@@ -79,7 +79,7 @@ fn folder_removal_drops_whole_block() {
 }
 
 #[test]
-fn spaced_source_header_recognised() {
+fn spaced_source_header_recognized() {
     let mut lines: Vec<String> = "[[ source ]]\npath = \"/mnt/disk\"\n"
         .lines()
         .map(String::from)
@@ -301,7 +301,7 @@ fn bad_value_keeps_valid_tables() {
 
 /// A header with a comment after it is still the same table.
 #[test]
-fn commented_headers_are_recognised() {
+fn commented_headers_are_recognized() {
     let text = "[defaults]  # mine\ncontent = true\n\n[[source]] # usb\npath = \"/mnt/disk\"\n";
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     set_in_table(&mut lines, "[defaults]", &[("metadata", "true")]);

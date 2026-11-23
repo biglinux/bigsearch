@@ -3,7 +3,7 @@
 
 //! Who a document belongs to, and its title.
 //!
-//! The entity comes from the first evidence found, in this order: a labelled
+//! The entity comes from the first evidence found, in this order: a labeled
 //! party ("Razão social:", "Paciente:", "Contratante:"…), an e-mail sender
 //! ("De: Nome <…>"), a first-person declaration ("Eu, Fulana de Tal,"), the name
 //! heading a résumé, and finally an institution named in the header lines.
@@ -60,7 +60,7 @@ static INSTITUTION: LazyLock<Regex> = LazyLock::new(|| {
 static SUBJECT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:assunto|asunto|subject):\s*(.+)").expect("valid"));
 
-/// Header lines searched for labelled parties, and for institutions.
+/// Header lines searched for labeled parties, and for institutions.
 const PARTY_LINES: usize = 40;
 const HEADER_LINES: usize = 15;
 const TITLE_LINES: usize = 12;
@@ -85,7 +85,7 @@ static HISTORY_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:received|recebido|recibido|accepted|aceito|aceptado|submitted|submetido|revised|revisado|published|publicado)")
         .expect("valid")
 });
-/// A copyright or licence notice: "© 2016 … published by John Wiley & Sons Ltd".
+/// A copyright or license notice: "© 2016 … published by John Wiley & Sons Ltd".
 static COPYRIGHT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)©|\bcopyright\b|published by|all rights reserved|todos os direitos")
         .expect("valid")

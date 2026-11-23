@@ -39,7 +39,7 @@ pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
 ///   the frequency driver follows the scheduler (`schedutil`); drivers that pick
 ///   frequencies in hardware (`intel_pstate`/`amd-pstate` active) ignore it.
 /// - nice 19 for kernels that refuse `SCHED_IDLE`, and idle I/O priority, which
-///   the BFQ disk scheduler honours.
+///   the BFQ disk scheduler honors.
 pub fn lower_priority() {
     let mut attr = SchedAttr {
         size: std::mem::size_of::<SchedAttr>() as u32,

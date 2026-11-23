@@ -238,7 +238,7 @@ fn sniff(path: &Path) -> Option<String> {
     // A media signature inside text is a coincidence ("### freedreno" holds
     // QuickTime's `free` atom at byte 4), for 40 KiB of real audio, video or a
     // raster image always hold a NUL. Other signatures found in text (PGP
-    // armour, HTML, SVG) are what the text is.
+    // armor, HTML, SVG) are what the text is.
     let media = ["video/", "audio/", "image/"]
         .iter()
         .any(|major| mime.starts_with(major))

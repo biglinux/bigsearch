@@ -6,7 +6,7 @@
 //! RTF is text with control words: `\par` ends a paragraph, `\'e9` is a byte in
 //! the document's ANSI code page (read as Windows-1252, the common one), `\u233`
 //! a Unicode character followed by `\ucN` fallback characters to skip. Groups
-//! that are not text (fonts, colours, styles, pictures, embedded objects and
+//! that are not text (fonts, colors, styles, pictures, embedded objects and
 //! every `{\* …}` destination) are skipped whole.
 
 /// Destinations whose contents are not the document's text.

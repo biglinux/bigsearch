@@ -97,7 +97,7 @@ pub fn config_file() -> PathBuf {
 }
 
 /// Query socket. Lives under the shared `biglinux/` runtime subdir as `indexd.sock`
-/// to honour the `big-indexd` microdaemon contract (clients find it by that path).
+/// to honor the `big-indexd` microdaemon contract (clients find it by that path).
 pub fn socket_path() -> Option<PathBuf> {
     Some(runtime_subdir()?.join("indexd.sock"))
 }

@@ -566,7 +566,7 @@ pub fn fold_lower_into(s: &str, out: &mut String) {
 /// copied.
 ///
 /// A copy stops at [`max_extract_bytes`]: one character can expand eighteenfold
-/// ("ﷺ"), and the extraction cap counts bytes before normalisation.
+/// ("ﷺ"), and the extraction cap counts bytes before normalization.
 pub(crate) fn compose(text: &str) -> std::borrow::Cow<'_, str> {
     use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfkc_quick};
     if text.is_ascii() || is_nfkc_quick(text.chars()) == IsNormalized::Yes {

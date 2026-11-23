@@ -654,7 +654,7 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
 
     print_hits(&s, &outcome);
     // "Loading" hint: recently-edited files are still being extracted (this very
-    // search already told the daemon to prioritise them, bypassing the cooldown).
+    // search already told the daemon to prioritize them, bypassing the cooldown).
     if outcome.content_pending > 0 {
         eprintln!(
             "{}",

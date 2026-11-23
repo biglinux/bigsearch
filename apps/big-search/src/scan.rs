@@ -69,7 +69,7 @@ const STATE_FLUSH_ROWS: usize = 2048;
 const SCAN_PAGE: usize = 2048;
 
 /// Documented per-user ignore file, seeded once at `~/.config/big-search/ignore`
-/// so the customisation point is discoverable and self-explaining. Commented out
+/// so the customization point is discoverable and self-explaining. Commented out
 /// by default → no extra excludes until the user opts in.
 const USER_IGNORE_TEMPLATE: &str = "\
 # big-search — your personal ignore list (gitignore syntax).

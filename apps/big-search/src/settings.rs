@@ -41,7 +41,7 @@ const GIB: u64 = 1 << 30;
 pub const LOW_MEMORY_THRESHOLD_BYTES: u64 = 6 * GIB;
 
 /// A resolved indexing source: a directory, its extraction policy, and the
-/// device identity that recognises it across (un)mounts.
+/// device identity that recognizes it across (un)mounts.
 #[derive(Debug, Clone)]
 pub struct Source {
     pub path: PathBuf,

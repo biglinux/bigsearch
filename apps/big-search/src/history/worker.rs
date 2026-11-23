@@ -292,7 +292,7 @@ fn give_space_back(history: &SharedHistory, mut available: u64, cost: u64) -> Re
         let dropped = history
             .lock()
             .expect("versions store lock")
-            .oldest_versions_totalling(target - available)?;
+            .oldest_versions_totaling(target - available)?;
         if dropped.is_empty() {
             break;
         }

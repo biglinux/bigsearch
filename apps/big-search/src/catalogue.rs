@@ -464,7 +464,7 @@ impl State {
     }
 
     /// Recorded `(path, mtime, size)` after `after`, sorted, pending changes
-    /// included. Used by bounded catalogue passes instead of materialising the
+    /// included. Used by bounded catalogue passes instead of materializing the
     /// full catalogue.
     pub fn entries_after(
         &self,

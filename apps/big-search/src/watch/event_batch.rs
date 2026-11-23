@@ -85,7 +85,7 @@ impl WatchBatch {
     }
 }
 
-/// Add a batch's paths; returns whether a queue overflow was signalled.
+/// Add a batch's paths; returns whether a queue overflow was signaled.
 pub(super) fn ingest(
     batch: &mut WatchBatch,
     watcher_result: notify::Result<notify::Event>,

@@ -134,7 +134,7 @@ impl History {
         if total <= self.budget_bytes {
             return Ok(Vec::new());
         }
-        self.oldest_versions_totalling(total - self.budget_bytes)
+        self.oldest_versions_totaling(total - self.budget_bytes)
     }
 
     pub(super) fn all_object_names(&self) -> Result<Vec<String>> {
@@ -169,7 +169,7 @@ impl History {
 
     /// The oldest superseded versions, enough of them to cover `bytes`, in one
     /// query rather than a full-table sum per version evicted.
-    pub(super) fn oldest_versions_totalling(&self, bytes: u64) -> Result<Vec<(i64, String)>> {
+    pub(super) fn oldest_versions_totaling(&self, bytes: u64) -> Result<Vec<(i64, String)>> {
         let Some(conn) = &self.conn else {
             return Ok(Vec::new());
         };
