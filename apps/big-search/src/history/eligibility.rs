@@ -44,6 +44,15 @@ pub(super) fn eligible_metadata(path: &Path) -> Result<std::fs::Metadata, &'stat
     if metadata.len() == 0 {
         return Err("it is empty");
     }
+    // The watcher's paths pass no link, but a folder on the way may have been
+    // replaced by one since: the file there is another document, whose
+    // version would join this path's history and take on its identity.
+    if path
+        .parent()
+        .is_none_or(|folder| std::fs::canonicalize(folder).ok().as_deref() != Some(folder))
+    {
+        return Err("a folder on its path is a link");
+    }
     Ok(metadata)
 }
 

@@ -50,8 +50,8 @@ pub use worker::{HistoryEvent, Pending, run_worker};
 use disk::disk_capacity;
 use eligibility::{eligible_metadata, eligible_name, git_work_tree};
 use store::{
-    file_id_for_path, first_stored, follow_rename, is_live_session, now_secs, object_name,
-    open_store, prepare_store,
+    file_id_for_path, first_stored, follow_renames, is_live_session, now_secs, object_name,
+    open_store, paths_under, prepare_store, rows_of_file,
 };
 
 /// Why a version was written.
@@ -123,7 +123,6 @@ struct VersionToCopy {
     path: PathBuf,
     object: PathBuf,
     name: String,
-    file_id: i64,
     metadata: std::fs::Metadata,
     reason: Reason,
 }
@@ -265,12 +264,15 @@ impl History {
     }
 
     /// Forget the versions of one document, also from a store turned off.
-    /// The document is the first of `spellings` that has a stored row.
+    /// The document is the first of `spellings` that has a stored row, and
+    /// with `file_at`, every row kept for the file there under another path
+    /// (its folder moved while the service was stopped), unless that stored
+    /// row is another file's.
     ///
     /// # Errors
     ///
     /// Returns an error when the versions database or the stored copies cannot be changed.
-    pub fn forget(&mut self, spellings: &[impl AsRef<Path>]) -> Result<()> {
+    pub fn forget(&mut self, spellings: &[impl AsRef<Path>], file_at: Option<&Path>) -> Result<()> {
         let opened;
         let conn = match &self.conn {
             Some(conn) => conn,
@@ -283,23 +285,34 @@ impl History {
                 &opened
             }
         };
-        let Some((file_id, _)) = first_stored(conn, spellings)? else {
-            return Ok(());
-        };
-        let objects: Vec<String> = conn
-            .prepare("SELECT object FROM versions WHERE file_id = ?1")?
-            .query_map(params![file_id], |row| row.get::<_, String>(0))?
-            .flatten()
-            .collect();
-        for name in &objects {
-            let _ = std::fs::remove_file(self.objects.join(name));
+        let stored = first_stored(conn, spellings)?.map(|(file_id, _)| file_id);
+        let mut file_ids: Vec<i64> = stored.into_iter().collect();
+        if let Some(metadata) = file_at.and_then(|path| std::fs::symlink_metadata(path).ok()) {
+            let of_the_file: Vec<i64> = rows_of_file(conn, identity(&metadata))?
+                .into_iter()
+                .map(|(file_id, _)| file_id)
+                .collect();
+            if stored.is_none_or(|file_id| of_the_file.contains(&file_id)) {
+                file_ids = of_the_file;
+            }
         }
-        conn.execute("DELETE FROM versions WHERE file_id = ?1", params![file_id])?;
-        conn.execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+        for file_id in file_ids {
+            let objects: Vec<String> = conn
+                .prepare("SELECT object FROM versions WHERE file_id = ?1")?
+                .query_map(params![file_id], |row| row.get::<_, String>(0))?
+                .flatten()
+                .collect();
+            for name in &objects {
+                let _ = std::fs::remove_file(self.objects.join(name));
+            }
+            conn.execute("DELETE FROM versions WHERE file_id = ?1", params![file_id])?;
+            conn.execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+        }
         Ok(())
     }
 
-    /// Follow a renamed document: keep its history under the destination name.
+    /// Follow a renamed document, or every document in a renamed folder: keep
+    /// their history under the destination name.
     ///
     /// The watcher hears the rename as a pair (the kernel gives both names in
     /// one event), and that pair is the only reliable way to follow a document
@@ -314,15 +327,26 @@ impl History {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
+        let mut moves: Vec<(PathBuf, PathBuf)> = paths_under(conn, from)?
+            .into_iter()
+            .filter_map(|kept| {
+                let moved = to.join(kept.strip_prefix(from).ok()?);
+                Some((kept, moved))
+            })
+            .collect();
+        moves.push((from.to_path_buf(), to.to_path_buf()));
         // Only to a place the versions could be asked for again. A document
         // renamed into a hidden name is on its way out: a file manager deletes
         // for good with one rename to `.something-delete-...` and then an
         // unlink, and following it there would file the history
         // under a name nobody can type, out of reach of the request to forget it.
-        if eligible_name(to).is_err() {
-            return Ok(());
-        }
-        follow_rename(conn, from, to)
+        moves.retain(|(_, moved)| eligible_name(moved).is_ok());
+        follow_renames(
+            conn,
+            moves
+                .iter()
+                .map(|(kept, moved)| (kept.as_path(), moved.as_path())),
+        )
     }
 
     /// Settle the versions kept under `spelled`, a path that leads to
@@ -335,9 +359,10 @@ impl History {
     ///
     /// # Errors
     ///
-    /// Returns an error when another file is at `resolved`: the restore that
-    /// follows would write a version of the file that was at `spelled` over
-    /// it. Also when the versions database cannot be read or changed.
+    /// Returns an error when the file at `resolved` is not known to be the one
+    /// the versions were kept from: the restore that follows could write a
+    /// version of another document over it. Also when the versions database
+    /// cannot be read or changed.
     pub fn adopt_spelling(&self, spelled: &Path, resolved: &Path) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
@@ -359,21 +384,19 @@ impl History {
                 return Err(error).with_context(|| format!("read {}", resolved.display()));
             }
         };
-        let (dev, ino, born) = identity(&metadata);
-        let same: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND dev = ?2 AND ino = ?3
-                             AND (born IS NULL OR ?4 IS NULL OR born = ?4))",
-            params![file_id, dev, ino, born],
-            |row| row.get(0),
-        )?;
+        let same = rows_of_file(conn, identity(&metadata))?
+            .iter()
+            .any(|(id, _)| *id == file_id);
+        // A different inode is another document, or the same one after an
+        // editor's save replaced it: nothing recorded tells the two apart.
         if !same {
             anyhow::bail!(
-                "{} leads to {} now, which is not the file its versions were kept from",
+                "{} leads to {} now, and nothing shows it is the file its versions were kept from",
                 spelled.display(),
                 resolved.display()
             );
         }
-        follow_rename(conn, spelled, resolved)
+        follow_renames(conn, [(spelled, resolved)])
     }
 
     /// The earlier versions of one document, newest first.
@@ -505,13 +528,13 @@ impl History {
             object: self.objects.join(&name),
             name,
             path: path.to_path_buf(),
-            file_id,
             metadata,
             reason,
         }))
     }
 
-    /// Record a version once its copy was attempted.
+    /// Record a version once its copy was attempted, under the row its path
+    /// has now: a request may have moved or forgotten that row during the copy.
     fn finish_version(
         &mut self,
         version: VersionToCopy,
@@ -528,14 +551,25 @@ impl History {
         if self.support == Support::Untested {
             self.support = Support::Ready;
         }
+        let conn = self.conn.as_ref().expect("checked by the caller");
+        let Some(file_id) = file_id_for_path(conn, &version.path)? else {
+            let _ = std::fs::remove_file(&version.object);
+            return if version.reason == Reason::BeforeRestore {
+                Err(not_kept_error(
+                    "its versions were forgotten during the copy",
+                ))
+            } else {
+                Ok(false)
+            };
+        };
         self.record_version(
-            version.file_id,
+            file_id,
             &version.path,
             &version.metadata,
             &version.name,
             version.reason,
         )?;
-        self.prune_file(version.file_id)?;
+        self.prune_file(file_id)?;
         self.budget_unchecked = true;
         Ok(true)
     }
@@ -644,15 +678,7 @@ impl History {
             )?;
             return Ok(id);
         }
-        let renamed: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT id, current_path FROM files
-                  WHERE dev = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)
-                  ORDER BY created_at DESC LIMIT 1",
-                params![dev, ino, born],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
+        let renamed = rows_of_file(conn, (dev, ino, born))?.into_iter().next();
         if let Some((id, previous)) = renamed
             && !Path::new(&previous).exists()
         {

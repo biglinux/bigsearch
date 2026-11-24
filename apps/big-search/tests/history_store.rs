@@ -54,6 +54,9 @@ fn versions_survive_replacing_saves() {
     let renamed = rename_carries_the_history(&mut history, &home, &document);
     state_before_a_restore_survives(&mut history, &renamed);
     hidden_rename_and_forget(&mut history, &home, &renamed);
+    folder_rename_carries_the_history(&mut history, &home);
+    forget_after_a_move_while_stopped(&mut history, &home);
+    linked_folder_never_kept(&mut history, &home);
     non_documents_never_kept(&mut history, &home);
 }
 
@@ -218,11 +221,84 @@ fn hidden_rename_and_forget(history: &mut History, home: &Path, renamed: &Path) 
         .into_iter()
         .map(|version| version.object)
         .collect();
-    history.forget(&[renamed]).expect("forget");
+    history.forget(&[renamed], None).expect("forget");
     assert!(history.versions(&[renamed]).expect("versions").is_empty());
     for object in objects {
         assert!(!object.exists(), "{} was left behind", object.display());
     }
+}
+
+/// A document with one earlier version listed, written at `path`.
+fn kept_twice(history: &mut History, path: &Path) {
+    std::fs::create_dir_all(path.parent().expect("a folder")).expect("create the folder");
+    std::fs::write(path, "primeira").expect("write");
+    history.save_version(path, Reason::Saved).expect("save");
+    write_by_replacing(path, "segunda");
+    history.save_version(path, Reason::Saved).expect("save");
+    assert_eq!(history.versions(&[path]).expect("versions").len(), 1);
+}
+
+/// Guards: privacy action: a folder renamed while the service runs takes the
+/// history of every document in it, and of no folder that merely shares its
+/// name's start, so the request to forget it through its new path finds it.
+fn folder_rename_carries_the_history(history: &mut History, home: &Path) {
+    let docs = home.join("Documentos");
+    let inside = docs.join("proj/a.odt");
+    let beside = [docs.join("proj-a/b.odt"), docs.join("proj2/b.odt")];
+    for document in std::iter::once(&inside).chain(&beside) {
+        kept_twice(history, document);
+    }
+    std::fs::create_dir(docs.join("arquivo")).expect("create the archive");
+    std::fs::rename(docs.join("proj"), docs.join("arquivo/proj")).expect("move the folder");
+    history
+        .note_rename(&docs.join("proj"), &docs.join("arquivo/proj"))
+        .expect("note the rename");
+    std::os::unix::fs::symlink(docs.join("arquivo/proj"), docs.join("proj")).expect("link");
+
+    let moved = docs.join("arquivo/proj/a.odt");
+    assert_eq!(history.versions(&[&moved]).expect("versions").len(), 1);
+    assert!(history.versions(&[&inside]).expect("versions").is_empty());
+    for document in &beside {
+        assert_eq!(history.versions(&[document]).expect("versions").len(), 1);
+    }
+    history.forget(&[&moved], Some(&moved)).expect("forget");
+    assert!(history.versions(&[&moved]).expect("versions").is_empty());
+}
+
+/// Guards: privacy action: forgetting a document through its path erases the
+/// versions kept under the path it had before its folder moved while the
+/// service was stopped.
+fn forget_after_a_move_while_stopped(history: &mut History, home: &Path) {
+    let docs = home.join("Documentos");
+    let before = docs.join("pasta/c.odt");
+    kept_twice(history, &before);
+    std::fs::rename(docs.join("pasta"), docs.join("arquivo/pasta")).expect("move the folder");
+    let now_at = docs.join("arquivo/pasta/c.odt");
+    history.forget(&[&now_at], Some(&now_at)).expect("forget");
+    assert!(history.versions(&[&before]).expect("versions").is_empty());
+}
+
+/// Guards: persisted data: a save heard before a folder on the way was
+/// replaced by a link keeps nothing of the file the link leads to under the
+/// path, which would give the path's history that file's identity.
+fn linked_folder_never_kept(history: &mut History, home: &Path) {
+    let docs = home.join("Documentos");
+    let other = docs.join("outra/d.odt");
+    std::fs::create_dir_all(other.parent().expect("a folder")).expect("create the folder");
+    std::fs::write(&other, "outra").expect("write");
+    std::os::unix::fs::symlink(docs.join("outra"), docs.join("ligada")).expect("link");
+    let through_link = docs.join("ligada/d.odt");
+    assert!(
+        !history
+            .save_version(&through_link, Reason::Saved)
+            .expect("save")
+    );
+    assert!(
+        history
+            .versions(&[&through_link])
+            .expect("versions")
+            .is_empty()
+    );
 }
 
 fn non_documents_never_kept(history: &mut History, home: &Path) {

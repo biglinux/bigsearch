@@ -55,7 +55,7 @@ fn expire_missing(history: &SharedHistory) -> Result<()> {
         }
     }
     for path in expired {
-        store.forget(&[Path::new(&path)])?;
+        store.forget(&[Path::new(&path)], None)?;
     }
     Ok(())
 }

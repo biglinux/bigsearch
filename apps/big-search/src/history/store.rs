@@ -4,7 +4,7 @@
 //! `files` holds one row per document, keyed by its UTF-8 path; `versions`
 //! holds one row per kept copy, pointing at an object under `objects/`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -84,32 +84,71 @@ pub(super) fn open_store(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Move `from`'s catalogue row to `to`, in one transaction.
+/// Move each `from`'s catalogue row to its `to`, in one transaction.
 ///
 /// When `to` has a row of its own (`mv a.md b.md` over a document with
 /// history), its versions join `from`'s: they hold what the rename overwrote.
 /// Left alone, the unique path would refuse the move, and `from`'s row would
 /// expire with every version in it.
-pub(super) fn follow_rename(conn: &Connection, from: &Path, to: &Path) -> Result<()> {
-    let Some(from_id) = file_id_for_path(conn, from)? else {
-        return Ok(());
-    };
+pub(super) fn follow_renames<'a>(
+    conn: &Connection,
+    moves: impl IntoIterator<Item = (&'a Path, &'a Path)>,
+) -> Result<()> {
     let transaction = conn.unchecked_transaction()?;
-    if let Some(to_id) = file_id_for_path(conn, to)?
-        && to_id != from_id
-    {
+    for (from, to) in moves {
+        let Some(from_id) = file_id_for_path(conn, from)? else {
+            continue;
+        };
+        if let Some(to_id) = file_id_for_path(conn, to)?
+            && to_id != from_id
+        {
+            conn.execute(
+                "UPDATE versions SET file_id = ?1 WHERE file_id = ?2",
+                params![from_id, to_id],
+            )?;
+            conn.execute("DELETE FROM files WHERE id = ?1", params![to_id])?;
+        }
         conn.execute(
-            "UPDATE versions SET file_id = ?1 WHERE file_id = ?2",
-            params![from_id, to_id],
+            "UPDATE files SET current_path = ?2, missing_since = NULL WHERE id = ?1",
+            params![from_id, to.to_string_lossy()],
         )?;
-        conn.execute("DELETE FROM files WHERE id = ?1", params![to_id])?;
     }
-    conn.execute(
-        "UPDATE files SET current_path = ?2, missing_since = NULL WHERE id = ?1",
-        params![from_id, to.to_string_lossy()],
-    )?;
     transaction.commit()?;
     Ok(())
+}
+
+/// The keys of the rows below the folder `folder`.
+pub(super) fn paths_under(conn: &Connection, folder: &Path) -> Result<Vec<PathBuf>> {
+    let Some(key) = folder.to_str() else {
+        return Ok(Vec::new());
+    };
+    // `0` follows `/` in byte order, so the range is every key starting
+    // `folder/`, read from the unique index on the key.
+    conn.prepare("SELECT current_path FROM files WHERE current_path > ?1 AND current_path < ?2")?
+        .query_map(params![format!("{key}/"), format!("{key}0")], |row| {
+            row.get::<_, String>(0).map(PathBuf::from)
+        })?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(Into::into)
+}
+
+/// The rows recorded for the file with this `(dev, ino, born)`, with their
+/// keys, newest first. A row or a file without a birth time matches on
+/// `(dev, ino)` alone.
+pub(super) fn rows_of_file(
+    conn: &Connection,
+    (dev, ino, born): (i64, i64, Option<i64>),
+) -> Result<Vec<(i64, String)>> {
+    conn.prepare(
+        "SELECT id, current_path FROM files
+          WHERE dev = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)
+          ORDER BY created_at DESC",
+    )?
+    .query_map(params![dev, ino, born], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?
+    .collect::<rusqlite::Result<_>>()
+    .map_err(Into::into)
 }
 
 /// The row for `path`. Rows are keyed by UTF-8 text, so a path that is not

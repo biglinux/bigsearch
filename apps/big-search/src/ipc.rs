@@ -391,7 +391,12 @@ fn dispatch(
             let Some(spellings) = version_spellings(&request.path) else {
                 return err(format!("{} is relative or holds ..", request.path));
             };
-            history_reply(history, |store| store.forget(&spellings))
+            // The file the path leads to now: its versions kept under a path
+            // it had before go too.
+            let resolved = settings::sources().resolved_client_path(Path::new(&request.path));
+            history_reply(history, |store| {
+                store.forget(&spellings, resolved.as_deref())
+            })
         }
         RequestBody::ClearHistory => {
             history_reply(history, crate::history::History::forget_everything)

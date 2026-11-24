@@ -635,11 +635,15 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   only when there are none for those under where it lands: a kept key was a
   real path when written, and a symlink put in its place since leads to
   another document. For that reason `save_version` through a path with rows
-  kept under it that lands elsewhere now decides by file identity: when the
-  file where it lands is the one the rows were kept for (`dev`, `ino`, birth
-  time), the rows move to where it lands; when another file is there, it is
-  refused, since the restore that follows would write one document's version
-  over the other; with nothing there it proceeds. The watcher checks a
+  kept under it that lands elsewhere decides by file identity: when the file
+  where it lands is the one the rows were kept for (`dev`, `ino`, birth
+  time), the rows move to where it lands; when nothing shows it is, it is
+  refused, since the restore that follows could write one document's version
+  over another's; with nothing there it proceeds. `forget_versions` also
+  erases the rows kept for the file where the path lands under any other
+  key, unless the rows found under the path are another file's. The watcher
+  moves the rows of a renamed folder's documents with it, never keeps a
+  version of a file reached through a folder replaced by a link, and checks a
   reindex again before it reads.
 - Extraction subprocesses get argv arrays, never `sh -c`; a failure or a
   timeout skips the file and is logged, and never stops the daemon.

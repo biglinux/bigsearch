@@ -47,7 +47,7 @@ fn rename_over_a_kept_document() {
         )
         .unwrap();
     }
-    follow_rename(&conn, Path::new("/d/a.md"), Path::new("/d/b.md")).unwrap();
+    follow_renames(&conn, [(Path::new("/d/a.md"), Path::new("/d/b.md"))]).unwrap();
     assert_eq!(
         version_owners(&conn),
         [
@@ -296,10 +296,11 @@ fn spelling_adopted_by_identity() {
     assert_eq!(file_id_for_path(conn, &missing).unwrap(), Some(3));
 }
 
-/// After an editor's save gave the file there a new inode, the rows are
-/// another file's: the restore is refused naming both paths, and they stay.
+/// After an editor's save gave the file there a new inode, nothing tells it
+/// from another file: the restore is refused naming both paths, and the rows
+/// stay.
 #[test]
-fn spelling_of_another_file_refused() {
+fn replaced_file_spelling_refused() {
     let (_dir, store, real, alias) = alias_fixture("bs-history-adopt-saved");
     let conn = store.conn.as_ref().unwrap();
     kept_under(conn, &alias, 1, &real);
@@ -311,4 +312,86 @@ fn spelling_of_another_file_refused() {
     let named = format!("{} leads to {} now", alias.display(), real.display());
     assert!(refusal.contains(&named), "{refusal}");
     assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
+}
+
+/// Each part of the recorded identity decides: another device or another
+/// birth time is another file, and a row without a birth time matches on
+/// `(dev, ino)` alone.
+#[test]
+fn adoption_checks_each_identity_part() {
+    let (_dir, store, real, alias) = alias_fixture("bs-history-adopt-parts");
+    let conn = store.conn.as_ref().unwrap();
+    let (dev, ino, born) = identity(&std::fs::symlink_metadata(&real).unwrap());
+    let born = born.expect("this filesystem records birth times");
+    for (row_dev, row_born, adopted) in [
+        (dev + 1, Some(born), false),
+        (dev, Some(born + 1), false),
+        (dev, None, true),
+    ] {
+        conn.execute("DELETE FROM versions", []).unwrap();
+        conn.execute("DELETE FROM files", []).unwrap();
+        conn.execute(
+            "INSERT INTO files(id, current_path, dev, ino, born, created_at)
+             VALUES (1, ?1, ?2, ?3, ?4, 0)",
+            params![alias.to_str().unwrap(), row_dev, ino, row_born],
+        )
+        .unwrap();
+        let outcome = store.adopt_spelling(&alias, &real);
+        assert_eq!(
+            outcome.is_ok(),
+            adopted,
+            "{row_dev} {row_born:?}: {outcome:?}"
+        );
+        let key = if adopted { &real } else { &alias };
+        assert_eq!(file_id_for_path(conn, key).unwrap(), Some(1));
+    }
+}
+
+/// A copy of `real` taken without the lock, as the worker takes it.
+fn copy_in_flight(store: &mut History, dir: &Path, real: &Path) -> VersionToCopy {
+    let object = dir.join("objects/ff/in-flight");
+    std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+    std::fs::write(&object, "copied").unwrap();
+    store.budget_unchecked = false;
+    VersionToCopy {
+        path: real.to_path_buf(),
+        object,
+        name: "ff/in-flight".to_string(),
+        metadata: std::fs::metadata(real).unwrap(),
+        reason: Reason::Saved,
+    }
+}
+
+/// Guards: persisted data: a restore that moves the rows, or a forget, while
+/// the worker copies leaves the copy recorded under the row its path has, or
+/// removed with nothing recorded.
+#[test]
+fn copy_follows_rows_changed_meanwhile() {
+    let (dir, mut store, real, alias) = alias_fixture("bs-history-copy-race");
+    {
+        let conn = store.conn.as_ref().unwrap();
+        kept_under(conn, &alias, 1, &real);
+        kept_under(conn, &real, 2, &real);
+    }
+    let version = copy_in_flight(&mut store, &dir, &real);
+    store.adopt_spelling(&alias, &real).unwrap();
+    assert!(store.finish_version(version, Ok(())).unwrap());
+    let owner: i64 = store
+        .conn
+        .as_ref()
+        .unwrap()
+        .query_row(
+            "SELECT file_id FROM versions WHERE object = 'ff/in-flight'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(owner, 1);
+
+    let version = copy_in_flight(&mut store, &dir, &real);
+    let object = version.object.clone();
+    store.forget(&[&real], None).unwrap();
+    assert!(!store.finish_version(version, Ok(())).unwrap());
+    assert!(!object.exists());
+    assert_eq!(kept_objects(&store), Vec::<String>::new());
 }
