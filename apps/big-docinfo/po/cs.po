@@ -21,15 +21,15 @@ msgstr ""
 
 #: src/main.rs
 msgid "This file is no longer there: it was moved or deleted."
-msgstr ""
+msgstr "Tento soubor tu už není: byl přesunut nebo smazán."
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr ""
+msgstr "Nemáte oprávnění číst tento soubor."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr ""
+msgstr "Tento soubor nelze přečíst."
 
 #: src/main.rs
 msgid ""

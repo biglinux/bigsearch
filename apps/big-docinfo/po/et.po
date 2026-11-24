@@ -19,15 +19,15 @@ msgstr "Nimes on märke, mida failinimes olla ei tohi. Vali teine nimi."
 
 #: src/main.rs
 msgid "This file is no longer there: it was moved or deleted."
-msgstr ""
+msgstr "Seda faili pole enam seal: see teisaldati või kustutati."
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr ""
+msgstr "Sul pole selle faili lugemiseks õigust."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr ""
+msgstr "Faili ei õnnestunud lugeda."
 
 #: src/main.rs
 msgid ""

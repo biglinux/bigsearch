@@ -19,15 +19,15 @@ msgstr "Navnet inneholder tegn som et filnavn ikke kan ha. Velg et annet navn."
 
 #: src/main.rs
 msgid "This file is no longer there: it was moved or deleted."
-msgstr ""
+msgstr "Filen er ikke der lenger: den ble flyttet eller slettet."
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr ""
+msgstr "Du har ikke tillatelse til å lese denne filen."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr ""
+msgstr "Kunne ikke lese filen."
 
 #: src/main.rs
 msgid ""

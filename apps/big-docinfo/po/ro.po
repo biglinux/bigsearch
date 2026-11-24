@@ -22,15 +22,15 @@ msgstr ""
 
 #: src/main.rs
 msgid "This file is no longer there: it was moved or deleted."
-msgstr ""
+msgstr "Acest fișier nu mai este acolo: a fost mutat sau șters."
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr ""
+msgstr "Nu aveți permisiunea de a citi acest fișier."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr ""
+msgstr "Acest fișier nu a putut fi citit."
 
 #: src/main.rs
 msgid ""

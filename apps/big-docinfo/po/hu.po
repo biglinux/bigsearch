@@ -21,15 +21,15 @@ msgstr ""
 
 #: src/main.rs
 msgid "This file is no longer there: it was moved or deleted."
-msgstr ""
+msgstr "Ez a fájl már nincs ott: áthelyezték vagy törölték."
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr ""
+msgstr "Nincs jogosultsága a fájl olvasásához."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr ""
+msgstr "A fájl nem olvasható."
 
 #: src/main.rs
 msgid ""

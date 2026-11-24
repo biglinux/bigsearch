@@ -20,15 +20,15 @@ msgstr ""
 
 #: src/main.rs
 msgid "This file is no longer there: it was moved or deleted."
-msgstr ""
+msgstr "Tento súbor tu už nie je: bol presunutý alebo odstránený."
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr ""
+msgstr "Nemáte oprávnenie čítať tento súbor."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr ""
+msgstr "Tento súbor sa nepodarilo prečítať."
 
 #: src/main.rs
 msgid ""

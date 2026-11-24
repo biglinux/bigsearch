@@ -20,15 +20,15 @@ msgstr ""
 
 #: src/main.rs
 msgid "This file is no longer there: it was moved or deleted."
-msgstr ""
+msgstr "이 파일은 더 이상 그 자리에 없습니다. 이동되었거나 삭제되었습니다."
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr ""
+msgstr "이 파일을 읽을 권한이 없습니다."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr ""
+msgstr "이 파일을 읽을 수 없습니다."
 
 #: src/main.rs
 msgid ""

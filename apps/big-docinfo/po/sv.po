@@ -20,15 +20,15 @@ msgstr ""
 
 #: src/main.rs
 msgid "This file is no longer there: it was moved or deleted."
-msgstr ""
+msgstr "Filen finns inte längre där: den har flyttats eller tagits bort."
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr ""
+msgstr "Du har inte behörighet att läsa den här filen."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr ""
+msgstr "Filen kunde inte läsas."
 
 #: src/main.rs
 msgid ""

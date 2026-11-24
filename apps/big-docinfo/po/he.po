@@ -20,15 +20,15 @@ msgstr "בשם זה יש תווים ששם קובץ אינו יכול להכיל
 
 #: src/main.rs
 msgid "This file is no longer there: it was moved or deleted."
-msgstr ""
+msgstr "קובץ זה כבר אינו נמצא שם: הוא הועבר או נמחק."
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr ""
+msgstr "אין לך הרשאה לקרוא קובץ זה."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr ""
+msgstr "לא ניתן לקרוא קובץ זה."
 
 #: src/main.rs
 msgid ""
