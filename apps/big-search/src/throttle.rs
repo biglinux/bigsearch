@@ -54,37 +54,87 @@ pub fn lower_priority() {
         sched_util_min: 0,
         sched_util_max: INDEXER_UTIL_MAX,
     };
-    let idle = libc::sched_param { sched_priority: 0 };
-    // SAFETY: priority syscalls on the calling thread (pid/who = 0); `attr`
-    // and `idle` outlive the calls, and `attr.size` is the size of the struct.
-    let policy_set = unsafe {
-        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
-        // ioprio_set(IOPRIO_WHO_PROCESS = 1, who = 0, IOPRIO_CLASS_IDLE = 3 << 13)
-        libc::syscall(libc::SYS_ioprio_set, 1, 0, 3i64 << 13);
-        // Refused by a kernel built without utilization clamping and, from
-        // systemd 263, by the unit's `RestrictRealtime=yes`, which denies
-        // sched_setattr outright: SCHED_IDLE alone then, and the indexer's
-        // cgroup holds the clamp.
-        libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0) == 0
-            || libc::sched_setscheduler(0, libc::SCHED_IDLE, &raw const idle) == 0
-    };
-    if !policy_set {
-        log::warn!(
-            "indexer thread keeps its scheduling policy: {}",
-            std::io::Error::last_os_error()
-        );
+    // Every thread meets the same kernel and sandbox: only the first one
+    // lowered reports what they refuse.
+    let report = !PRIORITY_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: setpriority on the calling thread (who = 0).
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 19) } != 0 && report {
+        let error = std::io::Error::last_os_error();
+        log::warn!("indexer threads keep their nice value: {error}");
     }
-    if let Some(index) = IDLE_CGROUP.get() {
+    // ioprio_set(IOPRIO_WHO_PROCESS = 1, who = 0, IOPRIO_CLASS_IDLE = 3 << 13)
+    // SAFETY: ioprio_set on the calling thread, with integer arguments only.
+    if unsafe { libc::syscall(libc::SYS_ioprio_set, 1, 0, 3i64 << 13) } != 0 && report {
+        let error = std::io::Error::last_os_error();
+        log::warn!("indexer threads keep their I/O priority: {error}");
+    }
+    // SAFETY: sched_setattr on the calling thread (pid = 0); `attr` outlives
+    // the call, and `attr.size` is the size of the struct.
+    if unsafe { libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0) } != 0 {
+        let refused = std::io::Error::last_os_error();
+        lower_policy_unclamped(&refused, report);
+    }
+    if let Some(cgroup) = IDLE_CGROUP.get() {
         // SAFETY: gettid has no preconditions.
         let tid = unsafe { libc::gettid() };
-        if let Err(e) = std::fs::write(index.join("cgroup.threads"), tid.to_string()) {
+        if let Err(e) = std::fs::write(cgroup.dir.join("cgroup.threads"), tid.to_string()) {
             log::warn!("indexer thread stays in the service's cgroup: {e}");
         }
     }
 }
 
+/// Set once a thread lowered by [`lower_priority`] has reported what failed.
+static PRIORITY_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `SCHED_IDLE` without the thread's clamp, after `sched_setattr` was refused
+/// as `refused`: by a kernel built without utilization clamping (EOPNOTSUPP),
+/// or by a seccomp filter (EPERM), as the unit's `RestrictRealtime=yes`
+/// installs, which denies sched_setattr outright. Any other refusal leaves the
+/// policy as it is, reported.
+fn lower_policy_unclamped(refused: &std::io::Error, report: bool) {
+    if !matches!(refused.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP)) {
+        if report {
+            log::warn!("indexer threads keep their scheduling policy: sched_setattr: {refused}");
+        }
+        return;
+    }
+    let idle = libc::sched_param { sched_priority: 0 };
+    // SAFETY: sched_setscheduler on the calling thread (pid = 0); `idle`
+    // outlives the call.
+    if unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &raw const idle) } != 0 {
+        if report {
+            let error = std::io::Error::last_os_error();
+            log::warn!(
+                "indexer threads keep their scheduling policy: sched_setattr: {refused}; \
+                 sched_setscheduler: {error}"
+            );
+        }
+        return;
+    }
+    if !report {
+        return;
+    }
+    if IDLE_CGROUP.get().is_some_and(|cgroup| cgroup.clamped) {
+        log::info!(
+            "indexer threads run SCHED_IDLE under their cgroup's clamp \
+             (sched_setattr: {refused})"
+        );
+    } else {
+        log::warn!(
+            "indexer threads run SCHED_IDLE with the clock unclamped: no cgroup \
+             clamp, and sched_setattr: {refused}"
+        );
+    }
+}
+
 /// The cgroup indexing threads join, once [`prepare_idle_cgroup`] made it.
-static IDLE_CGROUP: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+struct IdleCgroup {
+    dir: std::path::PathBuf,
+    /// Its `cpu.uclamp.max` holds the indexer's clamp.
+    clamped: bool,
+}
+
+static IDLE_CGROUP: std::sync::OnceLock<IdleCgroup> = std::sync::OnceLock::new();
 
 /// Make the indexer a cgroup of its own that runs only on CPU time nobody else
 /// wants, so searching keeps a normal program's share while indexing takes
@@ -143,20 +193,32 @@ pub fn prepare_idle_cgroup() -> Option<&'static str> {
         )?;
         "lowest weight"
     };
-    // The clamp for every indexer thread, where the service's sandbox refuses
-    // a thread its own (`lower_priority`). Absent on a kernel built without
-    // cgroup utilization clamping.
+    let clamped = clamp_cgroup(&index);
+    IDLE_CGROUP
+        .set(IdleCgroup {
+            dir: index,
+            clamped,
+        })
+        .ok()?;
+    Some(how)
+}
+
+/// Give the indexer's cgroup `index` the clamp of every indexer thread, which
+/// the service's sandbox refuses a thread of its own (`lower_priority`).
+/// Whether it holds; absent on a kernel built without cgroup utilization
+/// clamping.
+fn clamp_cgroup(index: &std::path::Path) -> bool {
     let percent = f64::from(INDEXER_UTIL_MAX) * 100.0 / 1024.0;
-    if let Err(e) = std::fs::OpenOptions::new()
+    let written = std::fs::OpenOptions::new()
         .write(true)
         .open(index.join("cpu.uclamp.max"))
-        .and_then(|mut file| file.write_all(format!("{percent:.2}").as_bytes()))
+        .and_then(|mut file| file.write_all(format!("{percent:.2}").as_bytes()));
+    if let Err(e) = &written
         && e.kind() != std::io::ErrorKind::NotFound
     {
         log::warn!("indexer cgroup keeps the clock unclamped: {e}");
     }
-    IDLE_CGROUP.set(index).ok()?;
-    Some(how)
+    written.is_ok()
 }
 
 /// This process's cgroup, when systemd delegated it as `<unit>.service/main`.

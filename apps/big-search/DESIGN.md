@@ -409,9 +409,10 @@ history worker and a foreground reindex. It moves the calling thread into the
 indexer's cgroup, which has `cpu.idle`, and gives it `SCHED_IDLE` with a
 utilization clamp of 512 out of 1024, nice 19 as the fallback, and
 `IOPRIO_CLASS_IDLE`; the programs it starts inherit all of it. The cgroup
-carries the same clamp (`cpu.uclamp.max`), since from systemd 263 the unit's
+carries the same clamp (`cpu.uclamp.max`), since the unit's
 `RestrictRealtime=yes` refuses `sched_setattr` and the thread then gets
-`SCHED_IDLE` through `sched_setscheduler`, without a clamp. The query
+`SCHED_IDLE` through `sched_setscheduler`, without a clamp of its own; the log
+says once whether the cgroup's clamp covers it. The query
 threads keep a normal program's weight. The goal is that indexing is never the
 cause of a perceptible slowdown.
 
