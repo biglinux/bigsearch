@@ -672,15 +672,36 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
     } else {
         client.query(&s.query, mode, filter.clone(), page.clone())
     };
-    let outcome = match daemon_query {
-        Ok(outcome) => outcome,
-        Err(big_indexd_client::ClientError::Io(_)) => {
-            query_without_daemon(&s, mode, &filter, &page)?
+    // A running daemon searches with the profile it started with, which may
+    // differ from the configuration on disk now.
+    let (outcome, content_on) = match daemon_query {
+        Ok(outcome) => {
+            // A status that fails after the query answered leaves the note out.
+            let content_on = mode == "name"
+                || !client.status().is_ok_and(|status| {
+                    status
+                        .capabilities
+                        .iter()
+                        .any(|c| c == big_indexd_client::NAMES_ONLY)
+                });
+            (outcome, content_on)
         }
+        Err(big_indexd_client::ClientError::Io(_)) => (
+            query_without_daemon(&s, mode, &filter, &page)?,
+            settings::content_index_enabled(),
+        ),
         Err(e) => return Err(anyhow::anyhow!(e.to_string())),
     };
 
     print_hits(&s, &outcome);
+    if mode != "name" && !content_on {
+        eprintln!(
+            "{}",
+            dim(
+                "content search is off in this profile; `big-search config preset balanced` turns it on"
+            )
+        );
+    }
     if outcome.truncated {
         eprintln!(
             "{}",

@@ -210,6 +210,10 @@ pub const KIND_FILTER: &str = "kind-filter";
 /// [`RequestBody::Rescan`].
 pub const RESCAN: &str = "rescan";
 
+/// The [`Status::capabilities`] entry of a daemon that keeps no content
+/// index: its `content` and `both` searches find no file by its text.
+pub const NAMES_ONLY: &str = "names-only";
+
 /// Page window for virtual scrolling.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Page {

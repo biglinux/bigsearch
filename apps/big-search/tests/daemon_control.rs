@@ -303,3 +303,47 @@ fn hidden_source_indexes_new_files() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// With content indexing off, a content search says so instead of an empty
+/// answer; a running daemon's profile decides over the command's own.
+#[test]
+fn content_off_named() {
+    let base = scratch::scratch_dir("bs-content-off");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    std::fs::create_dir_all(home.join("docs")).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(home.join("docs/conf.txt"), "alpha").unwrap();
+    let reindex = env_cmd(
+        &["reindex", home.to_str().unwrap()],
+        &home,
+        &xdg_storage_home,
+        &run,
+    )
+    .env("BIG_SEARCH_NAMES_ONLY", "1")
+    .status()
+    .unwrap();
+    assert!(reindex.success());
+    let content_search = |names_only: &str| {
+        let output = env_cmd(&["content", "alpha"], &home, &xdg_storage_home, &run)
+            .env("BIG_SEARCH_NAMES_ONLY", names_only)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stderr).contains("content search is off")
+    };
+    assert!(content_search("1"), "no daemon, names only");
+    assert!(!content_search("0"), "no daemon, content on");
+
+    let sock = run.join("biglinux/indexd.sock");
+    let _d = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .env("BIG_SEARCH_NAMES_ONLY", "1")
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+    assert!(content_search("0"), "names-only daemon");
+    let _ = std::fs::remove_dir_all(&base);
+}

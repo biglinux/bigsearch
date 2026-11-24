@@ -613,7 +613,7 @@ fn daemon_capabilities() -> Vec<String> {
         ));
         capabilities.push(format!("extract-cap:{}", settings::extract_max_mb_label()));
     } else {
-        capabilities.push("names-only".to_string());
+        capabilities.push(big_indexd_client::NAMES_ONLY.to_string());
     }
     // Advertised so clients can detect support without a round trip.
     capabilities.push("sources".to_string());
