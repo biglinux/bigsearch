@@ -24,11 +24,11 @@ msgstr "קובץ זה כבר אינו נמצא שם: הוא הועבר או נמ
 
 #: src/main.rs
 msgid "You do not have permission to read this file."
-msgstr "אין לך הרשאה לקרוא קובץ זה."
+msgstr "אין לך הרשאה לקרוא את קובץ זה."
 
 #: src/main.rs
 msgid "This file could not be read."
-msgstr "לא ניתן לקרוא קובץ זה."
+msgstr "לא ניתן לקרוא את קובץ זה."
 
 #: src/main.rs
 msgid ""
