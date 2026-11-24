@@ -10,7 +10,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -75,8 +75,8 @@ pub fn serve(
     content_index: IndexReader,
     sock: &Path,
     control: Control,
-    origin_db: std::path::PathBuf,
-    state_db: std::path::PathBuf,
+    origin_db: PathBuf,
+    state_db: PathBuf,
     history: crate::history::SharedHistory,
 ) -> Result<()> {
     let listener = bind_private_socket(sock)?;
@@ -388,10 +388,10 @@ fn dispatch(
         // arrives after the overwrite is no answer at all.
         RequestBody::SaveVersion(request) => save_version_reply(history, request),
         RequestBody::ForgetVersions(request) => {
-            let Some(path) = settings::sources().client_row_key(Path::new(&request.path)) else {
+            let Some(spellings) = version_spellings(&request.path) else {
                 return err(format!("{} is relative or holds ..", request.path));
             };
-            history_reply(history, |store| store.forget(&path))
+            history_reply(history, |store| store.forget(&spellings))
         }
         RequestBody::ClearHistory => {
             history_reply(history, crate::history::History::forget_everything)
@@ -530,11 +530,11 @@ fn versions_reply(
     history: &crate::history::SharedHistory,
     request: big_indexd_client::PathRequest,
 ) -> Reply {
-    let Some(path) = settings::sources().client_row_key(Path::new(&request.path)) else {
+    let Some(spellings) = version_spellings(&request.path) else {
         return err(format!("{} is relative or holds ..", request.path));
     };
     let store = history.lock().expect("versions store lock");
-    let versions = match store.versions(&path) {
+    let versions = match store.versions(&spellings) {
         Ok(versions) => versions,
         Err(e) => return err(format!("versions: {e:#}")),
     };
@@ -558,6 +558,16 @@ fn versions_reply(
         },
         paused_for_space: store.is_paused_for_space(),
     }
+}
+
+/// The keys a client path may have versions under, in order: as spelled, since
+/// a stored key was a real path when kept and a symlink put in its place since
+/// leads to another document; then resolved inside a source, as
+/// [`save_version_reply`] keys it. `None` when relative or holding `..`.
+fn version_spellings(path: &str) -> Option<Vec<PathBuf>> {
+    let spelled = settings::normalized_client_path(Path::new(path))?;
+    let resolved = settings::sources().resolved_client_path(&spelled);
+    Some(std::iter::once(spelled).chain(resolved).collect())
 }
 
 fn save_version_reply(

@@ -127,6 +127,20 @@ pub(super) fn file_id_for_path(conn: &Connection, path: &Path) -> Result<Option<
         .optional()?)
 }
 
+/// The row of the first of `spellings` that has one, with that spelling.
+pub(super) fn first_stored<'a>(
+    conn: &Connection,
+    spellings: &'a [impl AsRef<Path>],
+) -> Result<Option<(i64, &'a Path)>> {
+    for path in spellings {
+        let path = path.as_ref();
+        if let Some(file_id) = file_id_for_path(conn, path)? {
+            return Ok(Some((file_id, path)));
+        }
+    }
+    Ok(None)
+}
+
 /// A name for one object: two hex characters of directory, then the rest.
 ///
 /// Named after nothing in the document, because the document will be renamed and

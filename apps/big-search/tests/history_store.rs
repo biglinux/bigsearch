@@ -111,7 +111,7 @@ fn replacing_save_keeps_the_earlier_state(history: &mut History, document: &Path
 
     // One, not two: the state the document is in right now is not an *earlier*
     // version of it, so it is left out of the list.
-    let versions = history.versions(document).expect("read the versions");
+    let versions = history.versions(&[document]).expect("read the versions");
     assert_eq!(versions.len(), 1, "{versions:?}");
     let oldest = versions.last().expect("one earlier version");
     assert_eq!(
@@ -153,7 +153,7 @@ fn rename_carries_the_history(history: &mut History, home: &Path, document: &Pat
     history
         .save_version(&renamed, Reason::Saved)
         .expect("save after the rename");
-    let after_rename = history.versions(&renamed).expect("versions");
+    let after_rename = history.versions(&[&renamed]).expect("versions");
     assert!(
         !after_rename.is_empty(),
         "the history did not follow the renamed document: {after_rename:?}"
@@ -188,7 +188,7 @@ fn state_before_a_restore_survives(history: &mut History, renamed: &Path) {
         .save_version(renamed, Reason::Saved)
         .expect("save after going back");
     let undo = history
-        .versions(renamed)
+        .versions(&[renamed])
         .expect("versions")
         .into_iter()
         .find(|version| version.reason == Reason::BeforeRestore)
@@ -207,19 +207,19 @@ fn hidden_rename_and_forget(history: &mut History, home: &Path, renamed: &Path) 
         .note_rename(renamed, &on_its_way_out)
         .expect("note the rename");
     assert!(
-        !history.versions(renamed).expect("versions").is_empty(),
+        !history.versions(&[renamed]).expect("versions").is_empty(),
         "the history followed the document out of reach"
     );
 
     // And forgetting takes the objects with it, not just the rows.
     let objects: Vec<PathBuf> = history
-        .versions(renamed)
+        .versions(&[renamed])
         .expect("versions")
         .into_iter()
         .map(|version| version.object)
         .collect();
-    history.forget(renamed).expect("forget");
-    assert!(history.versions(renamed).expect("versions").is_empty());
+    history.forget(&[renamed]).expect("forget");
+    assert!(history.versions(&[renamed]).expect("versions").is_empty());
     for object in objects {
         assert!(!object.exists(), "{} was left behind", object.display());
     }

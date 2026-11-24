@@ -50,8 +50,8 @@ pub use worker::{HistoryEvent, Pending, run_worker};
 use disk::disk_capacity;
 use eligibility::{eligible_name, git_work_tree};
 use store::{
-    file_id_for_path, follow_rename, is_live_session, now_secs, object_name, open_store,
-    prepare_store,
+    file_id_for_path, first_stored, follow_rename, is_live_session, now_secs, object_name,
+    open_store, prepare_store,
 };
 
 /// Why a version was written.
@@ -254,11 +254,12 @@ impl History {
     }
 
     /// Forget the versions of one document, also from a store turned off.
+    /// The document is the first of `spellings` that has a stored row.
     ///
     /// # Errors
     ///
     /// Returns an error when the versions database or the stored copies cannot be changed.
-    pub fn forget(&mut self, path: &Path) -> Result<()> {
+    pub fn forget(&mut self, spellings: &[impl AsRef<Path>]) -> Result<()> {
         let opened;
         let conn = match &self.conn {
             Some(conn) => conn,
@@ -271,7 +272,7 @@ impl History {
                 &opened
             }
         };
-        let Some(file_id) = file_id_for_path(conn, path)? else {
+        let Some((file_id, _)) = first_stored(conn, spellings)? else {
             return Ok(());
         };
         let objects: Vec<String> = conn
@@ -316,16 +317,17 @@ impl History {
     /// The earlier versions of one document, newest first.
     ///
     /// The state the document is in right now is left out: the newest version
-    /// is normally a clone of it, and "go back" to it would do nothing.
+    /// is normally a clone of it, and "go back" to it would do nothing. The
+    /// document is the first of `spellings` that has a stored row.
     ///
     /// # Errors
     ///
     /// Returns an error when the versions database cannot be read.
-    pub fn versions(&self, path: &Path) -> Result<Vec<Version>> {
+    pub fn versions(&self, spellings: &[impl AsRef<Path>]) -> Result<Vec<Version>> {
         let Some(conn) = &self.conn else {
             return Ok(Vec::new());
         };
-        let Some(file_id) = file_id_for_path(conn, path)? else {
+        let Some((file_id, path)) = first_stored(conn, spellings)? else {
             return Ok(Vec::new());
         };
         let live = std::fs::metadata(path).ok();

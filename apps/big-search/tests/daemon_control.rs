@@ -382,6 +382,7 @@ fn client_symlink_out_refused() {
     // The message tells the path refusal from a later failure, such as a disk
     // that keeps no versions.
     let not_searched = "not in a searched folder";
+    let no_source = "outside the configured sources";
     for (cmd, path, refusal) in [
         ("reindex", format!("{link}/"), not_searched),
         ("reindex", format!("{link}/."), not_searched),
@@ -399,27 +400,46 @@ fn client_symlink_out_refused() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// Guards: privacy action: a version kept through one spelling of a file is
-/// listed and forgotten through another, so forgetting never reports a success
-/// that left the copy behind.
+/// The ids of the versions the daemon lists for `path`.
+fn version_ids(sock: &Path, path: &Path) -> Vec<i64> {
+    let reply = path_request(sock, "versions", path);
+    reply["versions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("versions {path:?}: {reply}"))
+        .iter()
+        .map(|version| version["id"].as_i64().unwrap())
+        .collect()
+}
+
+/// Guards: privacy action: every request naming a path answers for the
+/// document that path names, whatever symlinks, removals or replacements
+/// happened on the way: forgetting through one spelling never erases another
+/// document's versions or leaves its own, and nothing outside a source is read.
 #[test]
-fn versions_forgotten_through_symlink() {
+fn client_path_matrix() {
     // A disk that can share blocks: `/tmp` is usually tmpfs, which keeps no
     // versions. The socket stays there, under the length limit of its path.
     let base = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("versions-alias-{}", std::process::id()));
+        .join(format!("client-path-matrix-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
-    let run = scratch::scratch_dir("bs-alias-run");
-    std::fs::create_dir_all(home.join("docs")).unwrap();
+    let outside = base.join("outside");
+    let run = scratch::scratch_dir("bs-matrix-run");
+    let docs = home.join("docs");
+    for folder in ["real", "old", "other", "gone", "proj"] {
+        std::fs::create_dir_all(docs.join(folder)).unwrap();
+        std::fs::write(docs.join(folder).join("a.txt"), folder).unwrap();
+    }
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("a.txt"), "outside").unwrap();
+    std::os::unix::fs::symlink(docs.join("real"), docs.join("alias")).unwrap();
+    std::os::unix::fs::symlink(&outside, docs.join("out")).unwrap();
     // The scratch home lies in the build folder, which the default rules
     // exclude.
     let rules = xdg_storage_home.join("cfg/big-search/ignore");
     std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
     std::fs::write(&rules, "!target/\n!**/target/**\n").unwrap();
-    std::fs::write(home.join("docs/report.txt"), "draft").unwrap();
-    std::os::unix::fs::symlink(home.join("docs"), home.join("alias")).unwrap();
     let sock = run.join("biglinux/indexd.sock");
     let _d = KillOnDrop(
         env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
@@ -428,24 +448,105 @@ fn versions_forgotten_through_symlink() {
     );
     assert!(wait_socket(&sock), "daemon never bound socket");
     let reply = |cmd: &str, path: &Path| path_request(&sock, cmd, path);
-    let alias = home.join("alias/report.txt");
-    let saved = reply("save_version", &alias);
+    let ids = |path: &Path| version_ids(&sock, path);
+    let file = |folder: &str| docs.join(folder).join("a.txt");
+
+    let saved = reply("save_version", &file("alias"));
     if saved["kind"] == "error" {
-        let unavailable = reply("versions", &alias)["unavailable"].clone();
+        let unavailable = reply("versions", &file("alias"))["unavailable"].clone();
         assert_ne!(unavailable, "", "{saved}");
         eprintln!("this disk keeps no versions ({unavailable}); test declared unsupported");
         let _ = std::fs::remove_dir_all(&base);
         return;
     }
-    // The state on disk is never listed: change it.
-    std::fs::write(home.join("docs/report.txt"), "final").unwrap();
-    let listed = reply("versions", &alias);
-    assert!(
-        !listed["versions"].as_array().unwrap().is_empty(),
-        "{listed}"
-    );
-    assert_eq!(reply("forget_versions", &alias)["kind"], "ok");
-    let left = reply("versions", &home.join("docs/report.txt"));
-    assert_eq!(left["versions"], serde_json::json!([]), "{left}");
+    // One version listed per document: the state on disk is never listed, and
+    // keeping it again leaves any automatic version of it nothing new to keep.
+    let keep_one = |spelled: &Path, edit: &str| {
+        assert_eq!(reply("save_version", spelled)["kind"], "ok", "{spelled:?}");
+        std::fs::write(spelled, edit).unwrap();
+        assert_eq!(reply("save_version", spelled)["kind"], "ok", "{spelled:?}");
+    };
+    keep_one(&file("alias"), "real edited");
+    for folder in ["old", "other", "gone", "proj"] {
+        keep_one(&file(folder), &format!("{folder} edited"));
+    }
+    std::fs::remove_dir_all(docs.join("old")).unwrap();
+    std::os::unix::fs::symlink(docs.join("other"), docs.join("old")).unwrap();
+    std::fs::remove_dir_all(docs.join("gone")).unwrap();
+    std::fs::remove_dir_all(docs.join("proj")).unwrap();
+    std::fs::write(docs.join("proj"), "a file now").unwrap();
+
+    // Alias inside a source: one document under either spelling.
+    let real = ids(&file("real"));
+    assert_eq!(real.len(), 1, "{real:?}");
+    assert_eq!(ids(&file("alias")), real);
+    // Folder replaced by a link inside the source: the versions kept under the
+    // old folder stay its own, apart from those of the folder linked in. Both
+    // of its states are listed, since neither is on disk any more.
+    let old = ids(&file("old"));
+    let other = ids(&file("other"));
+    assert_eq!((old.len(), other.len()), (2, 1), "{old:?} {other:?}");
+    assert!(!old.contains(&other[0]), "{old:?} {other:?}");
+    // A path vanished, and a folder turned into a file: rows keep their key.
+    assert_eq!(ids(&file("gone")).len(), 2);
+    assert_eq!(ids(&file("proj")).len(), 2);
+    // A link to outside: nothing was kept there and nothing is read.
+    assert_eq!(ids(&file("out")), Vec::<i64>::new());
+
+    assert_eq!(reply("forget_versions", &file("old"))["kind"], "ok");
+    assert_eq!(ids(&file("other")), other, "forgetting old erased other");
+    // With the old folder's rows gone, the spelling leads where it resolves.
+    assert_eq!(ids(&file("old")), other);
+    assert_eq!(reply("forget_versions", &file("alias"))["kind"], "ok");
+    assert_eq!(ids(&file("real")), Vec::<i64>::new());
+    for folder in ["gone", "proj", "out"] {
+        assert_eq!(reply("forget_versions", &file(folder))["kind"], "ok");
+        assert_eq!(ids(&file(folder)), Vec::<i64>::new(), "{folder}");
+    }
+
+    // Requests that read the disk follow the link and stay inside the source.
+    let not_searched = "not in a searched folder";
+    let no_source = "outside the configured sources";
+    for (cmd, path, refusal) in [
+        ("reindex", docs.join("alias"), None),
+        ("reindex", docs.join("old"), None),
+        ("reindex", docs.join("gone"), None),
+        ("reindex", docs.join("out/"), Some(not_searched)),
+        ("save_version", file("out"), Some(not_searched)),
+        ("register_created", file("alias"), None),
+        ("register_created", file("out"), Some(no_source)),
+    ] {
+        let answer = reply(cmd, &path);
+        match refusal {
+            None => assert_eq!(answer["kind"], "ok", "{cmd} {path:?}: {answer}"),
+            Some(refusal) => assert!(
+                answer["message"].as_str().unwrap().contains(refusal),
+                "{cmd} {path:?}: {answer}"
+            ),
+        }
+    }
+    let origin = reply("origin", &file("real")).to_string();
+    assert!(origin.contains("app_created"), "{origin}");
+    keep_one(&file("alias"), "real again");
+    assert_eq!(ids(&file("real")).len(), 1);
+
+    // Source root replaced by a link while the daemon runs: it leads nowhere
+    // new, and the rows kept under it are still found by their spelling.
+    std::fs::rename(&home, base.join("home.old")).unwrap();
+    std::os::unix::fs::symlink(&outside, &home).unwrap();
+    std::fs::create_dir_all(outside.join("docs/real")).unwrap();
+    std::fs::write(outside.join("docs/real/a.txt"), "outside").unwrap();
+    for (cmd, path) in [
+        ("reindex", docs.join("real")),
+        ("save_version", file("real")),
+        ("register_created", file("real")),
+    ] {
+        assert_eq!(reply(cmd, &path)["kind"], "error", "{cmd} {path:?}");
+    }
+    // Its state on disk is out of reach now, so it is listed too.
+    assert_eq!(ids(&file("other")).len(), 2);
+    assert!(ids(&file("other")).contains(&other[0]));
+    assert_eq!(reply("forget_versions", &file("other"))["kind"], "ok");
+    assert_eq!(ids(&file("other")), Vec::<i64>::new());
     let _ = std::fs::remove_dir_all(&base);
 }

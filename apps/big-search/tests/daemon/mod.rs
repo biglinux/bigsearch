@@ -50,8 +50,10 @@ pub fn send_daemon_request(sock: &Path, json: &str) -> String {
     line
 }
 
+/// Whether the daemon bound `sock`. A data folder on disk rather than in
+/// `/tmp` waits on the index's first sync, which a busy disk holds for seconds.
 pub fn wait_socket(sock: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if sock.exists() {
             return true;
