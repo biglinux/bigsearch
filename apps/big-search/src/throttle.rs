@@ -35,13 +35,14 @@ pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
 ///   its cgroup, though: without the indexer's cgroup it only puts the indexer
 ///   behind the query thread, and a program sharing a core with the indexer
 ///   still loses a large share of it.
-/// - The utilization clamp (`INDEXER_UTIL_MAX`) holds the clock down where
-///   the frequency driver follows the scheduler (`schedutil`); drivers that pick
-///   frequencies in hardware (`intel_pstate`/`amd-pstate` active) ignore it.
+/// - The utilization clamp (`INDEXER_UTIL_MAX`), on the thread and on the
+///   indexer's cgroup, holds the clock down where the frequency driver follows
+///   the scheduler (`schedutil`); drivers that pick frequencies in hardware
+///   (`intel_pstate`/`amd-pstate` active) ignore it.
 /// - nice 19 for kernels that refuse `SCHED_IDLE`, and idle I/O priority, which
 ///   the BFQ disk scheduler honors.
 pub fn lower_priority() {
-    let mut attr = SchedAttr {
+    let attr = SchedAttr {
         size: std::mem::size_of::<SchedAttr>() as u32,
         sched_policy: libc::SCHED_IDLE as u32,
         sched_flags: libc::SCHED_FLAG_UTIL_CLAMP_MAX as u64,
@@ -53,17 +54,25 @@ pub fn lower_priority() {
         sched_util_min: 0,
         sched_util_max: INDEXER_UTIL_MAX,
     };
+    let idle = libc::sched_param { sched_priority: 0 };
     // SAFETY: priority syscalls on the calling thread (pid/who = 0); `attr`
-    // outlives the call and its `size` is the size of the struct passed.
-    unsafe {
+    // and `idle` outlive the calls, and `attr.size` is the size of the struct.
+    let policy_set = unsafe {
         libc::setpriority(libc::PRIO_PROCESS, 0, 19);
-        if libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0) != 0 {
-            // A kernel built without utilization clamping: SCHED_IDLE alone.
-            attr.sched_flags = 0;
-            libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0);
-        }
         // ioprio_set(IOPRIO_WHO_PROCESS = 1, who = 0, IOPRIO_CLASS_IDLE = 3 << 13)
         libc::syscall(libc::SYS_ioprio_set, 1, 0, 3i64 << 13);
+        // Refused by a kernel built without utilization clamping and, from
+        // systemd 263, by the unit's `RestrictRealtime=yes`, which denies
+        // sched_setattr outright: SCHED_IDLE alone then, and the indexer's
+        // cgroup holds the clamp.
+        libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0) == 0
+            || libc::sched_setscheduler(0, libc::SCHED_IDLE, &raw const idle) == 0
+    };
+    if !policy_set {
+        log::warn!(
+            "indexer thread keeps its scheduling policy: {}",
+            std::io::Error::last_os_error()
+        );
     }
     if let Some(index) = IDLE_CGROUP.get() {
         // SAFETY: gettid has no preconditions.
@@ -134,6 +143,18 @@ pub fn prepare_idle_cgroup() -> Option<&'static str> {
         )?;
         "lowest weight"
     };
+    // The clamp for every indexer thread, where the service's sandbox refuses
+    // a thread its own (`lower_priority`). Absent on a kernel built without
+    // cgroup utilization clamping.
+    let percent = f64::from(INDEXER_UTIL_MAX) * 100.0 / 1024.0;
+    if let Err(e) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(index.join("cpu.uclamp.max"))
+        .and_then(|mut file| file.write_all(format!("{percent:.2}").as_bytes()))
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("indexer cgroup keeps the clock unclamped: {e}");
+    }
     IDLE_CGROUP.set(index).ok()?;
     Some(how)
 }
@@ -163,7 +184,7 @@ pub fn release_idle_memory() {
     }
 }
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
