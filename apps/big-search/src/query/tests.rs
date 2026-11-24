@@ -127,11 +127,8 @@ fn run_names(
     .unwrap()
 }
 
-/// "Every PDF in my home folder" has no words to search for.
-///
-/// The name search finds nothing without a word, so a caller narrowing purely
-/// by filter needs this mode or would have to walk the disk itself beside an
-/// index that already knows the answer.
+/// "Every PDF in my home folder" has no words to search for, and the name
+/// search finds nothing without one.
 #[test]
 fn list_mode_answers_wordless_queries() {
     let root = crate::test_env::scratch_dir("lsearch-list");
