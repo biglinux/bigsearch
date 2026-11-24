@@ -129,10 +129,9 @@ fn run_names(
 
 /// "Every PDF in my home folder" has no words to search for.
 ///
-/// The name search refuses a query under two characters, because the ngram
-/// index cannot narrow one, so a caller narrowing purely by filter needs
-/// this mode or would have to walk the disk itself beside an index that
-/// already knows the answer.
+/// The name search finds nothing without a word, so a caller narrowing purely
+/// by filter needs this mode or would have to walk the disk itself beside an
+/// index that already knows the answer.
 #[test]
 fn list_mode_answers_wordless_queries() {
     let root = crate::test_env::scratch_dir("lsearch-list");
@@ -475,6 +474,44 @@ fn a_page_counts_all_matches() {
     assert_eq!(outcome.total, 30);
     assert_eq!(outcome.next_offset, Some(5));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Guards: regression: a content search filtered by folder after the
+/// candidate ceiling found nothing in a folder holding matches, silently.
+#[test]
+fn ceiling_cut_reported_truncated() {
+    let mut paths: Vec<String> = (0..CANDIDATE_CEILING)
+        .map(|i| format!("/home/u/a/mango {i}.txt"))
+        .collect();
+    paths.extend((0..10).map(|i| format!("/home/u/b/mango {i}.txt")));
+    paths.push("/home/u/b/kiwi.txt".to_string());
+    let entries: Vec<(&str, &str)> = paths.iter().map(|p| (p.as_str(), p.as_str())).collect();
+    let content = content_index_with("ceiling-cut", &entries);
+    let names = index_with("ceiling-cut", &[]);
+    let content_page = |q: &str| {
+        run_query(
+            QueryIndexes {
+                name: &names,
+                content: Some(&content),
+                catalogue: &no_catalogue(),
+            },
+            q,
+            "content",
+            &Filter {
+                under: Some("/home/u/b".into()),
+                ..Default::default()
+            },
+            &Page {
+                offset: 0,
+                limit: 50,
+            },
+            false,
+            None,
+        )
+        .unwrap()
+    };
+    assert!(content_page("mango").truncated);
+    assert!(!content_page("kiwi").truncated);
 }
 
 /// A file found by name and by content is one hit and counts once.

@@ -108,19 +108,21 @@ pub fn run_query(
         "largest" => Some(ListOrder::Largest),
         _ => None,
     };
-    let (mut hits, total, limit) = if let Some(order) = order
+    let (mut hits, total, limit, truncated) = if let Some(order) = order
         && filter.mime.is_empty()
         && filter.kind.is_none()
     {
-        catalogue_page(&indexes, filter, order, page)?
+        let (hits, total, limit) = catalogue_page(&indexes, filter, order, page)?;
+        (hits, total, limit, false)
     } else {
-        let (kept, total) = ranked(&indexes, q, mode, filter, page, &names, &name_fields)?;
+        let (kept, total, truncated) =
+            ranked(&indexes, q, mode, filter, page, &names, &name_fields)?;
         let hits = kept
             .into_iter()
             .skip(page.offset)
             .take(page.limit)
             .collect();
-        (hits, total, page.limit)
+        (hits, total, page.limit, truncated)
     };
     let end = page.offset.saturating_add(limit);
     let next_offset = (end < total).then_some(end);
@@ -139,11 +141,13 @@ pub fn run_query(
         total,
         next_offset,
         content_pending: 0, // the daemon overwrites this from its live gauge
+        truncated,
     })
 }
 
 /// Every candidate of the index-backed modes that passes `filter`, in rank
-/// order, and how many match in all.
+/// order, how many match in all, and whether the base search stopped at the
+/// ceiling.
 fn ranked(
     indexes: &QueryIndexes<'_>,
     q: &str,
@@ -152,14 +156,15 @@ fn ranked(
     page: &Page,
     names: &tantivy::Searcher,
     name_fields: &crate::index::Fields,
-) -> Result<(Vec<Hit>, usize)> {
+) -> Result<(Vec<Hit>, usize, bool)> {
     let (paged, fetch) = candidates_to_read(mode, filter, page);
     let (base, counted) = search_by_mode(indexes, q, mode, filter, paged, fetch)?;
+    let truncated = base.len() >= CANDIDATE_CEILING;
     let mut kept = keep_path_matches(base, filter);
     keep_type_matches(&mut kept, filter, names, name_fields);
     keep_stat_matches(&mut kept, filter);
     let total = counted.map_or(kept.len(), |counted| counted.max(kept.len()));
-    Ok((kept, total))
+    Ok((kept, total, truncated))
 }
 
 /// The base search of `mode`, and the count of a paged query whose page did

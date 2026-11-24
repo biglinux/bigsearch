@@ -19,7 +19,7 @@ line. A connection may carry several exchanges in a row. Every object carries
 
 | `cmd` | Fields | Answer `kind` |
 |---|---|---|
-| `query` | `q`, `mode` (`name`, `content`, `both`, `list`, `largest`), `filter` {`under`, `ext`, `mime`, `mtime`, `size`, `kind`}, `page` {`offset`, `limit`}, `include_origin` | `query`: `hits`, `total`, `next_offset`, `content_pending` |
+| `query` | `q`, `mode` (`name`, `content`, `both`, `list`, `largest`), `filter` {`under`, `ext`, `mime`, `mtime`, `size`, `kind`}, `page` {`offset`, `limit`}, `include_origin` | `query`: `hits`, `total`, `next_offset`, `content_pending`, `truncated` |
 | `status` | | `status`: `indexed`, `paused`, `activity`, `capabilities`, counts, index sizes and `unwatched_dirs` |
 | `sources` | | `sources`: `roots` {`path`, `name`, `content`, `available`} |
 | `origin` | `path` | `origin`: `origin` or null |

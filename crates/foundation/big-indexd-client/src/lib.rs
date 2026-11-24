@@ -269,6 +269,12 @@ pub struct QueryOutcome {
     /// retry shortly will see them ("loading" hint for UIs).
     #[serde(default)]
     pub content_pending: u64,
+    /// The search stopped at [`CANDIDATE_CEILING`] candidates before the
+    /// folder, extension, type, date and size filters ran: matches past them
+    /// were never read, so this page can miss some and `total` is a floor.
+    /// Narrowing the query reaches them; paging does not.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// A versioned, command-tagged request.
@@ -684,6 +690,7 @@ mod tests {
                 assert_eq!(outcome.hits[0].size, 5);
                 assert_eq!(outcome.hits[0].ext, "txt");
                 assert_eq!(outcome.content_pending, 0); // additive field defaults
+                assert!(!outcome.truncated);
             }
             other => panic!("wrong kind: {other:?}"),
         }
