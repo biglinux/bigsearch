@@ -578,7 +578,20 @@ fn save_version_reply(
     let Some(path) = settings::sources().resolved_client_path(Path::new(&request.path)) else {
         return err(format!("{} is not in a searched folder", request.path));
     };
+    let spelled = settings::normalized_client_path(Path::new(&request.path));
     history_reply(history, |store| {
+        // Versions kept under a path that leads elsewhere now are those of the
+        // file that was there: the restore that follows would write one over
+        // the file the path leads to.
+        if let Some(spelled) = spelled.filter(|spelled| *spelled != path)
+            && store.keeps(&spelled)?
+        {
+            anyhow::bail!(
+                "{} leads to {} now; its versions are of the file that was there",
+                spelled.display(),
+                path.display()
+            );
+        }
         store
             .save_version(&path, crate::history::Reason::BeforeRestore)
             .map(|_| ())
@@ -677,7 +690,7 @@ fn history_reply(
         Ok(()) => Reply::Ok {
             v: PROTOCOL_VERSION,
         },
-        Err(error) => err(error.to_string()),
+        Err(error) => err(format!("{error:#}")),
     }
 }
 

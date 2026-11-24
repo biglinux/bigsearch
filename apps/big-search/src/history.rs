@@ -314,6 +314,18 @@ impl History {
         follow_rename(conn, from, to)
     }
 
+    /// Whether versions are kept under `path` as spelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database cannot be read.
+    pub fn keeps(&self, path: &Path) -> Result<bool> {
+        let Some(conn) = &self.conn else {
+            return Ok(false);
+        };
+        Ok(file_id_for_path(conn, path)?.is_some())
+    }
+
     /// The earlier versions of one document, newest first.
     ///
     /// The state the document is in right now is left out: the newest version
@@ -397,7 +409,15 @@ impl History {
             }
         };
         let Some(metadata) = eligible_metadata(path) else {
-            return Ok(None);
+            // A restore over no file, or an empty one, loses nothing.
+            let lost = reason == Reason::BeforeRestore
+                && std::fs::symlink_metadata(path)
+                    .is_ok_and(|metadata| !metadata.is_file() || metadata.len() > 0);
+            return if lost {
+                Err(not_kept_error("this file is not kept"))
+            } else {
+                Ok(None)
+            };
         };
         if self.conn.is_none() {
             return not_kept("versions are turned off");
