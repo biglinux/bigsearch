@@ -167,3 +167,28 @@ fn report_escapes_control_characters() {
 fn usage_error_exits_two() {
     assert_eq!(run(&["--bogus", "x", "y"]).status.code(), Some(2));
 }
+
+/// The dialog names why a file gave no text: gone, not readable by this user,
+/// or a type with no text to read.
+#[test]
+fn unreadable_file_cause_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("unreadable");
+    let locked = dir.join("locked.txt");
+    fs::write(&locked, CONTRACT).expect("write");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let opaque = dir.join("opaque.bin");
+    fs::write(&opaque, [0u8, 1, 2, 3]).expect("write");
+    let cases = [
+        (dir.join("missing.txt"), "moved or deleted"),
+        (locked, "permission"),
+        (opaque, "no readable text"),
+    ];
+    for (file, cause) in &cases {
+        let out = run(&[arg(file)]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{}", file.display());
+        assert!(stderr.contains(cause), "{}: {stderr}", file.display());
+    }
+    fs::remove_dir_all(dir).expect("cleanup");
+}
