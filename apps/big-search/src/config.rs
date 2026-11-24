@@ -23,8 +23,8 @@ pub fn data_dir() -> PathBuf {
 /// complete list of every path in their home, and the content index holds the
 /// extracted *text* of their documents. SQLite and the walker create their files
 /// through the process umask, typically `0022`, which leaves `state.sqlite` and
-/// `content-signatures.json` readable by every local account. Tantivy creates
-/// `index/` as 0700 on its own; nothing else does.
+/// `content-signatures.json` readable by every local account, and the
+/// index directories are created the same way.
 ///
 /// Restricting the directory covers every file inside it, present and future,
 /// without having to remember a mode at each creation site.

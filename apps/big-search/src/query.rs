@@ -182,8 +182,8 @@ fn search_by_mode(
         "both" => search_both(indexes.name, content_reader()?, q, filter, fetch)?,
         // Everything the index holds, for a caller that is narrowing by
         // filter rather than by words: "every PDF under my home folder" has
-        // no text to search for, and the name search refuses a query shorter
-        // than two letters because the ngram index cannot narrow one.
+        // no text to search for, and the name search finds nothing without a
+        // word.
         "list" | "largest" => list_matching(indexes.name, filter, CANDIDATE_CEILING)?,
         _ => search(indexes.name, q, filter, fetch)?,
     };
