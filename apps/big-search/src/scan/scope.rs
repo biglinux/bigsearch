@@ -150,7 +150,8 @@ impl Scope {
     }
 
     pub(super) fn from_rules(rules: &Path) -> Self {
-        // Root `/` so the patterns match anywhere, as `add_ignore` applies them.
+        // Matched against paths below their source, as the walker applies them
+        // from `rules_root`; `/` anchors a path no source holds.
         let mut builder = ignore::gitignore::GitignoreBuilder::new("/");
         if rules.exists()
             && let Some(e) = builder.add(rules)
@@ -168,10 +169,11 @@ impl Scope {
     /// ancestors too, so a file event inside an excluded tree is refused even
     /// when the event names only the file.
     pub fn excluded(&self, path: &Path, is_dir: bool) -> bool {
-        is_hidden(below_source(path))
+        let below = below_source(path);
+        is_hidden(below)
             || self
                 .ignore
-                .matched_path_or_any_parents(path, is_dir)
+                .matched_path_or_any_parents(below, is_dir)
                 .is_ignore()
     }
 }
@@ -253,13 +255,19 @@ fn git_common_dir(work_tree: &Path, dot_git_is_file: bool) -> PathBuf {
     }
 }
 
+/// Where the ignore rules are anchored for `path`: the source holding it, so a
+/// source inside a folder the rules name (`/home/build`, `~/out/docs`) is still
+/// indexed. `/` for a path no source holds.
+pub(super) fn rules_root(path: &Path) -> &'static Path {
+    crate::settings::sources()
+        .owner(path)
+        .map_or(Path::new("/"), |source| &source.path)
+}
+
 /// `path` below the source that holds it. The walker tests only what lies
 /// below its root, and a source may itself sit in a dot-folder.
 fn below_source(path: &Path) -> &Path {
-    crate::settings::sources()
-        .owner(path)
-        .and_then(|source| path.strip_prefix(&source.path).ok())
-        .unwrap_or(path)
+    path.strip_prefix(rules_root(path)).unwrap_or(path)
 }
 
 /// A dotfile or any path under a dot-directory: the churny majority the design

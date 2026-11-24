@@ -304,6 +304,41 @@ fn hidden_source_indexes_new_files() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// The ignore rules apply below the source: a home inside a folder named
+/// `build` is indexed by the scan and the watcher, and a `build` folder inside
+/// it is still left out.
+#[test]
+fn source_under_excluded_name_indexed() {
+    let base = scratch::scratch_dir("bs-excluded-ancestor");
+    let home = base.join("out/build/home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    let docs = home.join("docs");
+    std::fs::create_dir_all(docs.join("build")).unwrap();
+    std::fs::write(docs.join("before.txt"), "alpha").unwrap();
+    std::fs::write(docs.join("build/artifact.txt"), "beta").unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    let sock = run.join("biglinux/indexd.sock");
+    let _daemon = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+
+    assert!(
+        settles(|| query_paths(&sock, "name", "before", &home).0 == 1),
+        "the scan left out a file of the source"
+    );
+    std::fs::write(docs.join("appeared.txt"), "gamma").unwrap();
+    assert!(
+        settles(|| query_paths(&sock, "name", "appeared", &home).0 == 1),
+        "the watcher left out a new file of the source"
+    );
+    assert_eq!(query_paths(&sock, "name", "artifact", &home).0, 0);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// With content indexing off, a content search says so instead of an empty
 /// answer; a running daemon's profile decides over the command's own.
 #[test]

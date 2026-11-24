@@ -31,6 +31,9 @@ fn walker(root: &Path) -> ignore::Walk {
         .follow_links(false);
     let eff = crate::config::effective_ignore();
     if eff.exists() {
+        // `add_ignore` anchors the rules at the walker's current folder, the
+        // process's by default: anchor them at the source, as `Scope` does.
+        b.current_dir(scope::rules_root(root));
         b.add_ignore(&eff); // highest precedence, prunes the noise dirs everywhere
     }
     b.build()
