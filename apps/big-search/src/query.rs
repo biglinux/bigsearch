@@ -15,10 +15,11 @@ mod names;
 #[cfg(not(miri))]
 mod tests;
 
-pub use both::search_both;
+pub(crate) use both::search_both;
 use content::count_content;
-pub use content::search_content;
-pub use listing::{count, list_matching, list_paths};
+pub(crate) use content::search_content;
+pub(crate) use listing::list_matching;
+pub use listing::{count, list_paths};
 pub use names::search;
 use names::{count_names, indexed_mime};
 
@@ -74,6 +75,11 @@ fn catalogue_page(
 /// The `list` and `largest` modes instead read the catalogue, newest or
 /// largest first, with an exact `total`; see
 /// [`crate::catalogue::CatalogueReader::list`].
+///
+/// # Errors
+///
+/// Returns an error when an index or the catalogue cannot be read, or a content mode runs
+/// without a content index.
 pub fn run_query(
     indexes: QueryIndexes<'_>,
     q: &str,

@@ -84,7 +84,7 @@ fn count_and_list_subcommands_report_catalog() {
         1
     );
 
-    fs::remove_dir_all(&base).ok();
+    let _ = fs::remove_dir_all(&base);
 }
 
 /// A reindex after an index directory was deleted must re-extract content even
@@ -111,7 +111,7 @@ fn reindex_rebuilds_either_missing_index() {
             "content lost after deleting {lost}"
         );
 
-        fs::remove_dir_all(&base).ok();
+        let _ = fs::remove_dir_all(&base);
     }
 }
 
@@ -133,7 +133,7 @@ fn config_change_names_the_restart() {
             "{args:?}: {out}"
         );
     }
-    fs::remove_dir_all(&base).ok();
+    let _ = fs::remove_dir_all(&base);
 }
 
 /// A file name is outside text: its control characters reach the terminal
@@ -164,7 +164,7 @@ fn file_names_print_without_control_characters() {
             "{args:?}: {out:?}"
         );
     }
-    fs::remove_dir_all(&base).ok();
+    let _ = fs::remove_dir_all(&base);
 }
 
 /// An error exits 1; a search with no hits is no error.
@@ -195,5 +195,5 @@ fn exit_status_tells_error_from_empty() {
     };
     assert_eq!(status(&["nothing-matches-this"]), Some(0));
     assert_eq!(status(&["config", "set", "no-such-key", "1"]), Some(1));
-    fs::remove_dir_all(&base).ok();
+    let _ = fs::remove_dir_all(&base);
 }

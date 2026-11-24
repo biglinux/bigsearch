@@ -28,6 +28,11 @@ pub fn data_dir() -> PathBuf {
 ///
 /// Restricting the directory covers every file inside it, present and future,
 /// without having to remember a mode at each creation site.
+///
+/// # Errors
+///
+/// Returns the I/O error of creating the data directory, reading its mode or
+/// restricting it.
 pub fn ensure_private_data_dir() -> std::io::Result<()> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
@@ -127,7 +132,7 @@ mod tests {
         ensure_private_data_dir().unwrap();
         let mode = std::fs::metadata(data_dir()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

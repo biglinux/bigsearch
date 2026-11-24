@@ -82,7 +82,7 @@ fn pause_resume_rebuild_cycle() {
     assert!(command_accepted(&sock, "resume"));
     assert!(await_paused(&sock, false), "daemon did not report resumed");
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// Debug builds only: a release binary ignores the batch size this test sets.
@@ -132,7 +132,7 @@ fn content_backfill_continues_past_batch() {
         "second content file was not indexed by an idle follow-up batch"
     );
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A folder deleted or moved while the daemon runs leaves nothing of its tree
@@ -191,7 +191,7 @@ fn departed_tree_leaves_every_index() {
         "the moved tree is not searchable by content under its new path"
     );
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// How long a tree's departure may take to reach every index: the watcher
@@ -267,7 +267,7 @@ fn global_git_ignore_covers_events() {
         "the visible file was not indexed"
     );
     assert_eq!(catalogue_rows(&xdg_storage_home, "name", &repo), 1);
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A source inside a dot-folder indexes the files that appear in it: only what
@@ -301,5 +301,5 @@ fn hidden_source_indexes_new_files() {
         settles(|| query_paths(&sock, "name", "appeared", &notes).0 == 1),
         "the new file in the hidden source was not indexed"
     );
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }

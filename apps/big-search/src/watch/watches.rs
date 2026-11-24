@@ -48,6 +48,10 @@ pub(super) fn epoch_secs(time: SystemTime) -> i64 {
 }
 
 /// Drop the last run's record, so the next start walks.
+///
+/// # Errors
+///
+/// Returns an error when the saved record cannot be deleted.
 pub fn forget_saved_run(watch_list: &State) -> Result<()> {
     watch_list.set_meta(RUN_FINGERPRINT, None)
 }

@@ -48,6 +48,10 @@ const NON_CANDIDATE_TOMBSTONE_BATCH: usize = 4096;
 /// ("tombstones"), removing them from the pending join. Changing the indexing
 /// policy later (e.g. enabling metadata) requires `big-search rebuild`, which
 /// clears this state.
+///
+/// # Errors
+///
+/// Returns an error when the content state cannot be written.
 pub fn record_skipped_candidates(entries: &[(PathBuf, i64, u64)]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
@@ -76,6 +80,11 @@ pub type CatalogCursor = Option<String>;
 /// see them, and they answer content searches with files that are gone.
 ///
 /// Walks every live document, so this is a startup repair, not a per-pass step.
+///
+/// # Errors
+///
+/// Returns an error when the content index or its state cannot be read, or the deletions
+/// cannot be committed.
 pub fn prune_unreferenced_content_docs(index: &Index) -> Result<usize> {
     let index_dir = crate::config::content_index_dir();
     if crate::index::is_unreferenced_pruned(&index_dir) {
@@ -142,6 +151,11 @@ pub const ORPHAN_PRUNE_STEADY_LIMIT: usize = 8192;
 /// it would answer searches until a full rebuild. Commits are batched because a
 /// commit is the expensive part, and a keyset cursor (not the deletions
 /// themselves) advances the scan, so nothing has to be flushed to make progress.
+///
+/// # Errors
+///
+/// Returns an error when the content state cannot be read or written, or the deletions
+/// cannot be committed.
 pub fn prune_orphaned_content(index: &Index, limit: usize) -> Result<(usize, bool)> {
     const FLUSH_EVERY: usize = 16 * ORPHAN_PRUNE_BATCH;
 
@@ -232,6 +246,11 @@ fn content_channel_capacity() -> usize {
 /// Index all pending content/metadata by streaming the name catalogue from
 /// SQLite in bounded batches. This avoids constructing `Vec<PathBuf>` for the
 /// full catalogue during a reindex or daemon backfill.
+///
+/// # Errors
+///
+/// Returns an error when the catalogue or the content state cannot be read, or the content
+/// index cannot be written.
 pub fn index_pending_catalog(index: &Index) -> Result<u64> {
     if !crate::settings::content_index_enabled() {
         return Ok(0);
@@ -270,6 +289,12 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
     Ok(indexed_total)
 }
 
+/// Extracts and indexes the content of `files`, at most `limit` of them when
+/// given, and returns how many were indexed.
+///
+/// # Errors
+///
+/// Returns an error when the content index or its state cannot be written.
 pub fn index_content_limited(
     index: &Index,
     files: Vec<PathBuf>,
@@ -287,7 +312,7 @@ pub fn index_content_limited(
     Ok(indexed)
 }
 
-pub fn index_content_limited_with_writer(
+pub(crate) fn index_content_limited_with_writer(
     writer: &mut IndexWriter,
     f: &ContentFields,
     files: Vec<PathBuf>,
@@ -472,8 +497,12 @@ fn dedupe_content_enabled() -> bool {
 }
 
 /// One pending backfill batch selected from the complete name catalogue without
-/// loading the catalogue into RAM (a fresh pass; see [`pending_catalog_batch_after`]).
+/// loading the catalogue into RAM (a fresh pass; see `pending_catalog_batch_after`).
 /// `min_change_age` defers files changed more recently than that (cooldown).
+///
+/// # Errors
+///
+/// Returns an error when the catalogue or the content state cannot be read.
 pub fn pending_catalog_batch(
     limit: usize,
     min_change_age: Duration,
@@ -488,7 +517,7 @@ pub fn pending_catalog_batch(
 /// cursor for the next call (`None` when this pass reached the catalogue end).
 /// Files whose catalogued mtime is younger than `min_change_age` are deferred,
 /// not extracted; pass `Duration::ZERO` to bypass the cooldown.
-pub fn pending_catalog_batch_after(
+pub(crate) fn pending_catalog_batch_after(
     cursor: CatalogCursor,
     limit: usize,
     min_change_age: Duration,
@@ -526,7 +555,7 @@ fn catalog_content_batch_limit() -> usize {
 /// the content index keeps its own record, and the tag token lives there.
 /// Without this, the forced reindex commits a name-index document with nothing
 /// new in it, the content pass declines the work, and the tag is never findable.
-pub fn forget_content_state(path: &Path) -> Result<()> {
+pub(crate) fn forget_content_state(path: &Path) -> Result<()> {
     let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
         crate::catalogue::CONTENT_NAMESPACE,
@@ -535,6 +564,11 @@ pub fn forget_content_state(path: &Path) -> Result<()> {
     content_state.persist()
 }
 
+/// Forgets every content state row, so every file is extracted again.
+///
+/// # Errors
+///
+/// Returns an error when the content state cannot be cleared.
 pub fn clear_content_state() -> Result<()> {
     // These rows are the only thing referencing the content documents, so
     // dropping them is exactly what strands documents. Re-arm the sweep.

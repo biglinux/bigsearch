@@ -55,7 +55,7 @@ fn rename_over_a_kept_document() {
             ("/d/b.md".to_string(), "object-2".to_string()),
         ]
     );
-    std::fs::remove_dir_all(&dir).ok();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A new file given a deleted document's inode number starts its own
@@ -88,7 +88,7 @@ fn reused_inode_starts_a_new_history() {
     assert_ne!(store.upsert_file(&notes, &metadata).unwrap(), 7);
     deleted(born);
     assert_eq!(store.upsert_file(&notes, &metadata).unwrap(), 7);
-    std::fs::remove_dir_all(&dir).ok();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A path that is not UTF-8 never finds the row of the file whose name its
@@ -105,7 +105,7 @@ fn non_utf8_path_has_no_row() {
     .unwrap();
     let latin1 = Path::new(std::ffi::OsStr::from_bytes(b"/d/Relat\xf3rios/a.md"));
     assert_eq!(file_id_for_path(&conn, latin1).unwrap(), None);
-    std::fs::remove_dir_all(&dir).ok();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// After a restart the pass over the catalogue checks only what the newest
@@ -138,7 +138,7 @@ fn catalogue_pass_skips_kept_documents() {
         unkept,
         [PathBuf::from("/d/edited.md"), PathBuf::from("/d/new.md")]
     );
-    std::fs::remove_dir_all(&dir).ok();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn disabled_store_erases_its_files() {
     store.forget_everything().unwrap();
     assert!(!crate::config::history_dir().join("objects").exists());
     assert!(!crate::config::history_db_path().exists());
-    std::fs::remove_dir_all(&xdg_data).ok();
+    let _ = std::fs::remove_dir_all(&xdg_data);
 }
 
 /// Two objects never collide, and each lands in a shard.
@@ -215,7 +215,7 @@ fn sweep_drops_only_orphans() {
     assert!(shard.join("kept").exists());
     assert!(!shard.join("stray").exists());
     assert!(dir.join("objects/notes.txt").exists());
-    std::fs::remove_dir_all(&dir).ok();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A shard the sweep cannot list is an error, never proof that its versions
@@ -237,5 +237,5 @@ fn unreadable_shard_keeps_versions() {
     assert!(swept.is_err());
     assert_eq!(kept_objects(&store), ["bb/one"]);
     assert!(shard.join("one").exists());
-    std::fs::remove_dir_all(&dir).ok();
+    let _ = std::fs::remove_dir_all(&dir);
 }

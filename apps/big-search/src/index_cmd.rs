@@ -36,7 +36,7 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
 
     let t0 = Instant::now();
     let sync_outcome = scan::sync(&index, &scan_roots, &mut state)?;
-    let names = index::document_count(&index.reader()?)?;
+    let names = index::document_count(&index.reader()?);
     println!(
         "indexed {names} names in {:.2}s",
         t0.elapsed().as_secs_f64()
@@ -107,7 +107,7 @@ fn reconcile_plan(
         available,
         sources.all().len()
     );
-    let index_empty = index::document_count(&index.reader()?)? == 0;
+    let index_empty = index::document_count(&index.reader()?) == 0;
     let state = if index_empty {
         *content_index = index::recreate_content_on_disk(&config::content_index_dir())?;
         content::clear_content_state()?;
@@ -175,7 +175,7 @@ fn ensure_content_state_matches_index(content_index: &tantivy::Index) -> Result<
     // Only an empty index proves the rows lie: policy-skipped files and files
     // with no extractable body keep a row without a document, so fewer documents
     // than rows is normal and must not wipe the extraction done so far.
-    let indexed_content_documents = index::document_count(&content_index.reader()?)?;
+    let indexed_content_documents = index::document_count(&content_index.reader()?);
     if indexed_content_documents == 0 {
         log::warn!(
             "content index/state divergence detected: {indexed_content_documents} content docs for {cached_content_paths} cached paths; rebuilding content cache"
@@ -488,7 +488,7 @@ fn startup_sync(
     let empty = index
         .reader()
         .ok()
-        .and_then(|reader| index::document_count(&reader).ok())
+        .map(|reader| index::document_count(&reader))
         .is_none_or(|count| count == 0);
     let mut state = startup_name_state(empty, content_index);
     let mut watch_list =
@@ -799,7 +799,7 @@ fn recover_inflated_index(index: &mut tantivy::Index) -> Result<()> {
         crate::catalogue::NAME_NAMESPACE,
     );
     let cached_paths = cached_state.len() as u64;
-    let indexed_documents = index::document_count(&index.reader()?)?;
+    let indexed_documents = index::document_count(&index.reader()?);
     if !index::is_divergent_document_count(indexed_documents, cached_paths) {
         return Ok(());
     }

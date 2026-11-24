@@ -120,6 +120,11 @@ impl Client {
     }
 
     /// Run a query; the daemon filters, pages, and attaches metadata server-side.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn query(
         &self,
         q: &str,
@@ -131,6 +136,11 @@ impl Client {
     }
 
     /// Run a query and request origin summaries for the visible page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn query_with_origin(
         &self,
         q: &str,
@@ -164,6 +174,11 @@ impl Client {
     }
 
     /// Fetch full origin/provenance details for one path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn origin(&self, path: &str) -> Result<Option<OriginProvenance>, ClientError> {
         match self.roundtrip(RequestBody::Origin(OriginRequest {
             path: path.to_string(),
@@ -176,6 +191,10 @@ impl Client {
     }
 
     /// Register a successful file copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_copy(
         &self,
         src: &str,
@@ -190,6 +209,10 @@ impl Client {
     }
 
     /// Register a successful move or rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_move(
         &self,
         src: &str,
@@ -204,6 +227,10 @@ impl Client {
     }
 
     /// Register a file created by an application.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_created(&self, path: &str, app_id: Option<&str>) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::RegisterCreated(RegisterCreatedRequest {
             path: path.to_string(),
@@ -212,6 +239,10 @@ impl Client {
     }
 
     /// Register a file derived from another file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_derived(
         &self,
         src: &str,
@@ -226,6 +257,11 @@ impl Client {
     }
 
     /// Cataloged count + paused flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn status(&self) -> Result<Status, ClientError> {
         match self.roundtrip(RequestBody::Status)? {
             Reply::Status {
@@ -346,11 +382,19 @@ impl Client {
     }
 
     /// Pause indexing (queries keep working against the current index).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn pause(&self) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::Pause)
     }
 
     /// Resume indexing and reconcile changes missed while paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn resume(&self) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::Resume)
     }
@@ -534,7 +578,7 @@ mod tests {
         client.forget_versions("/b").unwrap();
 
         server_thread.join().unwrap().unwrap();
-        std::fs::remove_file(socket_path).ok();
+        let _ = std::fs::remove_file(socket_path);
     }
 
     #[test]
@@ -577,7 +621,7 @@ mod tests {
         // tells a resend.
         let outcome = outcome.recv_timeout(IO_TIMEOUT / 2);
         done.store(true, Ordering::Relaxed);
-        std::fs::remove_file(&socket_path).ok();
+        let _ = std::fs::remove_file(&socket_path);
         assert!(
             matches!(outcome, Ok(Err(ClientError::Io(_)))),
             "{outcome:?}"

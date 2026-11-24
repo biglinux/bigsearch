@@ -457,7 +457,7 @@ mod tests {
         let path = dir.join("pic.png");
         std::fs::write(&path, minimal_png(320, 240)).unwrap();
         assert_eq!(image_text(&path), vec!["320x240".to_string()]);
-        std::fs::remove_file(&path).ok();
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -467,7 +467,7 @@ mod tests {
         std::fs::write(&path, "#!/bin/sh\necho segredo\n").unwrap();
         let with = metadata_text(&path, true).unwrap_or_default();
         let without = metadata_text(&path, false).unwrap_or_default();
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(with.contains("segredo"), "{with:?}");
         assert_eq!(without, "document");
     }

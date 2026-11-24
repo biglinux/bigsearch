@@ -397,6 +397,6 @@ mod tests {
         let mut sizes: Vec<u32> = metas.iter().map(|meta| meta.max_doc()).collect();
         sizes.sort_unstable();
         assert_eq!(sizes, vec![2, 24]);
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

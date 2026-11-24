@@ -31,8 +31,8 @@ fn main() -> ExitCode {
     // SAFETY: called once, before any thread exists that could read the locale.
     unsafe { gettextrs::setlocale(gettextrs::LocaleCategory::LcAll, "") };
     // Without a catalog every message stays in English, the source language.
-    gettextrs::bindtextdomain("big-docinfo", LOCALE_DIR).ok();
-    gettextrs::textdomain("big-docinfo").ok();
+    let _ = gettextrs::bindtextdomain("big-docinfo", LOCALE_DIR);
+    let _ = gettextrs::textdomain("big-docinfo");
     // Messages are written for the person reading the dialog: one sentence with
     // the cause and what to do, no paths or error chains.
     match run() {

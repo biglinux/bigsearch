@@ -26,7 +26,7 @@ fn pending_batch_reports_more_work() {
     assert_eq!(batch.files, vec![second]);
     assert!(!batch.has_more);
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A tag write changes an extended attribute and nothing else, so only
@@ -57,7 +57,7 @@ fn forgotten_row_is_read_again() {
         "forgetting the row is what makes the same bytes worth reading again"
     );
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn pending_batch_stops_at_byte_budget() {
     assert_eq!(batch.files, vec![first]);
     assert!(batch.has_more);
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn pending_batch_prioritizes_low_cost_files() {
     assert_eq!(batch.files, vec![small_note]);
     assert!(batch.has_more);
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn catalog_batch_defers_recent_edits() {
     assert_eq!(warm.files.len(), 2);
     assert_eq!(warm.deferred, 0);
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A deleted file must stop answering content searches.
@@ -203,7 +203,7 @@ fn deleted_files_stop_answering_content_searches() {
     // Idempotent: nothing left to prune on a second run.
     assert_eq!(prune_orphaned_content(&index, 100).unwrap(), (0, false));
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The sweep must not become a one-shot: clearing content state is exactly
@@ -228,7 +228,7 @@ fn clearing_state_rearms_unreferenced_sweep() {
         "limpar o estado de conteudo tem de re-armar a varredura"
     );
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn skipped_entries_become_tombstones() {
     assert!(next.non_candidates.is_empty());
     assert!(!next.has_more);
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -312,12 +312,12 @@ fn symlinks_skip_content_extraction() {
 
     // Through the pipeline: a link must not duplicate its target's body.
     let index = crate::index::open_content_or_create(&base.join("idx")).unwrap();
-    index_content_limited(&index, vec![target.clone(), link.clone()], None).unwrap();
+    index_content_limited(&index, vec![target.clone(), link], None).unwrap();
     let hits = crate::query::search_content(&index.reader().unwrap(), "target", 10).unwrap();
     assert_eq!(hits.len(), 1, "only the real file is extracted");
     assert_eq!(hits[0].path, target.to_string_lossy());
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -419,7 +419,7 @@ fn catalog_byte_budget_is_exclusive() {
     assert_eq!(one.files, vec![a.clone()]);
     assert!(one.has_more);
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -446,7 +446,7 @@ fn pending_byte_budget_is_exclusive() {
     assert_eq!(all.files, vec![first, second, third]);
     assert!(!all.has_more);
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -509,7 +509,7 @@ fn catalog_pass_indexes_every_batch() {
         2
     );
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -525,7 +525,7 @@ fn body_upsert_keeps_one_document() {
         writer.commit().unwrap();
     }
     let reader = content_index.reader().unwrap();
-    assert_eq!(crate::query::count(&reader).unwrap(), 1);
+    assert_eq!(crate::query::count(&reader), 1);
     assert_eq!(
         crate::query::search_content(&reader, "new", 10)
             .unwrap()
@@ -538,5 +538,5 @@ fn body_upsert_keeps_one_document() {
             .is_empty()
     );
 
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }

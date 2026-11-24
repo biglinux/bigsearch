@@ -381,7 +381,7 @@ mod tests {
             ContentClaim::Duplicate
         );
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -429,7 +429,7 @@ mod tests {
             signatures.claim_identity(&first, identity(), |_| identity()),
             ContentClaim::Duplicate
         );
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
             ContentClaim::Unique
         );
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -459,7 +459,7 @@ mod tests {
             .unwrap()
             .join("target")
             .join(format!("lsearch-content-reflink-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let first = base.join("first.bin");
         let second = base.join("second.bin");
@@ -482,7 +482,7 @@ mod tests {
         std::fs::File::open(&first).unwrap().sync_all().unwrap();
 
         if crate::history::clone_file(&first, &second).is_err() {
-            std::fs::remove_dir_all(&base).ok();
+            let _ = std::fs::remove_dir_all(&base);
             eprintln!("skipped: this filesystem cannot clone files");
             return;
         }
@@ -490,7 +490,7 @@ mod tests {
         let size = std::fs::metadata(&first).unwrap().len();
         let first_identity = physical_content_identity(&first, size);
         let second_identity = physical_content_identity(&second, size);
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
         // Extents with unsafe FIEMAP flags (encrypted, inline) have no identity
         // by design; then neither clone may have one.
         if first_identity.is_none() {

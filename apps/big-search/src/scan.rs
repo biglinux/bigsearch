@@ -37,7 +37,7 @@ fn walker(root: &Path) -> ignore::Walk {
 }
 
 /// Index one entry by name only (no content extraction): the fast scan path.
-pub fn add_name_only(
+pub(crate) fn add_name_only(
     writer: &IndexWriter,
     f: &Fields,
     path: &Path,
@@ -112,7 +112,7 @@ pub fn delete_tree(writer: &IndexWriter, f: &Fields, path: &Path) {
 /// Replace the document for `path` by name only. Content/metadata extraction is
 /// deferred to the throttled background backfill; doing it here
 /// would make inotify bursts read large files synchronously.
-pub fn upsert_path(
+pub(crate) fn upsert_path(
     writer: &IndexWriter,
     f: &Fields,
     path: &Path,
@@ -181,7 +181,7 @@ pub struct SyncOutcome {
 ///
 /// `on_dir` gets each visible subdirectory as the walk reaches it, before its
 /// entries are read, so a watch placed there misses nothing created later.
-pub fn reconcile_subtree_inline(
+pub(crate) fn reconcile_subtree_inline(
     writer: &IndexWriter,
     f: &Fields,
     state: &mut State,
@@ -248,6 +248,11 @@ pub fn visible_dirs(root: &Path) -> Vec<PathBuf> {
 /// Returns content/metadata candidate count plus visible directories found during
 /// the same walk; the content pass reads the catalogue from SQLite in bounded
 /// batches instead of receiving a huge Vec.
+///
+/// # Errors
+///
+/// Returns an error when the catalogue cannot be read or written, or the index cannot be
+/// committed.
 pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncOutcome> {
     let f = crate::index::fields(index)?;
     let mut writer = crate::index::bulk_writer(index)?;
@@ -267,7 +272,7 @@ pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncO
 /// to recover from an inotify queue overflow (`need_rescan`) and by lifecycle
 /// rebuild/resume. `on_dir` gets every directory walked: after an overflow or
 /// a pause, folders created meanwhile have no watch yet.
-pub fn reconcile_inline(
+pub(crate) fn reconcile_inline(
     writer: &mut IndexWriter,
     f: &Fields,
     state: &mut State,
@@ -503,7 +508,7 @@ mod tests {
         writer.commit().unwrap();
         assert_eq!(name_hits(&index, "nested"), 0);
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -531,10 +536,7 @@ mod tests {
         writer.commit().unwrap();
         drop(writer);
         state.persist().unwrap();
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            2
-        );
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 2);
 
         let mut writer = index.writer(15_000_000).unwrap();
         let outcome = reconcile_subtree_inline(
@@ -549,12 +551,9 @@ mod tests {
         assert!(!outcome.any());
         writer.commit().unwrap();
         drop(writer);
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            2
-        );
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 2);
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -582,7 +581,7 @@ mod tests {
         let report = repo_ignored(&repo.join("cache/report.txt"), false);
         let secret = repo_ignored(&worktree.join("notes.secret"), false);
         let plain = repo_ignored(&worktree.join("notes.txt"), false);
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
         assert!(report, "a file in an ignored folder came back");
         assert!(secret, "the worktree skipped the shared exclude file");
         assert!(!plain);
@@ -627,11 +626,8 @@ mod tests {
         .unwrap();
         assert!(dirs.is_empty() && !outcome.any());
         writer.commit().unwrap();
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            0
-        );
-        std::fs::remove_dir_all(&base).ok();
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 0);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -675,7 +671,7 @@ mod tests {
         );
         assert!(second.state_changed, "content work must still be scheduled");
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -741,7 +737,7 @@ mod tests {
         .unwrap();
         assert!(in_scope.index_changed);
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -766,7 +762,7 @@ mod tests {
         seed_user_ignore();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "github/\n");
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -803,6 +799,6 @@ mod tests {
             "build directories should be pruned: {paths:?}"
         );
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

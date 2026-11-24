@@ -217,6 +217,6 @@ mod tests {
             &downloads
         ));
         assert!(!should_probe_xdg_origin_in_downloads(&nested, &downloads));
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

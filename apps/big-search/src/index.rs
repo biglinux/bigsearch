@@ -362,6 +362,11 @@ pub struct ContentFields {
     pub body: Field,
 }
 
+/// The name index's field handles, looked up by name in `index`'s schema.
+///
+/// # Errors
+///
+/// Returns an error when the schema lacks a field this build expects.
 pub fn fields(index: &Index) -> Result<Fields> {
     let schema = index.schema();
     Ok(Fields {
@@ -376,7 +381,7 @@ pub fn fields(index: &Index) -> Result<Fields> {
     })
 }
 
-pub fn content_fields(index: &Index) -> Result<ContentFields> {
+pub(crate) fn content_fields(index: &Index) -> Result<ContentFields> {
     let schema = index.schema();
     Ok(ContentFields {
         path: schema.get_field("path").context("field path")?,
@@ -392,6 +397,10 @@ pub fn content_fields(index: &Index) -> Result<ContentFields> {
 /// wipe the catalogue, and a query racing a daemon that holds the writer lock
 /// but has not yet bound its socket would do it underneath the daemon. A read
 /// command must fail instead.
+///
+/// # Errors
+///
+/// Returns an error when the index is missing, unreadable or of another schema.
 pub fn open_read_only(dir: &Path) -> Result<Index> {
     open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open)
 }
@@ -399,6 +408,10 @@ pub fn open_read_only(dir: &Path) -> Result<Index> {
 /// [`open_read_only`] for searching: mapped for small random reads (see
 /// `NoFsyncDirectory::open_for_queries`). Commands that walk every document
 /// (`count`, `list`) keep [`open_read_only`] and the kernel's read-ahead.
+///
+/// # Errors
+///
+/// Returns an error when the index is missing, unreadable or of another schema.
 pub fn open_for_queries(dir: &Path) -> Result<Index> {
     open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open_for_queries)
 }
@@ -406,6 +419,10 @@ pub fn open_for_queries(dir: &Path) -> Result<Index> {
 /// A reader for answering queries on an index from [`open_for_queries`]: its
 /// cache of decompressed store blocks holds 8 per segment instead of tantivy's
 /// 100. A query reads only the documents of its page, a few blocks.
+///
+/// # Errors
+///
+/// Returns an error when the index cannot be read.
 pub fn query_reader(index: &Index) -> Result<tantivy::IndexReader> {
     Ok(index
         .reader_builder()
@@ -438,6 +455,11 @@ fn open_read_only_with(
 }
 
 /// Open the on-disk index, creating it on first use. Tokenizer is always registered.
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be created or the index cannot be opened or
+/// recreated.
 pub fn open_or_create(dir: &Path) -> Result<Index> {
     let index = open_or_create_with_schema(dir, build_name_schema)?;
     register_name_tokenizer(&index);
@@ -445,6 +467,11 @@ pub fn open_or_create(dir: &Path) -> Result<Index> {
 }
 
 /// Open the on-disk content index, creating it on first use.
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be created or the index cannot be opened or
+/// recreated.
 pub fn open_content_or_create(dir: &Path) -> Result<Index> {
     let index = open_or_create_with_schema(dir, build_content_schema)?;
     register_body_tokenizer(&index);
@@ -517,12 +544,22 @@ fn is_non_empty_dir(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Deletes the name index in `dir` and creates an empty one.
+///
+/// # Errors
+///
+/// Returns an error when the old index cannot be removed or the new one created.
 pub fn recreate_on_disk(dir: &Path) -> Result<Index> {
     let index = recreate(dir, build_name_schema)?;
     register_name_tokenizer(&index);
     Ok(index)
 }
 
+/// Deletes the content index in `dir` and creates an empty one.
+///
+/// # Errors
+///
+/// Returns an error when the old index cannot be removed or the new one created.
 pub fn recreate_content_on_disk(dir: &Path) -> Result<Index> {
     let index = recreate(dir, build_content_schema)?;
     register_body_tokenizer(&index);
@@ -533,6 +570,11 @@ pub fn is_content_state_synced(dir: &Path) -> bool {
     content_state_sync_marker(dir).exists()
 }
 
+/// Records that the content state matches the content index in `dir`.
+///
+/// # Errors
+///
+/// Returns an error when the marker file cannot be written.
 pub fn mark_content_state_synced(dir: &Path) -> Result<()> {
     let marker = content_state_sync_marker(dir);
     if marker.exists() {
@@ -558,7 +600,7 @@ pub fn is_unreferenced_pruned(dir: &Path) -> bool {
     unreferenced_prune_marker(dir).exists()
 }
 
-pub fn mark_unreferenced_pruned(dir: &Path) -> Result<()> {
+pub(crate) fn mark_unreferenced_pruned(dir: &Path) -> Result<()> {
     let marker = unreferenced_prune_marker(dir);
     if marker.exists() {
         return Ok(());
@@ -581,15 +623,15 @@ fn recreate(dir: &Path, build_schema: fn() -> Schema) -> Result<Index> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
-            std::fs::remove_dir_all(&path).ok();
+            let _ = std::fs::remove_dir_all(&path);
         } else {
-            std::fs::remove_file(&path).ok();
+            let _ = std::fs::remove_file(&path);
         }
     }
     create_in(dir, build_schema()).context("recreate index")
 }
 
-pub fn background_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
+pub(crate) fn background_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
     low_impact_writer(
         index,
         writer_memory_budget_mb(
@@ -599,6 +641,12 @@ pub fn background_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> 
     )
 }
 
+/// A writer with the memory budget of a full walk.
+///
+/// # Errors
+///
+/// Returns an error when the writer cannot be created, as when another process holds the
+/// index lock.
 pub fn bulk_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
     low_impact_writer(
         index,
@@ -606,6 +654,12 @@ pub fn bulk_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
     )
 }
 
+/// A writer for the content index, with the background budget.
+///
+/// # Errors
+///
+/// Returns an error when the writer cannot be created, as when another process holds the
+/// index lock.
 pub fn content_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
     low_impact_writer(
         index,
@@ -670,14 +724,14 @@ pub fn worth_compacting(segments: &[(u32, u32)]) -> bool {
     changed > 0 && changed * 10 >= total
 }
 
-pub fn document_count(reader: &tantivy::IndexReader) -> Result<u64> {
-    Ok(reader.searcher().num_docs())
+pub fn document_count(reader: &tantivy::IndexReader) -> u64 {
+    reader.searcher().num_docs()
 }
 
 /// Visit the `path` of every live document. Resolves the field by name rather
 /// than through [`fields`] so it serves the content index too: that schema has
 /// no `name`/`source`, and the orphan sweep has to walk it.
-pub fn for_each_indexed_path(
+pub(crate) fn for_each_indexed_path(
     index: &Index,
     mut visit: impl FnMut(&Path) -> Result<()>,
 ) -> Result<()> {
@@ -702,6 +756,12 @@ pub fn max_repairable_name_deficit(cached_paths: u64) -> u64 {
         .max(MIN_REPAIRABLE_NAME_DEFICIT)
 }
 
+/// Adds back the name documents of catalogued paths the index lost, and
+/// returns how many.
+///
+/// # Errors
+///
+/// Returns an error when the index or the catalogue cannot be read or written.
 pub fn repair_deflated_against_state(index: &Index, state: &mut State) -> Result<u64> {
     let f = fields(index)?;
     state.begin_scan()?;
@@ -888,8 +948,8 @@ mod tests {
 
         let index = open_or_create(&dir).unwrap();
 
-        assert_eq!(document_count(&index.reader().unwrap()).unwrap(), 0);
-        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(document_count(&index.reader().unwrap()), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -915,10 +975,7 @@ mod tests {
             repair_deflated_against_state(&index, &mut state).unwrap(),
             2
         );
-        assert_eq!(
-            document_count(&index.reader().unwrap()).unwrap(),
-            state.len() as u64
-        );
+        assert_eq!(document_count(&index.reader().unwrap()), state.len() as u64);
         assert_eq!(
             crate::query::search(
                 &index.reader().unwrap(),
@@ -931,6 +988,6 @@ mod tests {
             "/catalog/keep-alpha.txt"
         );
 
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

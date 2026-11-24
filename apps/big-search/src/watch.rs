@@ -137,6 +137,11 @@ struct ContentIndexWrite<'a> {
 /// closes. `paused` mirrors the runtime state for the IPC `status` reply. `tx`/`rx`
 /// are the shared `WatchMessage` channel: `tx` is cloned into the inotify callback, and the
 /// IPC thread holds another clone to deliver control commands. Blocking.
+///
+/// # Errors
+///
+/// Returns an error when the index writers or the file watcher cannot be started, or a
+/// batch cannot be committed; the caller ends the daemon.
 pub fn run(
     index: Index,
     content_index: Index,
@@ -269,10 +274,12 @@ fn spawn_history_worker(
 ) -> Sender<crate::history::HistoryEvent> {
     let (history_tx, history_rx) = std::sync::mpsc::channel::<crate::history::HistoryEvent>();
     let history_store = std::sync::Arc::clone(history);
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("history".into())
-        .spawn(move || crate::history::run_worker(&history_store, history_rx))
-        .ok();
+        .spawn(move || crate::history::run_worker(&history_store, history_rx));
+    if let Err(e) = spawned {
+        log::error!("no versions are kept: the history thread did not start: {e}");
+    }
     history_tx
 }
 

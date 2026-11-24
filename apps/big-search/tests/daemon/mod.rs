@@ -232,7 +232,7 @@ impl Sandbox {
             "the run never recorded its folders"
         );
         drop(daemon);
-        std::fs::remove_file(&self.sock).ok();
+        let _ = std::fs::remove_file(&self.sock);
     }
 
     pub fn state_db(&self) -> rusqlite::Result<rusqlite::Connection> {

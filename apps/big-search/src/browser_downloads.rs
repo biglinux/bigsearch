@@ -257,6 +257,6 @@ mod tests {
             still_on_disk(rows),
             [(PathBuf::from(fresh), "new.example".to_string(), now - 5)]
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

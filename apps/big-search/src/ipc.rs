@@ -66,6 +66,10 @@ fn err(message: impl Into<String>) -> Reply {
 /// Serve requests on `sock` until killed. Holds the index open; clients may send
 /// multiple newline-delimited requests per connection. Only same-UID peers are
 /// admitted (defense in depth over 0600).
+///
+/// # Errors
+///
+/// Returns an error when the socket cannot be prepared or bound.
 pub fn serve(
     index: IndexReader,
     content_index: IndexReader,
@@ -155,9 +159,8 @@ fn bind_private_socket(sock: &Path) -> Result<UnixListener> {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("restrict {}", dir.display()))?;
     }
-    if sock.exists() {
-        std::fs::remove_file(sock).ok();
-    }
+    // A socket left by a stopped daemon; the bind below reports what stays.
+    let _ = std::fs::remove_file(sock);
     let listener = UnixListener::bind(sock).with_context(|| format!("bind {}", sock.display()))?;
     std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))
         .context("socket perms 0600")?;
@@ -486,13 +489,13 @@ fn status_reply(index: &IndexReader, content_index: &IndexReader, control: &Cont
     let paused = control.paused.load(Ordering::Relaxed);
     Reply::Status {
         v: PROTOCOL_VERSION,
-        indexed: index::document_count(index).unwrap_or(0),
+        indexed: index::document_count(index),
         paused,
         activity: crate::watch::activity_label(paused, control.activity.load(Ordering::Relaxed))
             .to_string(),
         capabilities: daemon_capabilities(),
         pending_content: control.pending_content.load(Ordering::Relaxed),
-        content_docs: index::document_count(content_index).unwrap_or(0),
+        content_docs: index::document_count(content_index),
         name_index_bytes: flat_directory_file_bytes(&config::index_dir()),
         content_index_bytes: flat_directory_file_bytes(&config::content_index_dir()),
         unwatched_dirs: control.unwatched_dirs.load(Ordering::Relaxed),

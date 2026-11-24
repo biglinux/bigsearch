@@ -35,7 +35,7 @@ pub struct State {
     dirty: bool,
 }
 
-/// A difference a reconciliation pass found (see [`State::scan_changes_after`]).
+/// A difference a reconciliation pass found (see `State::scan_changes_after`).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ScanChange {
     /// On disk with this `(mtime, size)`, which the catalogue records otherwise
@@ -82,6 +82,11 @@ impl State {
 
     /// Start empty (used for a forced full rebuild): the first persist replaces
     /// every row of `namespace`.
+    ///
+    /// # Panics
+    ///
+    /// When neither the database at `db_path` nor an in-memory SQLite database
+    /// can be opened.
     pub fn empty(db_path: &Path, namespace: &str) -> Self {
         let conn = open_state_db(db_path).unwrap_or_else(|_| {
             let conn = Connection::open_in_memory().expect("in-memory sqlite state opens");
@@ -153,7 +158,7 @@ impl State {
     }
 
     /// The persisted paths directly inside `dir`.
-    pub fn children(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+    pub(crate) fn children(&self, dir: &Path) -> Result<Vec<PathBuf>> {
         let (low, high) = subtree_range(&key(dir));
         // substr() and length() both count characters, so they agree with
         // each other whatever the path holds.
@@ -199,7 +204,7 @@ impl State {
     /// would otherwise take and release the database's locks on its own, two
     /// `fcntl` and an `fstat` apiece. Batches persisted meanwhile commit with
     /// the pass, and a failed pass rolls all of them back.
-    pub fn scan_pass<T>(&mut self, pass: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    pub(crate) fn scan_pass<T>(&mut self, pass: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.conn
             .execute_batch("BEGIN")
             .context("begin scan transaction")?;
@@ -222,7 +227,7 @@ impl State {
 
     /// Start a low-RAM reconciliation pass. Seen paths are recorded in a SQLite
     /// temporary B-tree instead of a process-wide `HashSet<String>`.
-    pub fn begin_scan(&mut self) -> Result<()> {
+    pub(crate) fn begin_scan(&mut self) -> Result<()> {
         self.conn
             .execute_batch(
                 "
@@ -240,7 +245,7 @@ impl State {
     /// Mark `path` as observed in the current reconciliation pass, with the
     /// `(mtime, size)` found on disk when the pass compares them (see
     /// [`Self::scan_changes_after`]).
-    pub fn mark_seen(&mut self, path: &Path, found: Option<(i64, u64)>) -> Result<()> {
+    pub(crate) fn mark_seen(&mut self, path: &Path, found: Option<(i64, u64)>) -> Result<()> {
         let (mtime, size) = found.map_or((None, None), |(mtime, size)| {
             (Some(mtime), Some(u64_to_db_size(size)))
         });
@@ -262,7 +267,7 @@ impl State {
     /// where a lookup per path would cost three B-tree descents with the
     /// seen-mark and the deletion check. The catalogue must be persisted when
     /// the pass starts; rows written meanwhile all sort at or before `after`.
-    pub fn scan_changes_after(
+    pub(crate) fn scan_changes_after(
         &self,
         after: &str,
         limit: usize,
@@ -311,7 +316,7 @@ impl State {
     /// Mark every cached path under the retained prefixes as seen. Used for
     /// offline removable/network sources whose catalogues must not be deleted just
     /// because the mount is absent during this scan.
-    pub fn mark_seen_prefixes(&mut self, prefixes: &[PathBuf]) -> Result<()> {
+    pub(crate) fn mark_seen_prefixes(&mut self, prefixes: &[PathBuf]) -> Result<()> {
         for prefix in prefixes {
             let prefix_text = key(prefix);
             let (low, high) = subtree_range(&prefix_text);
@@ -334,7 +339,11 @@ impl State {
 
     /// Batch of cached paths not seen in the current scan, lexicographically after
     /// `after`. Batching avoids allocating the whole deletion set.
-    pub fn unseen_paths_after(&self, after: Option<&str>, limit: usize) -> Result<Vec<PathBuf>> {
+    pub(crate) fn unseen_paths_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PathBuf>> {
         if limit == 0 || self.clear_before_persist {
             return Ok(Vec::new());
         }
@@ -364,7 +373,7 @@ impl State {
     ///
     /// Deleting a file drops only its catalogue row; this finds the content
     /// rows and documents that would keep answering for paths that are gone.
-    pub fn paths_missing_from(
+    pub(crate) fn paths_missing_from(
         &self,
         other_namespace: &str,
         after: Option<&str>,
@@ -418,7 +427,7 @@ impl State {
     /// `(mtime, size)` is absent or different in `other_namespace` of the same
     /// database. Streams the pending-work set in one indexed SQL join instead of
     /// re-walking the catalogue with a `stat` + a SELECT per file.
-    pub fn entries_stale_against(
+    pub(crate) fn entries_stale_against(
         &self,
         other_namespace: &str,
         after: Option<&str>,
@@ -468,6 +477,10 @@ impl State {
     /// Recorded `(path, mtime, size)` after `after`, sorted, pending changes
     /// included. Used by bounded catalogue passes instead of materializing the
     /// full catalogue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalogue database cannot be queried.
     pub fn entries_after(
         &self,
         after: Option<&str>,
@@ -566,7 +579,7 @@ impl State {
     }
 
     /// Store `value` under `key` in the `meta` table, or remove the key.
-    pub fn set_meta(&self, key: &str, value: Option<i64>) -> Result<()> {
+    pub(crate) fn set_meta(&self, key: &str, value: Option<i64>) -> Result<()> {
         match value {
             Some(value) => self.conn.execute(
                 "INSERT INTO meta(key, value) VALUES (?1, ?2)
@@ -589,6 +602,10 @@ impl State {
     }
 
     /// Persist changed rows in one SQLite transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction fails; the changes stay pending for the next call.
     pub fn persist(&mut self) -> Result<()> {
         if !self.dirty {
             return Ok(());

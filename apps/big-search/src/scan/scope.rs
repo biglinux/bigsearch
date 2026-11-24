@@ -110,10 +110,14 @@ pub fn seed_user_ignore() {
 /// Write the effective ignore file: built-in defaults followed by the user's
 /// overrides (so user lines win), and return what it wrote. Call once before
 /// walking.
+///
+/// # Errors
+///
+/// Returns an error when the file or its folder cannot be written.
 pub fn write_effective_ignore() -> Result<String> {
     let path = crate::config::effective_ignore();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut content = String::from(DEFAULT_IGNORE);
     if let Ok(user) = std::fs::read_to_string(crate::config::user_ignore()) {

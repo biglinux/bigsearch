@@ -219,7 +219,7 @@ impl History {
     ///
     /// A store turned off still holds what it kept before, so it is erased from
     /// disk: the database files and the whole objects directory.
-    pub fn forget_everything(&mut self) -> Result<()> {
+    pub(crate) fn forget_everything(&mut self) -> Result<()> {
         let Some(conn) = &self.conn else {
             match std::fs::remove_dir_all(&self.objects) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => {
@@ -254,6 +254,10 @@ impl History {
     }
 
     /// Forget the versions of one document, also from a store turned off.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database or the stored copies cannot be changed.
     pub fn forget(&mut self, path: &Path) -> Result<()> {
         let opened;
         let conn = match &self.conn {
@@ -290,6 +294,10 @@ impl History {
     /// that is renamed and then saved: the save replaces the inode, so by the
     /// time anything looks, neither the source name nor its identity is there
     /// to match on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database cannot be written.
     pub fn note_rename(&self, from: &Path, to: &Path) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
@@ -309,6 +317,10 @@ impl History {
     ///
     /// The state the document is in right now is left out: the newest version
     /// is normally a clone of it, and "go back" to it would do nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database cannot be read.
     pub fn versions(&self, path: &Path) -> Result<Vec<Version>> {
         let Some(conn) = &self.conn else {
             return Ok(Vec::new());
@@ -355,6 +367,11 @@ impl History {
     ///
     /// Before a restore, a state that exists but could not be kept is an error:
     /// the caller is about to overwrite it, and `Ok` would let it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database or store cannot be written, and before a
+    /// restore when the current state exists but cannot be kept.
     pub fn save_version(&mut self, path: &Path, reason: Reason) -> Result<bool> {
         let Some(version) = self.prepare_version(path, reason)? else {
             return Ok(false);

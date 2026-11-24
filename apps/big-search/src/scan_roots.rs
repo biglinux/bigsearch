@@ -293,7 +293,7 @@ mod tests {
         );
         assert_eq!(on.len(), 2, "exactly home + ext: {on:?}");
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
             "windows root rejected: {roots:?}"
         );
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -368,7 +368,7 @@ mod tests {
         );
         assert!(!roots.contains(&old_root), "linux root rejected: {roots:?}");
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -401,7 +401,7 @@ mod tests {
             "network link rejected: {roots:?}"
         );
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
             "plain local data accepted: {roots:?}"
         );
 
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

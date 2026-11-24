@@ -216,7 +216,7 @@ impl History {
     /// questions: a lookup per version costs seconds of a cold disk at every
     /// start. A shard that cannot be listed stops the sweep, since its versions
     /// would otherwise read as gone.
-    pub fn sweep_orphans(&mut self) -> Result<()> {
+    pub(crate) fn sweep_orphans(&mut self) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };

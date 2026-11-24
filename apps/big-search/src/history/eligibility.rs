@@ -144,7 +144,7 @@ mod tests {
         assert!(!ignored("docs/notes.txt"));
         assert!(!ignored("docs/drafts/a.md"));
 
-        std::fs::remove_dir_all(&root).ok();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Only documents, and never the files somebody keeps their passwords in.

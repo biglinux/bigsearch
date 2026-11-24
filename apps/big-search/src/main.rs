@@ -298,7 +298,7 @@ fn cmd_count(tokens: &[String]) -> Result<()> {
     let s = parse_query(tokens);
     let index = index::open_read_only(&config::index_dir())?;
     let n = match s.under.as_deref() {
-        None => query::count(&index.reader()?)?,
+        None => query::count(&index.reader()?),
         Some(dir) => query::list_paths(&index.reader()?, usize::MAX, Some(dir))?.len() as u64,
     };
     println!("{n}");

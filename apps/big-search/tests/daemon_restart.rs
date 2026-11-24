@@ -49,7 +49,7 @@ fn restart_watches_without_walking() {
         settles(|| sandbox.catalogued_size(&first) == Some(8)),
         "rescan did not read the file rewritten while stopped"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A folder created while the daemon was stopped is watched after a restart.
@@ -67,7 +67,7 @@ fn folder_made_while_stopped_is_watched() {
         settles(|| sandbox.name_hits("inside") == 1),
         "the folder made while stopped is not watched"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A file added while the daemon was stopped is found at the restart even
@@ -88,7 +88,7 @@ fn folder_time_set_back_caught_up() {
     let _daemon = sandbox.start();
     sandbox.await_docs_watched();
     assert_eq!(sandbox.name_hits("restored"), 1);
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A saved folder replaced by a symlink is not watched through it, nor are the
@@ -120,7 +120,7 @@ fn symlinked_folder_left_alone() {
         query_paths(&sandbox.sock, "name", "stale", &sandbox.docs.join("linked")).0,
         0
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A folder this user cannot read does not keep the next start walking, and
@@ -141,14 +141,14 @@ fn unreadable_folder_keeps_the_record() {
     let daemon = sandbox.start();
     let recorded = settles(|| sandbox.run_recorded());
     drop(daemon);
-    std::fs::remove_file(&sandbox.sock).ok();
+    let _ = std::fs::remove_file(&sandbox.sock);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(recorded, "the run did not record its folders");
 
     let _daemon = sandbox.start();
     sandbox.await_docs_watched();
     assert_eq!(sandbox.catalogued_size(&inside), Some(5));
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A content index left empty at start, as a new analyzer leaves it, is filled
@@ -184,7 +184,7 @@ fn emptied_content_index_refilled() {
         found("note.md"),
         "the emptied content index was not filled again"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A folder renamed over a listed one with the same time and size (two empty
@@ -226,7 +226,7 @@ fn renamed_over_folder_relisted() {
         settles(|| sandbox.name_hits("plan") == 1),
         "the folder renamed into place is not watched"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A saved folder that cannot be read keeps its entries, at the next start and
@@ -248,7 +248,7 @@ fn unreadable_saved_folder_keeps_entries() {
     let daemon = sandbox.start();
     let recorded = settles(|| sandbox.run_recorded());
     drop(daemon);
-    std::fs::remove_file(&sandbox.sock).ok();
+    let _ = std::fs::remove_file(&sandbox.sock);
     assert!(recorded, "the run did not record its folders");
 
     std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -263,7 +263,7 @@ fn unreadable_saved_folder_keeps_entries() {
     let kept = sandbox.catalogued_size(&inside);
     let recorded_after_rescan = settles(|| sandbox.run_recorded());
     drop(daemon);
-    std::fs::remove_file(&sandbox.sock).ok();
+    let _ = std::fs::remove_file(&sandbox.sock);
     drop(readable_again);
     assert!(
         !recorded_while_unread,
@@ -284,7 +284,7 @@ fn unreadable_saved_folder_keeps_entries() {
         settles(|| sandbox.name_hits("arrived") == 1),
         "a folder below the unreadable one lost its watch"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// Gives a folder its mode back however the test ends, so it can be removed.
@@ -322,7 +322,7 @@ fn folder_made_readable_is_indexed() {
         settles(|| sandbox.name_hits("later") == 1),
         "the folder made readable is not watched"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A removable source is walked at every start: it may have changed on
@@ -355,7 +355,7 @@ fn removable_source_walks_at_start() {
         settles(|| sandbox.catalogued_size(&first) == Some(8)),
         "the removable source was not walked at start"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A source removed from the settings leaves the index and the saved folder
@@ -392,7 +392,7 @@ fn removed_source_leaves_on_restart() {
         settles(|| catalogue_rows(&sandbox.data, "watch", &dropped) == 0),
         "the removed source is still in the saved folder list"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// The catch-up compares the direct entries of a changed folder; a watched
@@ -420,7 +420,7 @@ fn catch_up_skips_watched_subtrees() {
     sandbox.await_docs_watched();
     assert_eq!(sandbox.name_hits("added"), 1);
     assert_eq!(sandbox.catalogued_size(&inner), Some(5));
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A rebuild while paused records no run: events are dropped while paused, so
@@ -447,14 +447,14 @@ fn rebuild_while_paused_records_nothing() {
     sleep(Duration::from_millis(300));
     std::fs::write(&first, "alphabet").unwrap();
     drop(daemon);
-    std::fs::remove_file(&sandbox.sock).ok();
+    let _ = std::fs::remove_file(&sandbox.sock);
 
     let _daemon = sandbox.start();
     assert!(
         settles(|| sandbox.catalogued_size(&first) == Some(8)),
         "the start after a paused rebuild did not walk"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A folder another one took the place of while the daemon was stopped leaves
@@ -488,7 +488,7 @@ fn swapped_folder_leaves_no_ghosts() {
             .catalogued_size(&proj.join("sub/fresh.txt"))
             .is_some()
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A source inside a dot-folder keeps its files across a restart: only what
@@ -517,7 +517,7 @@ fn hidden_source_keeps_its_files() {
         "the file added while stopped was not found"
     );
     assert_eq!(sandbox.catalogued_size(&kept), Some(5));
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A change to the global git ignore file makes the next start walk, and the
@@ -546,7 +546,7 @@ fn global_git_ignore_change_walks() {
         None,
         "the newly ignored file is still catalogued"
     );
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A saved folder replaced by a file while the daemon was stopped leaves with
@@ -575,7 +575,7 @@ fn folder_turned_file_leaves_no_ghosts() {
         0
     );
     assert_eq!(sandbox.catalogued_size(&sub), Some(1));
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A source folder made anew while the daemon was stopped is walked: nothing
@@ -600,7 +600,7 @@ fn recreated_root_leaves_no_ghosts() {
     assert_eq!(sandbox.catalogued_size(&first), None);
     assert!(sandbox.catalogued_size(&fresh).is_some());
     assert_eq!(sandbox.catalogued_size(&sandbox.home), None);
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
 /// A folder listed but not catalogued, as a kill between the two saves leaves
@@ -627,5 +627,5 @@ fn listed_uncataloged_folder_is_walked() {
     let _daemon = sandbox.start();
     sandbox.await_docs_watched();
     assert_eq!(sandbox.catalogued_size(&inner), Some(5));
-    std::fs::remove_dir_all(&sandbox.base).ok();
+    let _ = std::fs::remove_dir_all(&sandbox.base);
 }

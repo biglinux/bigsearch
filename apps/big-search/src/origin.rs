@@ -202,6 +202,12 @@ pub struct OriginWriter {
 }
 
 impl OriginWriter {
+    /// The writer for the origin database at `path`; one that records nothing
+    /// when file origin is turned off.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the origin database cannot be opened or its schema created.
     pub fn open(path: PathBuf) -> Result<Self> {
         if !settings().enabled {
             return Ok(Self { conn: None });
@@ -215,6 +221,12 @@ impl OriginWriter {
         Self { conn: None }
     }
 
+    /// Records that the program `app_id` created `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a path is relative or outside the configured sources, or the
+    /// database cannot be written.
     pub fn register_created(&self, path: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
@@ -232,6 +244,12 @@ impl OriginWriter {
         upsert_record(conn, &record)
     }
 
+    /// Records that `dst` is a copy of `src`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a path is relative or outside the configured sources, or the
+    /// database cannot be written.
     pub fn register_copy(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
@@ -261,6 +279,12 @@ impl OriginWriter {
         upsert_record(conn, &record)
     }
 
+    /// Records that `src` was moved or renamed to `dst`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a path is relative or outside the configured sources, or the
+    /// database cannot be written.
     pub fn register_move(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
@@ -296,6 +320,12 @@ impl OriginWriter {
         upsert_record(conn, &record)
     }
 
+    /// Records that `dst` was made from `src`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a path is relative or outside the configured sources, or the
+    /// database cannot be written.
     pub fn register_derived(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
@@ -314,13 +344,13 @@ impl OriginWriter {
         upsert_record(conn, &record)
     }
 
-    pub fn register_web_download(&self, path: &Path, domain: &str) -> Result<()> {
+    pub(crate) fn register_web_download(&self, path: &Path, domain: &str) -> Result<()> {
         self.register_web_download_at(path, domain, now_secs())
     }
 
     /// The same, for a download whose date is known: from the list a browser
     /// keeps, where the file may have arrived months ago.
-    pub fn register_web_download_at(
+    pub(crate) fn register_web_download_at(
         &self,
         path: &Path,
         domain: &str,
@@ -350,7 +380,10 @@ impl OriginWriter {
     /// syncs, thousands of them before the first file is even indexed.
     ///
     /// Returns how many were recorded.
-    pub fn register_web_downloads_at(&self, downloads: &[(PathBuf, String, i64)]) -> Result<usize> {
+    pub(crate) fn register_web_downloads_at(
+        &self,
+        downloads: &[(PathBuf, String, i64)],
+    ) -> Result<usize> {
         let Some(conn) = &self.conn else {
             return Ok(0);
         };
@@ -450,7 +483,7 @@ impl OriginReader {
 /// connection and would keep writing into an unlinked inode. `VACUUM`
 /// afterwards because forgetting has to mean the rows are gone from the file,
 /// not merely unreferenced inside it.
-pub fn forget_all(path: &Path) -> Result<()> {
+pub(crate) fn forget_all(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -842,7 +875,7 @@ mod tests {
                 .origin(Path::new("/missing"))
                 .is_none()
         );
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     #[test]
@@ -860,7 +893,7 @@ mod tests {
             .query_row("SELECT count(*) FROM file_origin", [], |row| row.get(0))
             .unwrap();
         assert_eq!(left, 0);
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     #[test]
@@ -873,7 +906,7 @@ mod tests {
                 .is_none()
         );
         assert!(db.exists());
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     /// The browser's list names a path, not a file: it must not overwrite what
@@ -905,7 +938,7 @@ mod tests {
         upsert_record(&conn, &record(OriginKind::WebDownload, Some("c.example"))).unwrap();
         assert_eq!(stored().kind, OriginKind::AppCreated);
         assert_eq!(stored().source_domain, None);
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     /// The label is built from the fields when read; the database keeps no
@@ -935,6 +968,6 @@ mod tests {
         assert_eq!(stored, "");
         let read = select_record(&conn, "/d/copy.pdf").unwrap().unwrap();
         assert_eq!(read.label(), "Copied from the removable drive KINGSTON");
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }

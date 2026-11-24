@@ -76,7 +76,7 @@ fn wait_for_refusal(child: &mut Child) -> ExitStatus {
             break s;
         }
         if Instant::now() > deadline {
-            child.kill().ok();
+            let _ = child.kill();
             panic!("second daemon did not exit — it should refuse the singleton lock");
         }
         sleep(Duration::from_millis(50));
@@ -142,5 +142,5 @@ fn second_daemon_leaves_first_intact() {
     );
 
     drop(d1); // kills the first daemon
-    std::fs::remove_dir_all(&base).ok();
+    let _ = std::fs::remove_dir_all(&base);
 }

@@ -267,7 +267,7 @@ mod tests {
             "temp files left behind: {leftovers:?}"
         );
 
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A commit wakes the readers once, and reading `meta.json` (which is what a
@@ -311,7 +311,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(calls.load(Ordering::SeqCst), 2, "a read woke the watch");
 
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A reader opened before the commits sees them without being reopened:
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(reader.searcher().num_docs(), 1);
 
         drop(writer);
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The daemon's layout: the watcher writes through one instance, queries read
@@ -382,7 +382,7 @@ mod tests {
         );
 
         drop(writer);
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Commit repeatedly through the real index stack. Run under `strace` this is
@@ -402,10 +402,7 @@ mod tests {
         }
         drop(writer);
 
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            20
-        );
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 20);
         assert_eq!(
             crate::query::search(
                 &index.reader().unwrap(),
@@ -423,10 +420,10 @@ mod tests {
         drop(index);
         let reopened = crate::index::open_or_create(&dir).unwrap();
         assert_eq!(
-            crate::index::document_count(&reopened.reader().unwrap()).unwrap(),
+            crate::index::document_count(&reopened.reader().unwrap()),
             20
         );
 
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

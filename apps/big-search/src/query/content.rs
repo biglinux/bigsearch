@@ -11,7 +11,7 @@ use tantivy::tokenizer::TokenStream;
 use tantivy::{IndexReader, TantivyDocument, Term};
 
 /// Full-text content search over the `body` field (word match, ranked by BM25).
-pub fn search_content(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec<Hit>> {
+pub(crate) fn search_content(reader: &IndexReader, q: &str, limit: usize) -> Result<Vec<Hit>> {
     let searcher = reader.searcher();
     let index = searcher.index();
     if !crate::settings::content_index_enabled() {

@@ -388,11 +388,11 @@ fn queue_event(history: &SharedHistory, pending: &mut Pending, event: HistoryEve
     match event {
         HistoryEvent::Changed(path) => pending.note(path, QUIET_PERIOD),
         HistoryEvent::Renamed(from, to) => {
-            if let Err(error) = history
+            let noted = history
                 .lock()
                 .expect("versions store lock")
-                .note_rename(&from, &to)
-            {
+                .note_rename(&from, &to);
+            if let Err(error) = noted {
                 log::debug!("could not follow a rename: {error:#}");
             }
             pending.note(to, QUIET_PERIOD);
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert_eq!(rows[0], (1, None));
         assert!(rows[1].0 == 3 && rows[1].1.is_some(), "{rows:?}");
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
