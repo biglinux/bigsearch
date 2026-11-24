@@ -16,6 +16,12 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
         )?),
         None => None,
     };
+    // Resolved before anything is deleted: a mistyped root must not empty the
+    // index, and a relative one would store paths only this folder can read.
+    let explicit_roots = roots
+        .iter()
+        .map(|root| std::fs::canonicalize(root).with_context(|| format!("reindex {root}")))
+        .collect::<Result<Vec<PathBuf>>>()?;
     throttle::lower_priority();
     settings::seed_config_template();
     scan::seed_user_ignore();
@@ -28,10 +34,10 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
         catalogue::WATCH_NAMESPACE,
     ))?;
 
-    let (scan_roots, mut state, rebuild_content_from_state) = if roots.is_empty() {
+    let (scan_roots, mut state, rebuild_content_from_state) = if explicit_roots.is_empty() {
         reconcile_plan(&mut index, &mut content_index)?
     } else {
-        explicit_rebuild_plan(roots, &index, &mut content_index)?
+        explicit_rebuild_plan(explicit_roots, &index, &mut content_index)?
     };
 
     let t0 = Instant::now();
@@ -131,11 +137,10 @@ fn reconcile_plan(
 
 /// A reindex of explicit roots: a clean full rebuild of exactly those paths.
 fn explicit_rebuild_plan(
-    roots: &[String],
+    explicit: Vec<PathBuf>,
     index: &tantivy::Index,
     content_index: &mut tantivy::Index,
 ) -> Result<(Vec<PathBuf>, catalogue::State, bool)> {
-    let explicit: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
     log::info!("scan roots (explicit): {explicit:?}");
     let mut writer = index::bulk_writer(index)?;
     writer.delete_all_documents()?;

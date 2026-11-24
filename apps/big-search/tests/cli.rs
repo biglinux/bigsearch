@@ -18,16 +18,23 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-/// Run the built binary with an isolated HOME/XDG env so it never touches the real
-/// index. Returns trimmed stdout; panics on a non-zero exit.
-fn run(home: &Path, xdg_storage_home: &Path, args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_big-search"))
+/// The built binary with an isolated HOME/XDG env, so it never touches the real
+/// index.
+fn big_search(home: &Path, xdg_storage_home: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_big-search"));
+    command
         .args(args)
         .env("RUST_LOG", "off")
         .env("HOME", home)
         .env("XDG_DATA_HOME", xdg_storage_home)
         .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", xdg_storage_home.join("run"))
+        .env("XDG_RUNTIME_DIR", xdg_storage_home.join("run"));
+    command
+}
+
+/// Run [`big_search`]. Returns trimmed stdout; panics on a non-zero exit.
+fn run(home: &Path, xdg_storage_home: &Path, args: &[&str]) -> String {
+    let output = big_search(home, xdg_storage_home, args)
         .output()
         .expect("spawn big-search");
     assert!(
@@ -181,13 +188,7 @@ fn exit_status_tells_error_from_empty() {
         &["reindex", home.to_str().unwrap()],
     );
     let status = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_big-search"))
-            .args(args)
-            .env("RUST_LOG", "off")
-            .env("HOME", &home)
-            .env("XDG_DATA_HOME", &xdg_storage_home)
-            .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-            .env("XDG_RUNTIME_DIR", xdg_storage_home.join("run"))
+        big_search(&home, &xdg_storage_home, args)
             .output()
             .unwrap()
             .status
@@ -195,5 +196,35 @@ fn exit_status_tells_error_from_empty() {
     };
     assert_eq!(status(&["nothing-matches-this"]), Some(0));
     assert_eq!(status(&["config", "set", "no-such-key", "1"]), Some(1));
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// `reindex ROOT` stores absolute paths whatever the working directory, and a
+/// missing ROOT is refused before the index it would replace is touched.
+#[test]
+fn reindex_root_absolute_and_checked() {
+    let base = scratch::scratch_dir("bs-cli-root");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    fs::create_dir_all(home.join("docs")).unwrap();
+    fs::create_dir_all(&xdg_storage_home).unwrap();
+    fs::write(home.join("docs/a.txt"), "alpha").unwrap();
+    let in_home = |args: &[&str]| {
+        big_search(&home, &xdg_storage_home, args)
+            .current_dir(&home)
+            .output()
+            .unwrap()
+    };
+    assert!(in_home(&["reindex", "docs"]).status.success());
+    let listed = run(&home, &xdg_storage_home, &["list"]);
+    let file = fs::canonicalize(home.join("docs/a.txt")).unwrap();
+    assert!(
+        listed.lines().any(|line| Path::new(line) == file),
+        "{listed}"
+    );
+    let missing = in_home(&["reindex", "no-such-folder"]);
+    assert_eq!(missing.status.code(), Some(1));
+    // Only docs/a.txt: the entries strictly under the root.
+    assert_eq!(run(&home, &xdg_storage_home, &["count"]), "1");
     let _ = fs::remove_dir_all(&base);
 }
