@@ -5,7 +5,7 @@
 //! as living on that device (offline). Config file:
 //! `$XDG_CONFIG_HOME/big-search/config.toml`.
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 pub use big_search_config::{ContentIndexMode, SymlinkPolicy};
@@ -158,8 +158,13 @@ impl Sources {
         &self.list
     }
 
-    /// The source owning `path` (longest matching prefix).
+    /// The source owning `path` (longest matching prefix). A path with a `..`
+    /// component has none: `starts_with` compares components without resolving
+    /// them, so `<source>/..` would pass for the folder above the source.
     pub fn owner(&self, path: &Path) -> Option<&Source> {
+        if path.components().any(|part| part == Component::ParentDir) {
+            return None;
+        }
         self.list.iter().find(|s| path.starts_with(&s.path))
     }
 }
@@ -781,5 +786,22 @@ mod tests {
                 .map(Source::content),
             Some(false)
         );
+    }
+
+    /// Guards: security refusal: the reindex, origin and versions requests
+    /// trust this answer to keep a client's path inside the searched folders.
+    #[test]
+    fn owner_refuses_parent_components() {
+        let sources = Sources {
+            list: vec![src("/home/u/docs", true)],
+        };
+        for path in [
+            "/home/u/docs/..",
+            "/home/u/docs/../../../etc",
+            "/home/u/docs/a/../../b",
+        ] {
+            assert!(sources.owner(Path::new(path)).is_none(), "{path}");
+        }
+        assert!(sources.owner(Path::new("/home/u/docs/a..b")).is_some());
     }
 }
