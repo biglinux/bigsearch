@@ -815,13 +815,11 @@ fn key_under_source(path: &Path) -> Result<PathBuf> {
         })
 }
 
-/// The file another one came from: anywhere, a device included. Keyed as its
-/// row would be when under a source, so a move finds it; spelled as asked
-/// otherwise.
+/// The file another one came from: anywhere, a device included, keyed as its
+/// row would be so a move finds it.
 fn spelled_source(path: &Path) -> Result<PathBuf> {
     crate::settings::sources()
-        .resolved_client_path(path)
-        .or_else(|| crate::settings::normalized_client_path(path))
+        .client_row_key(path)
         .with_context(|| format!("origin source is relative or holds ..: {}", path.display()))
 }
 

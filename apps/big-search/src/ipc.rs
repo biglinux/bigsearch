@@ -388,7 +388,7 @@ fn dispatch(
         // arrives after the overwrite is no answer at all.
         RequestBody::SaveVersion(request) => save_version_reply(history, request),
         RequestBody::ForgetVersions(request) => {
-            let Some(path) = settings::normalized_client_path(Path::new(&request.path)) else {
+            let Some(path) = settings::sources().client_row_key(Path::new(&request.path)) else {
                 return err(format!("{} is relative or holds ..", request.path));
             };
             history_reply(history, |store| store.forget(&path))
@@ -530,7 +530,7 @@ fn versions_reply(
     history: &crate::history::SharedHistory,
     request: big_indexd_client::PathRequest,
 ) -> Reply {
-    let Some(path) = settings::normalized_client_path(Path::new(&request.path)) else {
+    let Some(path) = settings::sources().client_row_key(Path::new(&request.path)) else {
         return err(format!("{} is relative or holds ..", request.path));
     };
     let store = history.lock().expect("versions store lock");

@@ -621,8 +621,10 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   configured roots are resolved and checked before anything is indexed.
 - A path a client names for the daemon to read (`reindex`, `save_version`, the
   `register_*` targets) is taken only when, with every symlink on the way
-  followed, it lands inside a source, and is keyed by where it lands; `..` is
-  refused everywhere. The watcher checks a reindex again before it reads.
+  followed, it lands inside a source as resolved when the daemon started, and
+  is keyed by where it lands; `..` is refused everywhere. `versions` and
+  `forget_versions` key a path the same way, so any spelling of a file finds
+  its rows. The watcher checks a reindex again before it reads.
 - Extraction subprocesses get argv arrays, never `sh -c`; a failure or a
   timeout skips the file and is logged, and never stops the daemon.
 - The socket lives in `$XDG_RUNTIME_DIR`, mode `0600`, `AF_UNIX` only, same UID.

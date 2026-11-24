@@ -171,19 +171,23 @@ impl Sources {
     /// The catalogue key of a path a client asks the daemon to read: its
     /// [`normalized_client_path`] with the longest existing ancestor resolved,
     /// so a symlink inside a source is keyed where it leads. `None` when that
-    /// lands outside every source, compared resolved too, or a lookup fails
-    /// other than by a missing component.
+    /// lands outside every source as resolved at load (a source folder since
+    /// replaced by a symlink leads nowhere new), or a lookup fails other than
+    /// by a missing component.
     pub fn resolved_client_path(&self, path: &Path) -> Option<PathBuf> {
         let spelled = normalized_client_path(path)?;
         let mut existing = spelled.as_path();
         let resolved = loop {
             match std::fs::canonicalize(existing) {
                 Ok(resolved) => break resolved,
-                // Missing, and no dangling symlink that could lead out once
-                // its target appears.
+                // Missing (a component gone, or a file where a folder was),
+                // and no dangling symlink that could lead out once its target
+                // appears.
                 Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        && std::fs::symlink_metadata(existing).is_err() =>
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) && std::fs::symlink_metadata(existing).is_err() =>
                 {
                     existing = existing.parent()?;
                 }
@@ -199,11 +203,18 @@ impl Sources {
         };
         self.list
             .iter()
-            .any(|source| {
-                let root = std::fs::canonicalize(&source.path);
-                key.starts_with(root.as_deref().unwrap_or(&source.path))
-            })
+            .any(|source| key.starts_with(&source.path))
             .then_some(key)
+    }
+
+    /// The key rows about a client path are kept under: its
+    /// [`Self::resolved_client_path`] when inside a source, so every spelling
+    /// of one file finds the same rows; otherwise as spelled, for a file
+    /// anywhere or one whose source is gone. `None` when relative or holding
+    /// `..`.
+    pub fn client_row_key(&self, path: &Path) -> Option<PathBuf> {
+        self.resolved_client_path(path)
+            .or_else(|| normalized_client_path(path))
     }
 }
 
@@ -852,25 +863,36 @@ mod tests {
         assert!(sources.owner(Path::new("/home/u/docs/a..b")).is_some());
     }
 
-    /// Guards: security refusal: a path a client names for the daemon to read
-    /// stays inside a source after every symlink on the way is followed, and
-    /// is keyed one way however it was spelled.
-    #[test]
-    fn client_paths_resolved_inside_sources() {
-        let base = std::fs::canonicalize(crate::test_env::scratch_dir("bs-client-path")).unwrap();
+    /// A source `src` holding `docs/a.txt`, beside a folder `outside` holding
+    /// `secret.txt` and `sub/`: the base folder, canonical, and the sources.
+    fn client_path_fixture(name: &str) -> (PathBuf, Sources) {
+        let base = std::fs::canonicalize(crate::test_env::scratch_dir(name)).unwrap();
         let source = base.join("src");
         let outside = base.join("outside");
         std::fs::create_dir_all(source.join("docs")).unwrap();
         std::fs::create_dir_all(outside.join("sub")).unwrap();
         std::fs::write(source.join("docs/a.txt"), "a").unwrap();
         std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        let sources = Sources {
+            list: vec![src(source.to_str().unwrap(), true)],
+        };
+        (base, sources)
+    }
+
+    /// Guards: security refusal: a path a client names for the daemon to read
+    /// stays inside a source after every symlink on the way is followed, and
+    /// is keyed one way however it was spelled.
+    #[test]
+    fn client_paths_resolved_inside_sources() {
+        let (base, sources) = client_path_fixture("bs-client-path");
+        let source = base.join("src");
+        let outside = base.join("outside");
         std::os::unix::fs::symlink(&outside, source.join("out")).unwrap();
         std::os::unix::fs::symlink(source.join("docs"), source.join("inner")).unwrap();
         std::os::unix::fs::symlink(&source, base.join("via")).unwrap();
         std::os::unix::fs::symlink(outside.join("later"), source.join("dangling")).unwrap();
-        let sources = Sources {
-            list: vec![src(source.to_str().unwrap(), true)],
-        };
+        // A folder removed and a file of its name written in its place.
+        std::fs::write(source.join("docs/proj"), "p").unwrap();
         let docs = source.join("docs");
         let text = |path: &Path| path.to_str().unwrap().to_owned();
         let accepted = [
@@ -881,6 +903,7 @@ mod tests {
             (text(&source.join("inner/a.txt")), docs.join("a.txt")),
             (text(&base.join("via/docs")), docs.clone()),
             (text(&docs.join("gone/new.txt")), docs.join("gone/new.txt")),
+            (text(&docs.join("proj/sub")), docs.join("proj/sub")),
             (text(&source), source.clone()),
         ];
         // Keys are text: compared as such, since `Path` equality ignores a
@@ -913,6 +936,27 @@ mod tests {
                 "{asked}"
             );
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Guards: security refusal: a source folder replaced by a symlink while
+    /// the daemon runs leads the daemon nowhere new; the source stays the
+    /// folder resolved at load.
+    #[test]
+    fn replaced_source_leads_nowhere_new() {
+        let (base, sources) = client_path_fixture("bs-client-replaced");
+        let source = base.join("src");
+        let outside = base.join("outside");
+        std::fs::rename(&source, base.join("src.old")).unwrap();
+        std::os::unix::fs::symlink(&outside, &source).unwrap();
+        for asked in [outside.join("secret.txt"), source.join("secret.txt")] {
+            assert_eq!(sources.resolved_client_path(&asked), None, "{asked:?}");
+        }
+        // Rows keep their spelling, so a file once there is still found.
+        assert_eq!(
+            sources.client_row_key(&source.join("docs/a.txt")),
+            Some(source.join("docs/a.txt"))
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

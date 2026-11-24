@@ -121,14 +121,20 @@ fn register_created_then_query_origin() {
         note_path
     );
     assert!(send_daemon_request(&sock, &register).contains(r#""kind":"ok""#));
-    // A path no source holds is no file of this index: the origin store refuses it.
+    // A path no source holds is no file of this index, nor one reached
+    // through a symlink inside a source: the origin store refuses both.
     let outside = base.join("elsewhere/note.txt");
-    let refused = format!(
-        r#"{{"v":2,"cmd":"register_created","path":"{}"}}"#,
-        outside.to_string_lossy()
-    );
-    let reply = send_daemon_request(&sock, &refused);
-    assert!(reply.contains(r#""kind":"error""#), "{reply}");
+    std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+    std::fs::write(&outside, "elsewhere").unwrap();
+    std::os::unix::fs::symlink(base.join("elsewhere"), home.join("docs/link")).unwrap();
+    for asked in [outside, home.join("docs/link/note.txt")] {
+        let refused = format!(
+            r#"{{"v":2,"cmd":"register_created","path":"{}"}}"#,
+            asked.to_string_lossy()
+        );
+        let reply = send_daemon_request(&sock, &refused);
+        assert!(reply.contains(r#""kind":"error""#), "{reply}");
+    }
 
     let origin = format!(r#"{{"v":2,"cmd":"origin","path":"{}"}}"#, note_path);
     let origin_reply = send_daemon_request(&sock, &origin);

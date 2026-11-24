@@ -348,6 +348,12 @@ fn content_off_named() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// The daemon's reply to `cmd` naming `path`.
+fn path_request(sock: &Path, cmd: &str, path: &Path) -> serde_json::Value {
+    let request = serde_json::json!({"v": 2, "cmd": cmd, "path": path});
+    serde_json::from_str(&send_daemon_request(sock, &request.to_string())).unwrap()
+}
+
 /// Guards: security refusal: a client cannot make the daemon read a folder or
 /// copy a file outside the searched folders through a symlink inside one.
 #[test]
@@ -370,27 +376,76 @@ fn client_symlink_out_refused() {
     );
     assert!(wait_socket(&sock), "daemon never bound socket");
     let docs = home.join("docs");
-    let reply_kind = |cmd: &str, path: String| {
-        let request = serde_json::json!({"v": 2, "cmd": cmd, "path": path});
-        let reply: serde_json::Value =
-            serde_json::from_str(&send_daemon_request(&sock, &request.to_string())).unwrap();
-        reply["kind"].as_str().unwrap().to_owned()
-    };
-    let link = docs.join("link");
-    for (cmd, path) in [
-        ("reindex", format!("{}/", link.display())),
-        ("reindex", format!("{}/.", link.display())),
-        (
-            "save_version",
-            link.join("secret.txt").display().to_string(),
-        ),
-        ("versions", format!("{}/../x.txt", docs.display())),
+    let reply = |cmd: &str, path: String| path_request(&sock, cmd, Path::new(&path));
+    let link = docs.join("link").display().to_string();
+    let docs_text = docs.display().to_string();
+    // The message tells the path refusal from a later failure, such as a disk
+    // that keeps no versions.
+    let not_searched = "not in a searched folder";
+    for (cmd, path, refusal) in [
+        ("reindex", format!("{link}/"), not_searched),
+        ("reindex", format!("{link}/."), not_searched),
+        ("save_version", format!("{link}/secret.txt"), not_searched),
+        ("versions", format!("{docs_text}/../x.txt"), "holds .."),
     ] {
-        assert_eq!(reply_kind(cmd, path.clone()), "error", "{cmd} {path}");
+        let answer = reply(cmd, path.clone());
+        assert_eq!(answer["kind"], "error", "{cmd} {path}: {answer}");
+        assert!(
+            answer["message"].as_str().unwrap().ends_with(refusal),
+            "{cmd} {path}: {answer}"
+        );
     }
-    assert_eq!(
-        reply_kind("reindex", format!("{}/./", docs.display())),
-        "ok"
+    assert_eq!(reply("reindex", format!("{docs_text}/./"))["kind"], "ok");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Guards: privacy action: a version kept through one spelling of a file is
+/// listed and forgotten through another, so forgetting never reports a success
+/// that left the copy behind.
+#[test]
+fn versions_forgotten_through_symlink() {
+    // A disk that can share blocks: `/tmp` is usually tmpfs, which keeps no
+    // versions. The socket stays there, under the length limit of its path.
+    let base = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("versions-alias-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = scratch::scratch_dir("bs-alias-run");
+    std::fs::create_dir_all(home.join("docs")).unwrap();
+    // The scratch home lies in the build folder, which the default rules
+    // exclude.
+    let rules = xdg_storage_home.join("cfg/big-search/ignore");
+    std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+    std::fs::write(&rules, "!target/\n!**/target/**\n").unwrap();
+    std::fs::write(home.join("docs/report.txt"), "draft").unwrap();
+    std::os::unix::fs::symlink(home.join("docs"), home.join("alias")).unwrap();
+    let sock = run.join("biglinux/indexd.sock");
+    let _d = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .spawn()
+            .unwrap(),
     );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+    let reply = |cmd: &str, path: &Path| path_request(&sock, cmd, path);
+    let alias = home.join("alias/report.txt");
+    let saved = reply("save_version", &alias);
+    if saved["kind"] == "error" {
+        let unavailable = reply("versions", &alias)["unavailable"].clone();
+        assert_ne!(unavailable, "", "{saved}");
+        eprintln!("this disk keeps no versions ({unavailable}); test declared unsupported");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    // The state on disk is never listed: change it.
+    std::fs::write(home.join("docs/report.txt"), "final").unwrap();
+    let listed = reply("versions", &alias);
+    assert!(
+        !listed["versions"].as_array().unwrap().is_empty(),
+        "{listed}"
+    );
+    assert_eq!(reply("forget_versions", &alias)["kind"], "ok");
+    let left = reply("versions", &home.join("docs/report.txt"));
+    assert_eq!(left["versions"], serde_json::json!([]), "{left}");
     let _ = std::fs::remove_dir_all(&base);
 }
