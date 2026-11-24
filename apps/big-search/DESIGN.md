@@ -619,6 +619,10 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   `CAP_SYS_ADMIN`.
 - Every path, event and file is untrusted. The walk never follows symlinks;
   configured roots are resolved and checked before anything is indexed.
+- A path a client names for the daemon to read (`reindex`, `save_version`, the
+  `register_*` targets) is taken only when, with every symlink on the way
+  followed, it lands inside a source, and is keyed by where it lands; `..` is
+  refused everywhere. The watcher checks a reindex again before it reads.
 - Extraction subprocesses get argv arrays, never `sh -c`; a failure or a
   timeout skips the file and is logged, and never stops the daemon.
 - The socket lives in `$XDG_RUNTIME_DIR`, mode `0600`, `AF_UNIX` only, same UID.

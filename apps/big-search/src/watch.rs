@@ -445,15 +445,15 @@ impl WatchLoop<'_> {
     }
 
     fn reindex_path(&mut self, path: PathBuf) -> Result<()> {
-        // The socket refuses these; this guards against the sources having
-        // changed since.
-        if self.runtime.paused.load(Ordering::Relaxed)
-            || !path.is_absolute()
-            || !self.roots.iter().any(|root| path.starts_with(root))
-        {
+        // The socket refuses these; this guards against the sources, or a
+        // folder on the way, having changed since.
+        let key = crate::settings::sources()
+            .resolved_client_path(&path)
+            .filter(|key| self.roots.iter().any(|root| key.starts_with(root)));
+        let Some(path) = key.filter(|_| !self.runtime.paused.load(Ordering::Relaxed)) else {
             log::warn!("reindex of {} refused: outside the roots", path.display());
             return Ok(());
-        }
+        };
         self.runtime
             .activity
             .store(ACTIVITY_INDEXING, Ordering::Relaxed);

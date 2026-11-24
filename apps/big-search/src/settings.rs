@@ -167,6 +167,53 @@ impl Sources {
         }
         self.list.iter().find(|s| path.starts_with(&s.path))
     }
+
+    /// The catalogue key of a path a client asks the daemon to read: its
+    /// [`normalized_client_path`] with the longest existing ancestor resolved,
+    /// so a symlink inside a source is keyed where it leads. `None` when that
+    /// lands outside every source, compared resolved too, or a lookup fails
+    /// other than by a missing component.
+    pub fn resolved_client_path(&self, path: &Path) -> Option<PathBuf> {
+        let spelled = normalized_client_path(path)?;
+        let mut existing = spelled.as_path();
+        let resolved = loop {
+            match std::fs::canonicalize(existing) {
+                Ok(resolved) => break resolved,
+                // Missing, and no dangling symlink that could lead out once
+                // its target appears.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && std::fs::symlink_metadata(existing).is_err() =>
+                {
+                    existing = existing.parent()?;
+                }
+                Err(_) => return None,
+            }
+        };
+        let tail = spelled.strip_prefix(existing).ok()?;
+        // `join` of an empty tail would add a trailing `/` to the key.
+        let key = if tail.as_os_str().is_empty() {
+            resolved
+        } else {
+            resolved.join(tail)
+        };
+        self.list
+            .iter()
+            .any(|source| {
+                let root = std::fs::canonicalize(&source.path);
+                key.starts_with(root.as_deref().unwrap_or(&source.path))
+            })
+            .then_some(key)
+    }
+}
+
+/// `path` spelled the way the catalogue keys paths: `.`, repeated and trailing
+/// `/` dropped. `None` when relative or holding `..`, which a key never does.
+pub fn normalized_client_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+        return None;
+    }
+    Some(path.components().collect())
 }
 
 /// A source is available when its directory exists and is non-empty. An unplugged
@@ -803,5 +850,88 @@ mod tests {
             assert!(sources.owner(Path::new(path)).is_none(), "{path}");
         }
         assert!(sources.owner(Path::new("/home/u/docs/a..b")).is_some());
+    }
+
+    /// Guards: security refusal: a path a client names for the daemon to read
+    /// stays inside a source after every symlink on the way is followed, and
+    /// is keyed one way however it was spelled.
+    #[test]
+    fn client_paths_resolved_inside_sources() {
+        let base = std::fs::canonicalize(crate::test_env::scratch_dir("bs-client-path")).unwrap();
+        let source = base.join("src");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(source.join("docs")).unwrap();
+        std::fs::create_dir_all(outside.join("sub")).unwrap();
+        std::fs::write(source.join("docs/a.txt"), "a").unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::os::unix::fs::symlink(&outside, source.join("out")).unwrap();
+        std::os::unix::fs::symlink(source.join("docs"), source.join("inner")).unwrap();
+        std::os::unix::fs::symlink(&source, base.join("via")).unwrap();
+        std::os::unix::fs::symlink(outside.join("later"), source.join("dangling")).unwrap();
+        let sources = Sources {
+            list: vec![src(source.to_str().unwrap(), true)],
+        };
+        let docs = source.join("docs");
+        let text = |path: &Path| path.to_str().unwrap().to_owned();
+        let accepted = [
+            (text(&docs.join("a.txt")), docs.join("a.txt")),
+            (format!("{}/./a.txt", text(&docs)), docs.join("a.txt")),
+            (format!("{}//a.txt", text(&docs)), docs.join("a.txt")),
+            (format!("{}/", text(&docs)), docs.clone()),
+            (text(&source.join("inner/a.txt")), docs.join("a.txt")),
+            (text(&base.join("via/docs")), docs.clone()),
+            (text(&docs.join("gone/new.txt")), docs.join("gone/new.txt")),
+            (text(&source), source.clone()),
+        ];
+        // Keys are text: compared as such, since `Path` equality ignores a
+        // trailing `/`.
+        for (asked, key) in &accepted {
+            assert_eq!(
+                sources
+                    .resolved_client_path(Path::new(asked))
+                    .as_deref()
+                    .and_then(Path::to_str),
+                key.to_str(),
+                "{asked}"
+            );
+        }
+        let refused = [
+            "src/docs/a.txt".to_owned(),
+            format!("{}/..", text(&source)),
+            format!("{}/../a.txt", text(&docs)),
+            format!("{}/", text(&source.join("out"))),
+            text(&source.join("out/sub")),
+            text(&source.join("out/secret.txt")),
+            text(&source.join("dangling/x.txt")),
+            text(&outside.join("secret.txt")),
+            text(&base),
+        ];
+        for asked in &refused {
+            assert_eq!(
+                sources.resolved_client_path(Path::new(asked)),
+                None,
+                "{asked}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn client_spelling_normalized() {
+        for (asked, key) in [
+            ("/home/u/docs/./a.txt", Some("/home/u/docs/a.txt")),
+            ("//home/u//docs/", Some("/home/u/docs")),
+            ("/home/u/docs/../a.txt", None),
+            ("home/u/a.txt", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                normalized_client_path(Path::new(asked))
+                    .as_deref()
+                    .and_then(Path::to_str),
+                key,
+                "{asked}"
+            );
+        }
     }
 }

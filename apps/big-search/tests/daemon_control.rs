@@ -347,3 +347,50 @@ fn content_off_named() {
     assert!(content_search("0"), "names-only daemon");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Guards: security refusal: a client cannot make the daemon read a folder or
+/// copy a file outside the searched folders through a symlink inside one.
+#[test]
+fn client_symlink_out_refused() {
+    let base = scratch::scratch_dir("bs-client-link");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(home.join("docs")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(outside.join("secret.txt"), "s").unwrap();
+    std::os::unix::fs::symlink(&outside, home.join("docs/link")).unwrap();
+    let sock = run.join("biglinux/indexd.sock");
+    let _d = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+    let docs = home.join("docs");
+    let reply_kind = |cmd: &str, path: String| {
+        let request = serde_json::json!({"v": 2, "cmd": cmd, "path": path});
+        let reply: serde_json::Value =
+            serde_json::from_str(&send_daemon_request(&sock, &request.to_string())).unwrap();
+        reply["kind"].as_str().unwrap().to_owned()
+    };
+    let link = docs.join("link");
+    for (cmd, path) in [
+        ("reindex", format!("{}/", link.display())),
+        ("reindex", format!("{}/.", link.display())),
+        (
+            "save_version",
+            link.join("secret.txt").display().to_string(),
+        ),
+        ("versions", format!("{}/../x.txt", docs.display())),
+    ] {
+        assert_eq!(reply_kind(cmd, path.clone()), "error", "{cmd} {path}");
+    }
+    assert_eq!(
+        reply_kind("reindex", format!("{}/./", docs.display())),
+        "ok"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -1,7 +1,7 @@
 //! Lightweight file origin/provenance store. Search remains owned by Tantivy;
 //! this SQLite sidecar is consulted only for explicit origin requests or when a
 //! query asks for origin summaries.
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use big_indexd_client::{Hit, OriginProvenance, OriginSummary};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use std::cell::RefCell;
@@ -225,17 +225,17 @@ impl OriginWriter {
     ///
     /// # Errors
     ///
-    /// Returns an error when a path is relative or outside the configured sources, or the
-    /// database cannot be written.
+    /// Returns an error when `path` is relative, holds `..` or leads outside the configured
+    /// sources, or the database cannot be written.
     pub fn register_created(&self, path: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(path)?;
+        let path = key_under_source(path)?;
         let record = OriginRecord {
             source_app: app_id.map(str::to_string),
             ..OriginRecord::arrived(
-                path,
+                &path,
                 OriginKind::AppCreated,
                 OriginConfidence::High,
                 now_secs(),
@@ -248,14 +248,15 @@ impl OriginWriter {
     ///
     /// # Errors
     ///
-    /// Returns an error when a path is relative or outside the configured sources, or the
-    /// database cannot be written.
+    /// Returns an error when `dst` is relative, holds `..` or leads outside the configured
+    /// sources, `src` is relative or holds `..`, or the database cannot be written.
     pub fn register_copy(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(dst)?;
-        let source = crate::settings::sources().owner(src);
+        let dst = key_under_source(dst)?;
+        let src = spelled_source(src)?;
+        let source = crate::settings::sources().owner(&src);
         let (kind, source_device_id, source_device_label) = match source {
             Some(source) if source.removable() => (
                 OriginKind::RemovableCopy,
@@ -271,10 +272,10 @@ impl OriginWriter {
         };
         let record = OriginRecord {
             source_app: app_id.map(str::to_string),
-            source_path: Some(path_key(src)),
+            source_path: Some(path_key(&src)),
             source_device_id,
             source_device_label,
-            ..OriginRecord::arrived(dst, kind, OriginConfidence::High, now_secs())
+            ..OriginRecord::arrived(&dst, kind, OriginConfidence::High, now_secs())
         };
         upsert_record(conn, &record)
     }
@@ -283,17 +284,17 @@ impl OriginWriter {
     ///
     /// # Errors
     ///
-    /// Returns an error when a path is relative or outside the configured sources, or the
-    /// database cannot be written.
+    /// Returns an error when `dst` is relative, holds `..` or leads outside the configured
+    /// sources, `src` is relative or holds `..`, or the database cannot be written.
     pub fn register_move(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(dst)?;
+        let dst = key_under_source(dst)?;
         let now = now_secs();
-        let src_key = path_key(src);
-        let dst_key = path_key(dst);
-        let (dev, ino) = dev_ino(dst);
+        let src_key = path_key(&spelled_source(src)?);
+        let dst_key = path_key(&dst);
+        let (dev, ino) = dev_ino(&dst);
 
         if let Some(mut record) = select_record(conn, &src_key)? {
             record.path = dst_key;
@@ -311,7 +312,7 @@ impl OriginWriter {
             source_app: app_id.map(str::to_string),
             source_path: Some(src_key),
             ..OriginRecord::arrived(
-                dst,
+                &dst,
                 OriginKind::MovedOrRenamed,
                 OriginConfidence::Medium,
                 now,
@@ -324,18 +325,18 @@ impl OriginWriter {
     ///
     /// # Errors
     ///
-    /// Returns an error when a path is relative or outside the configured sources, or the
-    /// database cannot be written.
+    /// Returns an error when `dst` is relative, holds `..` or leads outside the configured
+    /// sources, `src` is relative or holds `..`, or the database cannot be written.
     pub fn register_derived(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(dst)?;
+        let dst = key_under_source(dst)?;
         let record = OriginRecord {
             source_app: app_id.map(str::to_string),
-            source_path: Some(path_key(src)),
+            source_path: Some(path_key(&spelled_source(src)?)),
             ..OriginRecord::arrived(
-                dst,
+                &dst,
                 OriginKind::DerivedFile,
                 OriginConfidence::High,
                 now_secs(),
@@ -359,12 +360,12 @@ impl OriginWriter {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(path)?;
+        let path = key_under_source(path)?;
         let record = OriginRecord {
             source_domain: Some(domain.to_string()),
             first_seen_at: downloaded_at,
             ..OriginRecord::arrived(
-                path,
+                &path,
                 OriginKind::WebDownload,
                 OriginConfidence::High,
                 now_secs(),
@@ -801,17 +802,27 @@ fn parse_confidence(confidence: u8) -> OriginConfidence {
     }
 }
 
-fn ensure_path_under_source(path: &Path) -> Result<()> {
-    if !path.is_absolute() {
-        bail!("origin path must be absolute: {}", path.display());
-    }
-    if crate::settings::sources().owner(path).is_none() {
-        bail!(
-            "origin path is outside configured sources: {}",
-            path.display()
-        );
-    }
-    Ok(())
+/// The key of a file whose origin is recorded: under a source, symlinks
+/// resolved as the catalogue keys it.
+fn key_under_source(path: &Path) -> Result<PathBuf> {
+    crate::settings::sources()
+        .resolved_client_path(path)
+        .with_context(|| {
+            format!(
+                "origin path is relative, holds .. or is outside the configured sources: {}",
+                path.display()
+            )
+        })
+}
+
+/// The file another one came from: anywhere, a device included. Keyed as its
+/// row would be when under a source, so a move finds it; spelled as asked
+/// otherwise.
+fn spelled_source(path: &Path) -> Result<PathBuf> {
+    crate::settings::sources()
+        .resolved_client_path(path)
+        .or_else(|| crate::settings::normalized_client_path(path))
+        .with_context(|| format!("origin source is relative or holds ..: {}", path.display()))
 }
 
 fn app_label(app_id: Option<&str>) -> String {

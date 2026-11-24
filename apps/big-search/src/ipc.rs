@@ -387,9 +387,12 @@ fn dispatch(
         // this immediately before it overwrites the document, and an answer that
         // arrives after the overwrite is no answer at all.
         RequestBody::SaveVersion(request) => save_version_reply(history, request),
-        RequestBody::ForgetVersions(request) => history_reply(history, |store| {
-            store.forget(std::path::Path::new(&request.path))
-        }),
+        RequestBody::ForgetVersions(request) => {
+            let Some(path) = settings::normalized_client_path(Path::new(&request.path)) else {
+                return err(format!("{} is relative or holds ..", request.path));
+            };
+            history_reply(history, |store| store.forget(&path))
+        }
         RequestBody::ClearHistory => {
             history_reply(history, crate::history::History::forget_everything)
         }
@@ -503,15 +506,14 @@ fn status_reply(index: &IndexReader, content_index: &IndexReader, control: &Cont
 }
 
 fn reindex_reply(control: &Control, request: big_indexd_client::ReindexRequest) -> Reply {
-    let path = std::path::PathBuf::from(request.path);
     if control.paused.load(Ordering::Relaxed) {
         return err("indexing is paused".to_string());
     }
     // A forced read walks and watches the path: never one the person
     // did not ask to have searched, nor one relative to the daemon.
-    if !path.is_absolute() || settings::sources().owner(&path).is_none() {
-        return err(format!("{} is not in a searched folder", path.display()));
-    }
+    let Some(path) = settings::sources().resolved_client_path(Path::new(&request.path)) else {
+        return err(format!("{} is not in a searched folder", request.path));
+    };
     send_control_command(control, WatchControlCommand::ReindexPath(path))
 }
 
@@ -528,8 +530,11 @@ fn versions_reply(
     history: &crate::history::SharedHistory,
     request: big_indexd_client::PathRequest,
 ) -> Reply {
+    let Some(path) = settings::normalized_client_path(Path::new(&request.path)) else {
+        return err(format!("{} is relative or holds ..", request.path));
+    };
     let store = history.lock().expect("versions store lock");
-    let versions = match store.versions(std::path::Path::new(&request.path)) {
+    let versions = match store.versions(&path) {
         Ok(versions) => versions,
         Err(e) => return err(format!("versions: {e:#}")),
     };
@@ -559,12 +564,13 @@ fn save_version_reply(
     history: &crate::history::SharedHistory,
     request: big_indexd_client::PathRequest,
 ) -> Reply {
+    // The copy reads the file: never one outside the searched folders.
+    let Some(path) = settings::sources().resolved_client_path(Path::new(&request.path)) else {
+        return err(format!("{} is not in a searched folder", request.path));
+    };
     history_reply(history, |store| {
         store
-            .save_version(
-                std::path::Path::new(&request.path),
-                crate::history::Reason::BeforeRestore,
-            )
+            .save_version(&path, crate::history::Reason::BeforeRestore)
             .map(|_| ())
     })
 }
