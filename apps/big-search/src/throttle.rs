@@ -87,10 +87,8 @@ pub fn lower_priority() {
 static PRIORITY_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// `SCHED_IDLE` without the thread's clamp, after `sched_setattr` was refused
-/// as `refused`: by a kernel built without utilization clamping (EOPNOTSUPP),
-/// or by a seccomp filter (EPERM), as the unit's `RestrictRealtime=yes`
-/// installs, which denies sched_setattr outright. Any other refusal leaves the
-/// policy as it is, reported.
+/// with EPERM (the unit's seccomp filter) or EOPNOTSUPP (a kernel without
+/// utilization clamping); any other refusal leaves the policy as it is.
 fn lower_policy_unclamped(refused: &std::io::Error, report: bool) {
     if !matches!(refused.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP)) {
         if report {
