@@ -44,11 +44,11 @@ mod tests;
 mod worker;
 
 pub(crate) use disk::{Refusal, clone_file};
-pub use eligibility::{eligible_metadata, may_be_a_document};
+pub use eligibility::may_be_a_document;
 pub use worker::{HistoryEvent, Pending, run_worker};
 
 use disk::disk_capacity;
-use eligibility::{eligible_name, git_work_tree};
+use eligibility::{eligible_metadata, eligible_name, git_work_tree};
 use store::{
     file_id_for_path, first_stored, follow_rename, is_live_session, now_secs, object_name,
     open_store, prepare_store,
@@ -128,8 +128,19 @@ struct VersionToCopy {
     reason: Reason,
 }
 
-fn not_kept_error(why: &str) -> anyhow::Error {
-    anyhow::anyhow!("the current state was not kept: {why}")
+fn not_kept_error(why: &'static str) -> anyhow::Error {
+    anyhow::Error::msg(why).context("the current state was not kept")
+}
+
+/// What tells one file from another: `(dev, ino)`, and the birth time where
+/// the filesystem records one (see [`History::upsert_file`]).
+fn identity(metadata: &std::fs::Metadata) -> (i64, i64, Option<i64>) {
+    let born = metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
+        .and_then(|since| i64::try_from(since.as_nanos()).ok());
+    (metadata.dev() as i64, metadata.ino() as i64, born)
 }
 
 /// The versions store.
@@ -308,22 +319,61 @@ impl History {
         // for good with one rename to `.something-delete-...` and then an
         // unlink, and following it there would file the history
         // under a name nobody can type, out of reach of the request to forget it.
-        if eligible_name(to).is_none() {
+        if eligible_name(to).is_err() {
             return Ok(());
         }
         follow_rename(conn, from, to)
     }
 
-    /// Whether versions are kept under `path` as spelled.
+    /// Settle the versions kept under `spelled`, a path that leads to
+    /// `resolved` now, before a restore through it.
+    ///
+    /// Kept for the file that is at `resolved` (a daemon that keyed client
+    /// paths as spelled kept them under a symlinked folder), they move to
+    /// `resolved`. With nothing at `resolved` a restore loses nothing, and
+    /// they stay where they are.
     ///
     /// # Errors
     ///
-    /// Returns an error when the versions database cannot be read.
-    pub fn keeps(&self, path: &Path) -> Result<bool> {
+    /// Returns an error when another file is at `resolved`: the restore that
+    /// follows would write a version of the file that was at `spelled` over
+    /// it. Also when the versions database cannot be read or changed.
+    pub fn adopt_spelling(&self, spelled: &Path, resolved: &Path) -> Result<()> {
         let Some(conn) = &self.conn else {
-            return Ok(false);
+            return Ok(());
         };
-        Ok(file_id_for_path(conn, path)?.is_some())
+        let Some(file_id) = file_id_for_path(conn, spelled)? else {
+            return Ok(());
+        };
+        let metadata = match std::fs::symlink_metadata(resolved) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", resolved.display()));
+            }
+        };
+        let (dev, ino, born) = identity(&metadata);
+        let same: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND dev = ?2 AND ino = ?3
+                             AND (born IS NULL OR ?4 IS NULL OR born = ?4))",
+            params![file_id, dev, ino, born],
+            |row| row.get(0),
+        )?;
+        if !same {
+            anyhow::bail!(
+                "{} leads to {} now, which is not the file its versions were kept from",
+                spelled.display(),
+                resolved.display()
+            );
+        }
+        follow_rename(conn, spelled, resolved)
     }
 
     /// The earlier versions of one document, newest first.
@@ -401,23 +451,26 @@ impl History {
     /// holding the store's lock, which a file manager's request may be
     /// waiting on.
     fn prepare_version(&mut self, path: &Path, reason: Reason) -> Result<Option<VersionToCopy>> {
-        let not_kept = |why: &str| {
+        let not_kept = |why: &'static str| {
             if reason == Reason::BeforeRestore {
                 Err(not_kept_error(why))
             } else {
                 Ok(None)
             }
         };
-        let Some(metadata) = eligible_metadata(path) else {
-            // A restore over no file, or an empty one, loses nothing.
-            let lost = reason == Reason::BeforeRestore
-                && std::fs::symlink_metadata(path)
-                    .is_ok_and(|metadata| !metadata.is_file() || metadata.len() > 0);
-            return if lost {
-                Err(not_kept_error("this file is not kept"))
-            } else {
-                Ok(None)
-            };
+        let metadata = match eligible_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(why) => {
+                // A restore over no file, or an empty one, loses nothing.
+                let lost = reason == Reason::BeforeRestore
+                    && std::fs::symlink_metadata(path)
+                        .is_ok_and(|metadata| !metadata.is_file() || metadata.len() > 0);
+                return if lost {
+                    Err(not_kept_error(why))
+                } else {
+                    Ok(None)
+                };
+            }
         };
         if self.conn.is_none() {
             return not_kept("versions are turned off");
@@ -579,12 +632,7 @@ impl History {
     fn upsert_file(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<i64> {
         let conn = self.conn.as_ref().expect("checked by the caller");
         let key = path.to_string_lossy().into_owned();
-        let born = metadata
-            .created()
-            .ok()
-            .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
-            .and_then(|since| i64::try_from(since.as_nanos()).ok());
-        let (dev, ino) = (metadata.dev() as i64, metadata.ino() as i64);
+        let (dev, ino, born) = identity(metadata);
         if let Some(id) = file_id_for_path(conn, path)? {
             // Only on a change: an UPDATE that rewrites the same values still
             // writes the page to the WAL, and every save passes through here.

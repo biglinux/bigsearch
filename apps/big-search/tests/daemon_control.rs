@@ -441,10 +441,11 @@ fn version_ids(sock: &Path, path: &Path) -> Vec<i64> {
 }
 
 /// A daemon searching `docs`, which holds the folders `real`, `old`, `other`,
-/// `gone` and `proj` with an `a.txt` each, `alias` linked to `real` and `out`
-/// linked to a folder outside the source.
+/// `gone`, `proj` and `vacated` with an `a.txt` each, `alias` linked to `real`
+/// and `out` linked to a folder outside the source.
 struct PathMatrix {
     base: PathBuf,
+    data: PathBuf,
     home: PathBuf,
     docs: PathBuf,
     outside: PathBuf,
@@ -464,7 +465,7 @@ impl PathMatrix {
         let xdg_storage_home = base.join("data");
         let outside = base.join("outside");
         let docs = home.join("docs");
-        for folder in ["real", "old", "other", "gone", "proj"] {
+        for folder in ["real", "old", "other", "gone", "proj", "vacated"] {
             std::fs::create_dir_all(docs.join(folder)).unwrap();
             std::fs::write(docs.join(folder).join("a.txt"), folder).unwrap();
         }
@@ -487,6 +488,7 @@ impl PathMatrix {
         assert!(wait_socket(&sock), "daemon never bound socket");
         Self {
             base,
+            data: xdg_storage_home,
             home,
             docs,
             outside,
@@ -531,9 +533,13 @@ impl PathMatrix {
     }
 
     /// `old` replaced by a link to `other`, `gone` removed, `proj` turned into
-    /// a file, and `dangling` linked to a folder that does not exist yet.
+    /// a file, `vacated` replaced by a link to an empty folder, and `dangling`
+    /// linked to a folder that does not exist yet.
     fn rearrange(&self) {
         let docs = &self.docs;
+        std::fs::remove_dir_all(docs.join("vacated")).unwrap();
+        std::fs::create_dir(docs.join("empty")).unwrap();
+        std::os::unix::fs::symlink(docs.join("empty"), docs.join("vacated")).unwrap();
         std::fs::remove_dir_all(docs.join("old")).unwrap();
         std::os::unix::fs::symlink(docs.join("other"), docs.join("old")).unwrap();
         std::fs::remove_dir_all(docs.join("gone")).unwrap();
@@ -561,11 +567,12 @@ fn client_path_matrix() {
         return;
     }
     matrix.keep_one("alias", "real edited");
-    for folder in ["old", "other", "gone", "proj"] {
+    for folder in ["old", "other", "gone", "proj", "vacated"] {
         matrix.keep_one(folder, &format!("{folder} edited"));
     }
     matrix.rearrange();
     let other = versions_by_spelling(&matrix);
+    legacy_alias_rows(&matrix);
     disk_requests(&matrix);
     origin_requests(&matrix);
     forget_by_spelling(&matrix, &other);
@@ -585,13 +592,50 @@ fn versions_by_spelling(matrix: &PathMatrix) -> Vec<i64> {
     let other = matrix.ids("other");
     assert_eq!((old.len(), other.len()), (2, 1), "{old:?} {other:?}");
     assert!(!old.contains(&other[0]), "{old:?} {other:?}");
-    // A path vanished, and a folder turned into a file: rows keep their key.
-    assert_eq!(matrix.ids("gone").len(), 2);
-    assert_eq!(matrix.ids("proj").len(), 2);
+    // A path vanished, a folder turned into a file, and one replaced by a link
+    // to where no such file is: rows keep their key.
+    for folder in ["gone", "proj", "vacated"] {
+        assert_eq!(matrix.ids(folder).len(), 2, "{folder}");
+    }
     // Links to outside and to nothing: nothing was kept there.
     assert_eq!(matrix.ids("out"), Vec::<i64>::new());
     assert_eq!(matrix.ids("dangling"), Vec::<i64>::new());
     other
+}
+
+/// Rows a daemon kept under a symlinked folder's spelling, before client paths
+/// were keyed where they lead, move there with the restore through it: they
+/// were kept for the very file the restore overwrites.
+fn legacy_alias_rows(matrix: &PathMatrix) {
+    let real = matrix.ids("real");
+    let history =
+        rusqlite::Connection::open(matrix.data.join("big-search/history.sqlite")).unwrap();
+    history.busy_timeout(Duration::from_secs(30)).unwrap();
+    let rows_under = |folder: &str| -> i64 {
+        history
+            .query_row(
+                "SELECT count(*) FROM files WHERE current_path = ?1",
+                [matrix.file(folder).to_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    history
+        .execute(
+            "UPDATE files SET current_path = ?1 WHERE current_path = ?2",
+            [
+                matrix.file("alias").to_str().unwrap(),
+                matrix.file("real").to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+    assert_eq!(matrix.ids("alias"), real);
+    assert_answers(
+        &matrix.sock,
+        &[(path_cmd("save_version", &matrix.file("alias")), None)],
+    );
+    assert_eq!((rows_under("alias"), rows_under("real")), (0, 1));
+    assert_eq!(matrix.ids("real"), real);
 }
 
 /// Requests that read the disk follow a link and stay inside the source. A restore through a link put in place of a folder that
@@ -613,9 +657,10 @@ fn disk_requests(matrix: &PathMatrix) {
             // No file there: nothing a restore would lose.
             (save("gone"), None),
             (save("proj"), None),
+            (save("vacated"), None),
             (
                 path_cmd("save_version", &docs.join("proj")),
-                Some("not kept"),
+                Some("not kept: it has no document extension"),
             ),
             (save("out"), not_searched),
             (save("dangling"), not_searched),
@@ -633,6 +678,11 @@ fn disk_requests(matrix: &PathMatrix) {
             (created("out"), no_source),
             (created("dangling"), no_source),
         ],
+    );
+    assert_eq!(
+        matrix.ids("vacated").len(),
+        2,
+        "the restore moved vacated's rows"
     );
     // Recorded where the link leads.
     for folder in ["real", "other"] {
@@ -687,7 +737,7 @@ fn forget_by_spelling(matrix: &PathMatrix, other: &[i64]) {
     assert_eq!(matrix.ids("old"), other);
     assert_eq!(forget("alias")["kind"], "ok");
     assert_eq!(matrix.ids("real"), Vec::<i64>::new());
-    for folder in ["gone", "proj", "out", "dangling"] {
+    for folder in ["gone", "proj", "vacated", "out", "dangling"] {
         assert_eq!(forget(folder)["kind"], "ok", "{folder}");
         assert_eq!(matrix.ids(folder), Vec::<i64>::new(), "{folder}");
     }

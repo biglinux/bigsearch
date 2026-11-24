@@ -28,17 +28,23 @@ const DOCUMENT_EXTENSIONS: [&str; 13] = [
 /// a person keeps in plain sight and would not want copied.
 const NEVER_KEPT: [&str; 5] = ["senha", "password", ".kdbx", ".key", ".pem"];
 
-/// Whether this document earns a version, and its metadata if so.
+/// Whether this document earns a version: its metadata if so, else why not.
 ///
 /// Cheapest test first. Extensions are an allow list because a block list is
 /// how somebody discovers the problem with a 100 GB file.
-pub fn eligible_metadata(path: &Path) -> Option<std::fs::Metadata> {
+pub(super) fn eligible_metadata(path: &Path) -> Result<std::fs::Metadata, &'static str> {
     eligible_name(path)?;
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES || metadata.len() == 0 {
-        return None;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| "it cannot be read")?;
+    if !metadata.is_file() {
+        return Err("it is not a regular file");
     }
-    Some(metadata)
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err("it is over the size versions are kept up to");
+    }
+    if metadata.len() == 0 {
+        return Err("it is empty");
+    }
+    Ok(metadata)
 }
 
 /// Whether a path is even the kind of file that earns versions.
@@ -47,6 +53,11 @@ pub fn eligible_metadata(path: &Path) -> Option<std::fs::Metadata> {
 /// reports before it costs a channel send and a place in the worker's queue.
 #[must_use]
 pub fn may_be_a_document(path: &Path) -> bool {
+    name_refusal(path).is_none()
+}
+
+/// Why the name alone keeps `path` out of the versions.
+fn name_refusal(path: &Path) -> Option<&'static str> {
     // The extension first, without building a string: it rejects almost every
     // path, and the name check allocates.
     let document = path
@@ -57,30 +68,37 @@ pub fn may_be_a_document(path: &Path) -> bool {
                 .iter()
                 .any(|allowed| extension.eq_ignore_ascii_case(allowed))
         });
-    document
-        && path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                let name = name.to_ascii_lowercase();
-                !NEVER_KEPT.iter().any(|marker| name.contains(marker))
-            })
+    if !document {
+        return Some("it has no document extension");
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Some("its name is not UTF-8");
+    };
+    let name = name.to_ascii_lowercase();
+    NEVER_KEPT
+        .iter()
+        .any(|marker| name.contains(marker))
+        .then_some("its name marks a password or a key")
 }
 
 /// The half of eligibility that is about the name alone, with nothing read from
 /// disk, so it can also answer about a path that has disappeared.
-pub(super) fn eligible_name(path: &Path) -> Option<()> {
-    if !may_be_a_document(path) {
-        return None;
+pub(super) fn eligible_name(path: &Path) -> Result<(), &'static str> {
+    if let Some(refusal) = name_refusal(path) {
+        return Err(refusal);
     }
     // Rows are keyed by UTF-8 text: a lossy key for a path in a non-UTF-8
     // folder never exists on disk, so its versions would expire under it.
-    path.to_str()?;
-    if scope().excluded(path, false) {
-        return None;
+    if path.to_str().is_none() {
+        return Err("its folder's name is not UTF-8");
     }
-    crate::settings::sources().owner(path)?;
-    Some(())
+    if scope().excluded(path, false) {
+        return Err("an exclusion rule covers it");
+    }
+    if crate::settings::sources().owner(path).is_none() {
+        return Err("it is not in a searched folder");
+    }
+    Ok(())
 }
 
 fn scope() -> &'static crate::scan::Scope {

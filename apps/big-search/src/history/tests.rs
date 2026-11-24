@@ -239,3 +239,60 @@ fn unreadable_shard_keeps_versions() {
     assert!(shard.join("one").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Rows kept under a symlinked folder's spelling move to where it leads when
+/// they were kept for the file there, stay when nothing is there, and refuse
+/// the restore when another file is there, an editor's save included.
+#[test]
+fn spelling_adopted_by_identity() {
+    let dir = crate::test_env::scratch_dir("bs-history-adopt");
+    let store = store_with(open_store(&dir.join("history.sqlite")).unwrap(), &dir);
+    let conn = store.conn.as_ref().unwrap();
+    std::fs::create_dir_all(dir.join("real")).unwrap();
+    std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+    let (real, alias) = (dir.join("real/a.txt"), dir.join("alias/a.txt"));
+    std::fs::write(&real, "kept").unwrap();
+    let kept_under = |path: &Path, id: i64, file: &Path| {
+        let (dev, ino, born) = identity(&std::fs::symlink_metadata(file).unwrap());
+        conn.execute(
+            "INSERT INTO files(id, current_path, dev, ino, born, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![id, path.to_str().unwrap(), dev, ino, born],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO versions(file_id, saved_at, mtime_s, mtime_ns, size, object, reason)
+             VALUES (?1, 0, 0, 0, 1, ?2, 'saved')",
+            params![id, format!("object-{id}")],
+        )
+        .unwrap();
+    };
+    let real_key = real.to_str().unwrap().to_string();
+
+    kept_under(&alias, 1, &real);
+    kept_under(&real, 2, &real);
+    store.adopt_spelling(&alias, &real).unwrap();
+    assert_eq!(
+        version_owners(conn),
+        [
+            (real_key.clone(), "object-1".to_string()),
+            (real_key, "object-2".to_string()),
+        ]
+    );
+
+    let missing = dir.join("alias/missing.txt");
+    kept_under(&missing, 3, &real);
+    store
+        .adopt_spelling(&missing, &dir.join("real/missing.txt"))
+        .unwrap();
+    assert_eq!(file_id_for_path(conn, &missing).unwrap(), Some(3));
+
+    kept_under(&alias, 4, &real);
+    let saved = dir.join("real/a.txt.tmp");
+    std::fs::write(&saved, "saved by an editor").unwrap();
+    std::fs::rename(&saved, &real).unwrap();
+    let refusal = store.adopt_spelling(&alias, &real).unwrap_err().to_string();
+    assert!(refusal.contains("not the file"), "{refusal}");
+    assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(4));
+    let _ = std::fs::remove_dir_all(&dir);
+}
