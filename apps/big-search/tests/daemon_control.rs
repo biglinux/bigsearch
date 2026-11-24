@@ -339,6 +339,43 @@ fn source_under_excluded_name_indexed() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A forced reindex judges the path as new: a catalogued folder its repository
+/// came to ignore leaves with what it holds, as a new one would never enter.
+#[test]
+fn reindex_evicts_ignored_folder() {
+    let base = scratch::scratch_dir("bs-reindex-ignored");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    let repo = home.join("docs/repo");
+    let generated = repo.join("generated");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(&generated).unwrap();
+    std::fs::write(generated.join("inner.txt"), "alpha").unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    let sock = run.join("biglinux/indexd.sock");
+    let _daemon = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+    assert!(
+        settles(|| query_paths(&sock, "name", "inner", &home).0 == 1),
+        "the first walk did not index the folder"
+    );
+
+    std::fs::write(repo.join(".gitignore"), "generated/\n").unwrap();
+    assert_answers(&sock, &[(path_cmd("reindex", &generated), None)]);
+    assert!(
+        settles(|| query_paths(&sock, "name", "generated", &home).0 == 0),
+        "the ignored folder is still found"
+    );
+    assert_eq!(query_paths(&sock, "name", "inner", &home).0, 0);
+    assert_eq!(catalogue_rows(&xdg_storage_home, "name", &generated), 0);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// With content indexing off, a content search says so instead of an empty
 /// answer; a running daemon's profile decides over the command's own.
 #[test]

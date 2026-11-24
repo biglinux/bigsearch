@@ -459,26 +459,24 @@ impl WatchLoop<'_> {
         self.runtime
             .activity
             .store(ACTIVITY_INDEXING, Ordering::Relaxed);
-        // Forgetting the path is what forces the work: the reconcile
-        // below then sees it as new instead of unchanged.
-        self.state.remove(&path);
         // The content index keeps its own record of the same path, and
         // the only reason to ask for a forced reindex is a change the
         // file's size and modification time do not show, such as a tag. Left
         // in place, that record makes the content pass skip the file and
         // the tag never becomes searchable.
         content::forget_content_state(&path).context("forget content state")?;
-        let mut forced = std::collections::HashSet::new();
-        forced.insert(path);
-        let outcome = reconcile(
-            active_index_writer(&mut self.writer),
-            &self.f,
-            &mut self.watches,
-            &mut self.state,
-            &self.path_scope,
-            forced,
-            None,
-        )?;
+        let mut pass = ReconcilePass {
+            writer: active_index_writer(&mut self.writer),
+            f: &self.f,
+            scope: &self.path_scope,
+            watched: None,
+            forced: true,
+            outcome: scan::ReconcileOutcome::default(),
+            offline_sources: None,
+        };
+        pass.path(&mut self.watches, &mut self.state, &path)?;
+        let outcome = pass.outcome;
+        self.watches.missed |= outcome.unread;
         if outcome.index_changed {
             active_index_writer(&mut self.writer)
                 .commit()
@@ -790,6 +788,7 @@ fn reconcile(
         f,
         scope,
         watched,
+        forced: false,
         outcome: scan::ReconcileOutcome::default(),
         offline_sources: None,
     };
@@ -807,6 +806,9 @@ struct ReconcilePass<'a> {
     f: &'a Fields,
     scope: &'a scan::Scope,
     watched: Option<&'a HashSet<PathBuf>>,
+    /// Each path is judged as new, which is what a forced reindex asks; its
+    /// record then only says that there is something to evict.
+    forced: bool,
     outcome: scan::ReconcileOutcome,
     offline_sources: Option<crate::query::OfflineSources>,
 }
@@ -829,8 +831,9 @@ impl ReconcilePass<'_> {
         let metadata = stat.ok();
         let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
         let recorded = state.recorded(path);
+        let judged = recorded.filter(|_| !self.forced);
         let out_of_scope = self.scope.excluded(path, is_dir)
-            || (recorded.is_none() && scan::repo_ignored(path, is_dir));
+            || (judged.is_none() && scan::repo_ignored(path, is_dir));
         if out_of_scope && recorded.is_none() {
             return Ok(()); // out of scope and never catalogued: nothing to do
         }
@@ -838,7 +841,7 @@ impl ReconcilePass<'_> {
         // one, so the rules also evict what an earlier version indexed before
         // they covered it. Skipping it instead would strand those documents.
         if let Some(metadata) = metadata.filter(|_| !out_of_scope) {
-            return self.present(watches, state, path, &metadata, recorded);
+            return self.present(watches, state, path, &metadata, judged);
         }
         if recorded.is_some()
             && (gone || out_of_scope)
