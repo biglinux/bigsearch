@@ -634,15 +634,13 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   `forget_versions` answer for the rows kept under the path as spelled, and
   only when there are none for those under where it lands: a kept key was a
   real path when written, and a symlink put in its place since leads to
-  another document. Once per start, the versions worker moves the rows kept
-  under a path that lands elsewhere inside a source to where it lands, when
-  they were kept for the file there: the same inode (and birth time when both
-  record one; not the device, which removable media and btrfs subvolumes
-  change), or a version state kept under both paths. So `save_version`
-  through a path with rows kept under it that lands on something else is
+  another document. For that reason `save_version` through a path with rows
+  kept under it that lands elsewhere now decides by file identity: when the
+  file where it lands is the one the rows were kept for (`dev`, `ino`, birth
+  time), the rows move to where it lands; when another file is there, it is
   refused, since the restore that follows would write one document's version
-  over another; with nothing there it proceeds. The watcher checks a reindex
-  again before it reads.
+  over the other; with nothing there it proceeds. The watcher checks a
+  reindex again before it reads.
 - Extraction subprocesses get argv arrays, never `sh -c`; a failure or a
   timeout skips the file and is logged, and never stops the daemon.
 - The socket lives in `$XDG_RUNTIME_DIR`, mode `0600`, `AF_UNIX` only, same UID.

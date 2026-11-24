@@ -164,9 +164,6 @@ pub fn run(
     // Compiled once: every event is tested against the same rules the scan walk
     // uses, so the two cannot disagree about what belongs in the index.
     let path_scope = scan::Scope::compile();
-    // Before the catch-up: the worker's first step merges versions kept under
-    // another spelling, which a restore asked for after the start relies on.
-    let history_tx = spawn_history_worker(&history);
 
     let (mut watches, queued, overflowed) =
         start_inotify(tx, &runtime, scope.watch_list, scope.fingerprint)?;
@@ -181,6 +178,7 @@ pub fn run(
     )?;
     watches.record_run(scope.started)?;
     let origin_writer = open_origin_writer();
+    let history_tx = spawn_history_worker(&history);
 
     let mut content_backfill = ContentBackfill::new(runtime.pending_content.clone());
     content_backfill.request();

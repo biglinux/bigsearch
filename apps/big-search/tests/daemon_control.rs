@@ -17,7 +17,6 @@ mod scratch;
 use daemon::*;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 #[test]
 fn pause_resume_rebuild_cycle() {
@@ -322,17 +321,16 @@ fn version_ids(sock: &Path, path: &Path) -> Vec<i64> {
 }
 
 /// A daemon searching `docs`, which holds the folders `real`, `old`, `other`,
-/// `gone`, `proj` and `vacated` with an `a.txt` each, `alias` linked to `real`
-/// and `out` linked to a folder outside the source.
+/// `gone`, `proj`, `vacated` and `moved` with an `a.txt` each, `alias` linked
+/// to `real` and `out` linked to a folder outside the source.
 struct PathMatrix {
     base: PathBuf,
-    data: PathBuf,
     home: PathBuf,
     docs: PathBuf,
     outside: PathBuf,
     sock: PathBuf,
-    daemon: std::cell::RefCell<KillOnDrop>,
-    run: scratch::ScratchDir,
+    _daemon: KillOnDrop,
+    _run: scratch::ScratchDir,
 }
 
 impl PathMatrix {
@@ -346,7 +344,7 @@ impl PathMatrix {
         let xdg_storage_home = base.join("data");
         let outside = base.join("outside");
         let docs = home.join("docs");
-        for folder in ["real", "old", "other", "gone", "proj", "vacated"] {
+        for folder in ["real", "old", "other", "gone", "proj", "vacated", "moved"] {
             std::fs::create_dir_all(docs.join(folder)).unwrap();
             std::fs::write(docs.join(folder).join("a.txt"), folder).unwrap();
         }
@@ -369,28 +367,13 @@ impl PathMatrix {
         assert!(wait_socket(&sock), "daemon never bound socket");
         Self {
             base,
-            data: xdg_storage_home,
             home,
             docs,
             outside,
             sock,
-            daemon: std::cell::RefCell::new(daemon),
-            run,
+            _daemon: daemon,
+            _run: run,
         }
-    }
-
-    /// Stop the daemon and start it again, as an upgrade does.
-    fn restart(&self) {
-        let mut daemon = self.daemon.borrow_mut();
-        let _ = daemon.0.kill();
-        let _ = daemon.0.wait();
-        let _ = std::fs::remove_file(&self.sock);
-        *daemon = KillOnDrop(
-            env_cmd(&["daemon"], &self.home, &self.data, &self.run)
-                .spawn()
-                .unwrap(),
-        );
-        assert!(wait_socket(&self.sock), "daemon never bound socket");
     }
 
     fn file(&self, folder: &str) -> PathBuf {
@@ -428,10 +411,13 @@ impl PathMatrix {
     }
 
     /// `old` replaced by a link to `other`, `gone` removed, `proj` turned into
-    /// a file, `vacated` replaced by a link to an empty folder, and `dangling`
-    /// linked to a folder that does not exist yet.
+    /// a file, `vacated` replaced by a link to an empty folder, `moved` moved
+    /// to `moved-to` with a link in its place, and `dangling` linked to a
+    /// folder that does not exist yet.
     fn rearrange(&self) {
         let docs = &self.docs;
+        std::fs::rename(docs.join("moved"), docs.join("moved-to")).unwrap();
+        std::os::unix::fs::symlink(docs.join("moved-to"), docs.join("moved")).unwrap();
         std::fs::remove_dir_all(docs.join("vacated")).unwrap();
         std::fs::create_dir(docs.join("empty")).unwrap();
         std::os::unix::fs::symlink(docs.join("empty"), docs.join("vacated")).unwrap();
@@ -460,13 +446,12 @@ fn client_path_matrix() {
         return;
     }
     matrix.keep_one("alias", "real edited");
-    for folder in ["old", "other", "gone", "proj", "vacated"] {
+    for folder in ["old", "other", "gone", "proj", "vacated", "moved"] {
         matrix.keep_one(folder, &format!("{folder} edited"));
     }
     matrix.rearrange();
     let other = versions_by_spelling(&matrix);
-    legacy_alias_rows(&matrix);
-    legacy_alias_after_save(&matrix);
+    moved_folder_linked(&matrix);
     disk_requests(&matrix);
     origin_requests(&matrix);
     forget_by_spelling(&matrix, &other);
@@ -497,142 +482,22 @@ fn versions_by_spelling(matrix: &PathMatrix) -> Vec<i64> {
     other
 }
 
-/// Rows a daemon kept under a symlinked folder's spelling, before client
-/// paths were keyed where they lead, join the real path's rows at the next
-/// start whatever device they recorded, a state kept under both once.
-fn legacy_alias_rows(matrix: &PathMatrix) {
-    let real = matrix.ids("real");
-    let history = LegacyRows::open(matrix);
-    let versions = history.versions_under("real");
-    history.respell_real();
-    history
-        .connection
-        .execute(
-            "UPDATE files SET dev = dev + 1 WHERE current_path = ?1",
-            [matrix.file("alias").to_str().unwrap()],
-        )
-        .unwrap();
-    // A row of its own under `real`, holding the state on disk, which the
-    // alias rows hold too.
+/// A folder moved and a link put in its place while the daemon runs: the rows
+/// kept under the link's spelling were kept for the file it leads to, so a
+/// restore through the link proceeds and they move to where it leads.
+fn moved_folder_linked(matrix: &PathMatrix) {
+    let kept = matrix.ids("moved");
+    assert_eq!(kept.len(), 1, "{kept:?}");
     assert_answers(
         &matrix.sock,
-        &[(path_cmd("save_version", &matrix.file("real")), None)],
+        &[(path_cmd("save_version", &matrix.file("moved")), None)],
     );
-    matrix.restart();
-    assert!(
-        settles(|| history.rows_under("alias") == 0),
-        "the alias rows never merged"
-    );
-    assert_eq!(history.rows_under("real"), 1);
-    assert_eq!(history.versions_under("real"), versions);
-    assert_eq!(matrix.ids("alias"), real);
-    assert_eq!(matrix.ids("real"), real);
-    assert_answers(
-        &matrix.sock,
-        &[(path_cmd("forget_versions", &matrix.file("alias")), None)],
-    );
-    assert_eq!(history.rows_under("real"), 0);
-    matrix.keep_one("real", "real again");
-}
-
-/// Legacy alias rows of a file an editor has saved since carry a stale inode:
-/// they merge at the start when one of their states is also kept under the
-/// real path; with none, a restore through the alias is refused naming both.
-fn legacy_alias_after_save(matrix: &PathMatrix) {
-    let history = LegacyRows::open(matrix);
-    let (alias, real) = (matrix.file("alias"), matrix.file("real"));
-    let editor_save = |text: &str| {
-        let saved = matrix.docs.join("real/.a.txt.new");
-        std::fs::write(&saved, text).unwrap();
-        std::fs::rename(&saved, &real).unwrap();
-    };
-    history.respell_real();
-    let kept = matrix.ids("alias");
-    // Keeps the state on disk, which the alias rows hold too, under `real`.
-    assert_answers(&matrix.sock, &[(path_cmd("save_version", &real), None)]);
-    editor_save("real saved by an editor");
-    matrix.restart();
-    assert!(
-        settles(|| history.rows_under("alias") == 0),
-        "the alias rows never merged"
-    );
-    assert_eq!(history.rows_under("real"), 1);
-    let listed = matrix.ids("real");
+    let listed = matrix.ids("moved-to");
     assert!(
         kept.iter().all(|id| listed.contains(id)),
         "{kept:?} {listed:?}"
     );
-
-    history.respell_real();
-    // States no file has, so no version the watcher keeps under `real` meanwhile shares one.
-    history
-        .connection
-        .execute(
-            "UPDATE versions SET mtime_s = 0
-              WHERE file_id = (SELECT id FROM files WHERE current_path = ?1)",
-            [alias.to_str().unwrap()],
-        )
-        .unwrap();
-    editor_save("real saved again");
-    let named = format!("{} leads to {} now", alias.display(), real.display());
-    assert_answers(
-        &matrix.sock,
-        &[
-            (path_cmd("save_version", &alias), Some(named.as_str())),
-            (path_cmd("forget_versions", &alias), None),
-        ],
-    );
-    assert_eq!(history.rows_under("alias"), 0);
-}
-
-/// The daemon's versions store, opened beside it to write rows as a daemon
-/// that keyed client paths as spelled kept them.
-struct LegacyRows<'a> {
-    matrix: &'a PathMatrix,
-    connection: rusqlite::Connection,
-}
-
-impl<'a> LegacyRows<'a> {
-    fn open(matrix: &'a PathMatrix) -> Self {
-        let connection =
-            rusqlite::Connection::open(matrix.data.join("big-search/history.sqlite")).unwrap();
-        connection.busy_timeout(Duration::from_secs(30)).unwrap();
-        Self { matrix, connection }
-    }
-
-    fn rows_under(&self, folder: &str) -> i64 {
-        self.connection
-            .query_row(
-                "SELECT count(*) FROM files WHERE current_path = ?1",
-                [self.matrix.file(folder).to_str().unwrap()],
-                |row| row.get(0),
-            )
-            .unwrap()
-    }
-
-    fn versions_under(&self, folder: &str) -> i64 {
-        self.connection
-            .query_row(
-                "SELECT count(*) FROM versions JOIN files ON files.id = versions.file_id
-                  WHERE files.current_path = ?1",
-                [self.matrix.file(folder).to_str().unwrap()],
-                |row| row.get(0),
-            )
-            .unwrap()
-    }
-
-    /// The rows of `real`'s file, as kept through the `alias` link to its folder.
-    fn respell_real(&self) {
-        self.connection
-            .execute(
-                "UPDATE files SET current_path = ?1 WHERE current_path = ?2",
-                [
-                    self.matrix.file("alias").to_str().unwrap(),
-                    self.matrix.file("real").to_str().unwrap(),
-                ],
-            )
-            .unwrap();
-    }
+    assert_eq!(matrix.ids("moved"), listed);
 }
 
 /// Requests that read the disk follow a link and stay inside the source. A restore through a link put in place of a folder that
