@@ -230,7 +230,7 @@ fn reindex_root_absolute_and_checked() {
 }
 
 /// `--under` names a folder the way the shell does, relative to where the
-/// command runs.
+/// command runs, `..` included.
 #[test]
 fn under_relative_to_working_directory() {
     let base = scratch::scratch_dir("bs-cli-under");
@@ -245,16 +245,19 @@ fn under_relative_to_working_directory() {
         &xdg_storage_home,
         &["reindex", home.to_str().unwrap()],
     );
-    let output = big_search(&home, &xdg_storage_home, &["report", "--under", "docs"])
-        .current_dir(&home)
-        .output()
-        .unwrap();
-    let hits = String::from_utf8(output.stdout).unwrap();
     let file = fs::canonicalize(home.join("docs/report.txt")).unwrap();
-    assert_eq!(
-        hits.lines().map(Path::new).collect::<Vec<_>>(),
-        [file.as_path()]
-    );
+    for (folder, working) in [("docs", home.clone()), ("../docs", home.join("docs"))] {
+        let output = big_search(&home, &xdg_storage_home, &["report", "--under", folder])
+            .current_dir(&working)
+            .output()
+            .unwrap();
+        let hits = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            hits.lines().map(Path::new).collect::<Vec<_>>(),
+            [file.as_path()],
+            "{folder}"
+        );
+    }
     let _ = fs::remove_dir_all(&base);
 }
 

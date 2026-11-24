@@ -294,14 +294,26 @@ fn parse_query(tokens: &[String]) -> Search {
 }
 
 /// `dir` as an absolute folder, relative ones read against the working
-/// directory as the shell would; catalogued paths are all absolute. Lexical, so
-/// the folder of an unplugged disk still names its offline entries.
+/// directory as the shell would, `..` dropping the component before it like
+/// `cd`; catalogued paths are all absolute. Lexical, so the folder of an
+/// unplugged disk still names its offline entries.
 fn folder_from_cwd(dir: &str) -> String {
-    match std::path::absolute(dir).map(|path| path.into_os_string().into_string()) {
-        Ok(Ok(path)) => path,
-        // No working directory, or one whose name is not UTF-8: as typed.
-        _ => dir.to_owned(),
+    // No working directory, or one whose name is not UTF-8: as typed.
+    let Ok(absolute) = std::path::absolute(dir) else {
+        return dir.to_owned();
+    };
+    let mut folder = PathBuf::new();
+    for part in absolute.components() {
+        if part == std::path::Component::ParentDir {
+            folder.pop();
+        } else {
+            folder.push(part);
+        }
     }
+    folder
+        .into_os_string()
+        .into_string()
+        .unwrap_or_else(|_| dir.to_owned())
 }
 
 /// `count`: print how many files are cataloged. `--under DIR` scopes the tally.
