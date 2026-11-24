@@ -289,10 +289,14 @@ store, 1.6 MB of stored paths, so it stays as is.
 ## 4. Scan
 
 `scan.rs` walks each root with the `ignore` crate's `WalkBuilder`, the walker
-behind `fd` and `rg`: hidden entries are skipped, every gitignore source applies
-(the repository's, the global one, `.git/info/exclude`, parent folders), and the
-effective ignore file, the built-in defaults followed by the user's
-`~/.config/big-search/ignore` so the user's lines win, takes precedence.
+behind `fd` and `rg`: hidden entries are skipped, `.ignore` files apply, every
+gitignore source applies inside a repository (the repository's, the global one,
+`.git/info/exclude`, parent folders), and the effective ignore file, the
+built-in defaults followed by the user's `~/.config/big-search/ignore` so the
+user's lines win, takes precedence: no folder's file brings back what it leaves
+out. Its rules are anchored at the source holding each entry, so a source
+nested in another reads `/Archive/` as its own `Archive`. The watcher asks the
+same rules about each path an event names (`scan::Scope`, `walk_ignored`).
 Symlinks are never followed during the walk; a symlinked folder at the top of a
 root is resolved into a root of its own by `scan_roots::resolve_roots` according
 to the symlink policy, and network mounts, virtual mounts and operating-system

@@ -545,8 +545,12 @@ fn catalog_content_batch_limit() -> usize {
         .unwrap_or(DEFAULT_CATALOG_CONTENT_BATCH)
 }
 
-/// Forget what the content pass knows about one path, so the next pass reads it
-/// again although neither its size nor its modification time changed.
+/// The `(mtime, size)` a content row is given so the next pass reads its file
+/// again: no file has it, so the row matches no catalogue entry.
+const STALE_CONTENT: (i64, u64) = (i64::MIN, 0);
+
+/// Make the content pass read one path again although neither its size nor its
+/// modification time changed.
 ///
 /// This is the whole shape of a tag write. A tag lives in the `user.xdg.tags`
 /// extended attribute, and writing an extended attribute leaves size and
@@ -555,12 +559,20 @@ fn catalog_content_batch_limit() -> usize {
 /// the content index keeps its own record, and the tag token lives there.
 /// Without this, the forced reindex commits a name-index document with nothing
 /// new in it, the content pass declines the work, and the tag is never findable.
-pub(crate) fn forget_content_state(path: &Path) -> Result<()> {
+///
+/// The row stays, only marked stale: it is what [`prune_orphaned_content`]
+/// finds the document by when the path leaves the catalogue before the pass
+/// reads it again.
+pub(crate) fn mark_content_stale(path: &Path) -> Result<()> {
     let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
         crate::catalogue::CONTENT_NAMESPACE,
     );
-    content_state.remove(path);
+    if !content_state.contains(path) {
+        return Ok(());
+    }
+    let (mtime, size) = STALE_CONTENT;
+    content_state.set(path, mtime, size);
     content_state.persist()
 }
 

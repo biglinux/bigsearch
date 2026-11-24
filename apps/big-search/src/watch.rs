@@ -462,9 +462,9 @@ impl WatchLoop<'_> {
         // The content index keeps its own record of the same path, and
         // the only reason to ask for a forced reindex is a change the
         // file's size and modification time do not show, such as a tag. Left
-        // in place, that record makes the content pass skip the file and
+        // as it is, that record makes the content pass skip the file and
         // the tag never becomes searchable.
-        content::forget_content_state(&path).context("forget content state")?;
+        content::mark_content_stale(&path).context("mark content stale")?;
         let mut pass = ReconcilePass {
             writer: active_index_writer(&mut self.writer),
             f: &self.f,
@@ -483,6 +483,9 @@ impl WatchLoop<'_> {
                 .context("commit forced reindex")?;
             recycle_background_writer(&self.index, &mut self.writer)
                 .context("recycle index writer")?;
+        }
+        if outcome.deleted {
+            self.content_backfill.note_deletion();
         }
         self.watches.persist()?;
         if outcome.state_changed {
@@ -775,7 +778,7 @@ fn rebuild(
 /// folder among `watched`, which has a pass of its own, only gets its row
 /// refreshed; any other is walked whole.
 fn reconcile(
-    writer: &IndexWriter,
+    writer: &mut IndexWriter,
     f: &Fields,
     watches: &mut Watches,
     state: &mut State,
@@ -802,7 +805,7 @@ fn reconcile(
 
 /// One batch's reconcile: what stays the same from path to path.
 struct ReconcilePass<'a> {
-    writer: &'a IndexWriter,
+    writer: &'a mut IndexWriter,
     f: &'a Fields,
     scope: &'a scan::Scope,
     watched: Option<&'a HashSet<PathBuf>>,
@@ -833,7 +836,7 @@ impl ReconcilePass<'_> {
         let recorded = state.recorded(path);
         let judged = recorded.filter(|_| !self.forced);
         let out_of_scope = self.scope.excluded(path, is_dir)
-            || (judged.is_none() && scan::repo_ignored(path, is_dir));
+            || (judged.is_none() && scan::walk_ignored(path, is_dir));
         if out_of_scope && recorded.is_none() {
             return Ok(()); // out of scope and never catalogued: nothing to do
         }
@@ -906,23 +909,32 @@ impl ReconcilePass<'_> {
         let own_pass =
             recorded.is_some() && self.watched.is_some_and(|watched| watched.contains(path));
         if metadata.is_dir() && !own_pass {
-            // New or moved-in dir: watch it before reading it, and each
-            // subfolder as the walk reaches it, so an entry created during the
-            // walk is either read or reported.
-            watches.watch(path);
-            let subtree_outcome = scan::reconcile_subtree_inline(
-                self.writer,
-                self.f,
-                state,
-                self.scope,
-                path,
-                &mut |dir| {
-                    watches.watch(dir);
-                },
-            )?;
+            let subtree_outcome = self.walk_folder(watches, state, path)?;
             self.outcome.absorb(subtree_outcome);
         }
         Ok(())
+    }
+
+    /// A new or moved-in folder: watched before it is read, and each subfolder
+    /// as the walk reaches it, so an entry created during the walk is either
+    /// read or reported. A forced one is judged whole again: what the walk no
+    /// longer reaches leaves the folder list with its rows.
+    fn walk_folder(
+        &mut self,
+        watches: &mut Watches,
+        state: &mut State,
+        path: &Path,
+    ) -> Result<scan::ReconcileOutcome> {
+        if self.forced {
+            watches.dirs.remove_tree(path);
+            return scan::reconcile_folder(self.writer, self.f, state, path, &mut |dir| {
+                watches.watch(dir);
+            });
+        }
+        watches.watch(path);
+        scan::reconcile_subtree_inline(self.writer, self.f, state, self.scope, path, &mut |dir| {
+            watches.watch(dir);
+        })
     }
 }
 

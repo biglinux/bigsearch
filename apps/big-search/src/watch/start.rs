@@ -250,7 +250,7 @@ pub(super) fn catch_up_at_start(
 
 /// Each replaced folder leaves with its tree, then is read as new.
 fn read_replaced_anew(
-    index_writer: &IndexWriter,
+    index_writer: &mut IndexWriter,
     f: &Fields,
     watches: &mut Watches,
     state: &mut State,

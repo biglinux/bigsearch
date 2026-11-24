@@ -9,33 +9,34 @@ use std::path::{Path, PathBuf};
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
 mod scope;
-pub use scope::{Scope, is_hidden, repo_ignored, seed_user_ignore, write_effective_ignore};
+pub use scope::{
+    Scope, is_hidden, repo_ignored, seed_user_ignore, walk_ignored, write_effective_ignore,
+};
 
 const STATE_FLUSH_ROWS: usize = 2048;
 /// Paths read from each side per page when a pass compares the disk with the
 /// catalogue: bounded memory on a catalogue of millions.
 const SCAN_PAGE: usize = 2048;
 
-/// `ignore` walker: skip hidden + every gitignore source + our effective ignore.
+/// `ignore` walker: skip hidden entries, every folder's ignore files and the
+/// `scope` rules, which the walker applies after the folders' files so that
+/// none of those brings back what the rules leave out.
 /// Symlinks are never followed during the walk (`follow_links(false)`); symlinked
 /// directories the user placed at a scan root are instead resolved
 /// into separate roots by [`crate::scan_roots::resolve_roots_with_policy`], which avoids chasing the thousands
 /// of deep symlinks a tree contains (and the loops/duplication that brings).
-fn walker(root: &Path) -> ignore::Walk {
+fn walker(root: &Path, scope: &Scope) -> ignore::Walk {
+    let scope = scope.clone();
     let mut b = WalkBuilder::new(root);
     b.hidden(true) // skip dotfiles/dirs: churny and never indexed
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .parents(true)
-        .follow_links(false);
-    let eff = crate::config::effective_ignore();
-    if eff.exists() {
-        // `add_ignore` anchors the rules at the walker's current folder, the
-        // process's by default: anchor them at the source, as `Scope` does.
-        b.current_dir(scope::rules_root(root));
-        b.add_ignore(&eff); // highest precedence, prunes the noise dirs everywhere
-    }
+        .follow_links(false)
+        .filter_entry(move |entry| {
+            !scope.excludes_entry(entry.path(), entry.file_type().is_some_and(|t| t.is_dir()))
+        });
     b.build()
 }
 
@@ -195,10 +196,10 @@ pub(crate) fn reconcile_subtree_inline(
     let mut outcome = ReconcileOutcome::default();
     // The walker exempts its own root from the ignore rules, so an excluded
     // directory would otherwise be indexed whole the moment it is created.
-    if scope.excluded(root, true) || (!state.contains(root) && repo_ignored(root, true)) {
+    if scope.excluded(root, true) || (!state.contains(root) && walk_ignored(root, true)) {
         return Ok(outcome);
     }
-    for entry in walker(root) {
+    for entry in walker(root, scope) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -238,7 +239,7 @@ pub(crate) fn reconcile_subtree_inline(
 /// Every visible directory in `root` including `root` itself (watch targets).
 pub fn visible_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    for entry in walker(root).flatten() {
+    for entry in walker(root, &Scope::compile()).flatten() {
         if entry.file_type().is_some_and(|t| t.is_dir()) {
             dirs.push(entry.path().to_path_buf());
         }
@@ -260,7 +261,7 @@ pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncO
     let f = crate::index::fields(index)?;
     let mut writer = crate::index::bulk_writer(index)?;
     let mut visible_dirs = Vec::new();
-    let outcome = reconcile_roots(&mut writer, &f, state, roots, &mut |dir| {
+    let outcome = reconcile_roots(&mut writer, &f, state, roots, None, &mut |dir| {
         visible_dirs.push(dir.to_path_buf())
     })?;
     state.persist()?;
@@ -282,12 +283,34 @@ pub(crate) fn reconcile_inline(
     roots: &[PathBuf],
     on_dir: &mut dyn FnMut(&Path),
 ) -> Result<ReconcileOutcome> {
-    reconcile_roots(writer, f, state, roots, on_dir)
+    reconcile_roots(writer, f, state, roots, None, on_dir)
+}
+
+/// The full pass limited to `folder`, a catalogued folder in scope: what left
+/// it, or left the scope, goes with its rows, as a walk of the sources would
+/// drop it. The sources nested in it are walked as their own roots, since the
+/// rules anchored at them may let in what the folder's walk leaves out.
+pub(crate) fn reconcile_folder(
+    writer: &mut IndexWriter,
+    f: &Fields,
+    state: &mut State,
+    folder: &Path,
+    on_dir: &mut dyn FnMut(&Path),
+) -> Result<ReconcileOutcome> {
+    let mut roots = vec![folder.to_path_buf()];
+    roots.extend(
+        crate::settings::available_sources()
+            .into_iter()
+            .map(|source| source.path.clone())
+            .filter(|source| source != folder && source.starts_with(folder)),
+    );
+    reconcile_roots(writer, f, state, &roots, Some(folder), on_dir)
 }
 
 /// One pass over `roots`: walk the disk recording each entry's `(mtime, size)`,
 /// then compare that with the catalogue in path order (see
-/// [`State::scan_changes_after`]) and update name documents and `state`.
+/// [`State::scan_changes_after`]) and update name documents and `state`. With
+/// `within`, only the catalogue rows below that folder are compared.
 /// `on_dir` gets every directory walked.
 ///
 /// The index is committed inside the pass, before the catalogue: a catalogue
@@ -297,24 +320,36 @@ fn reconcile_roots(
     f: &Fields,
     state: &mut State,
     roots: &[PathBuf],
+    within: Option<&Path>,
     on_dir: &mut dyn FnMut(&Path),
 ) -> Result<ReconcileOutcome> {
     let mut outcome = ReconcileOutcome::default();
+    let scope = Scope::compile();
     state.scan_pass(|state| {
         // The comparison reads the catalogue as persisted.
         state.persist()?;
         state.begin_scan()?;
-        outcome.unread = mark_walked_entries(state, roots, on_dir)?;
+        outcome.unread = mark_walked_entries(state, &scope, roots, on_dir)?;
         // Offline removable/network sources: keep their catalogue rather than treat
         // the unmounted tree as deleted, so their files stay findable (and, later,
         // are reported as living on that device).
-        state.mark_seen_prefixes(&retained_offline_roots())?;
+        let mut offline = retained_offline_roots();
+        offline.retain(|root| within.is_none_or(|folder| root.starts_with(folder)));
+        state.mark_seen_prefixes(&offline)?;
 
-        let mut after = Some(String::new());
-        while let Some(cursor) = after {
+        // The rows below a folder sort from `<folder>/` to the first one
+        // outside it.
+        let mut after = Some(within.map_or_else(String::new, |folder| {
+            format!("{}/", folder.to_string_lossy().trim_end_matches('/'))
+        }));
+        'pages: while let Some(cursor) = after {
             let (changes, next) = state.scan_changes_after(&cursor, SCAN_PAGE)?;
             after = next;
             for change in changes {
+                let (ScanChange::Seen { path, .. } | ScanChange::Gone(path)) = &change;
+                if within.is_some_and(|folder| !path.starts_with(folder)) {
+                    break 'pages;
+                }
                 apply_scan_change(writer, f, state, change, &mut outcome)?;
                 persist_state_if_needed(state)?;
             }
@@ -334,13 +369,14 @@ fn reconcile_roots(
 /// folder is no evidence that its files are gone.
 fn mark_walked_entries(
     state: &mut State,
+    scope: &Scope,
     roots: &[PathBuf],
     on_dir: &mut dyn FnMut(&Path),
 ) -> Result<bool> {
     let mut unread = false;
     for root in roots {
         on_dir(root);
-        for entry in walker(root) {
+        for entry in walker(root, scope) {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -374,7 +410,6 @@ fn mark_walked_entries(
                         continue;
                     }
                     // A failed lookup is no evidence the file is gone.
-                    state.mark_seen(path, None)?;
                     state.mark_seen(path, None)?;
                     unread |= kind != Some(PermissionDenied);
                     continue;
