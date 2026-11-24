@@ -228,3 +228,52 @@ fn reindex_root_absolute_and_checked() {
     assert_eq!(run(&home, &xdg_storage_home, &["count"]), "1");
     let _ = fs::remove_dir_all(&base);
 }
+
+/// `--under` names a folder the way the shell does, relative to where the
+/// command runs.
+#[test]
+fn under_relative_to_working_directory() {
+    let base = scratch::scratch_dir("bs-cli-under");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    fs::create_dir_all(home.join("docs")).unwrap();
+    fs::create_dir_all(&xdg_storage_home).unwrap();
+    fs::write(home.join("docs/report.txt"), "x").unwrap();
+    fs::write(home.join("report.txt"), "x").unwrap();
+    run(
+        &home,
+        &xdg_storage_home,
+        &["reindex", home.to_str().unwrap()],
+    );
+    let output = big_search(&home, &xdg_storage_home, &["report", "--under", "docs"])
+        .current_dir(&home)
+        .output()
+        .unwrap();
+    let hits = String::from_utf8(output.stdout).unwrap();
+    let file = fs::canonicalize(home.join("docs/report.txt")).unwrap();
+    assert_eq!(
+        hits.lines().map(Path::new).collect::<Vec<_>>(),
+        [file.as_path()]
+    );
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// The commands that need the service say so when it is not running, instead
+/// of a bare connection error that reads as the named file missing.
+#[test]
+fn versions_without_service_named() {
+    let base = scratch::scratch_dir("bs-cli-nodaemon");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(xdg_storage_home.join("run")).unwrap();
+    for command in ["versions", "forget-versions"] {
+        let output = big_search(&home, &xdg_storage_home, &[command, "/etc/hosts"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{command}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("daemon"), "{command}: {stderr}");
+    }
+    let _ = fs::remove_dir_all(&base);
+}

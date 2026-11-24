@@ -268,7 +268,7 @@ fn parse_query(tokens: &[String]) -> Search {
             "-a" | "--all" => limit = 100_000,
             "-p" | "--pages" => pages = true,
             "--origin" => include_origin = true,
-            "--under" => under = it.next().cloned(),
+            "--under" => under = it.next().map(|dir| folder_from_cwd(dir)),
             "--ext" | "-e" => {
                 if let Some(e) = it.next() {
                     ext.push(e.trim_start_matches('.').to_ascii_lowercase());
@@ -290,6 +290,17 @@ fn parse_query(tokens: &[String]) -> Search {
         under,
         ext,
         query: parts.join(" "),
+    }
+}
+
+/// `dir` as an absolute folder, relative ones read against the working
+/// directory as the shell would; catalogued paths are all absolute. Lexical, so
+/// the folder of an unplugged disk still names its offline entries.
+fn folder_from_cwd(dir: &str) -> String {
+    match std::path::absolute(dir).map(|path| path.into_os_string().into_string()) {
+        Ok(Ok(path)) => path,
+        // No working directory, or one whose name is not UTF-8: as typed.
+        _ => dir.to_owned(),
     }
 }
 
@@ -418,9 +429,11 @@ fn cmd_versions(tokens: &[String]) -> Result<()> {
         return Ok(());
     };
     let client = daemon_client()?;
-    let answer = client
-        .versions(path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let answer = match client.versions(path) {
+        Ok(answer) => answer,
+        Err(big_indexd_client::ClientError::Io(_)) => return Err(no_daemon()),
+        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+    };
     if let Some(reason) = answer.unavailable {
         println!("{path}: {}", dim(explain_unavailable(reason)));
         return Ok(());
@@ -451,9 +464,11 @@ fn cmd_forget_versions(tokens: &[String]) -> Result<()> {
         return Ok(());
     };
     let client = daemon_client()?;
-    client
-        .forget_versions(path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    match client.forget_versions(path) {
+        Ok(()) => {}
+        Err(big_indexd_client::ClientError::Io(_)) => return Err(no_daemon()),
+        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+    }
     println!("{} {path}", green("forgotten"));
     Ok(())
 }
