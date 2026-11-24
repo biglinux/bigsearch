@@ -450,8 +450,8 @@ struct PathMatrix {
     docs: PathBuf,
     outside: PathBuf,
     sock: PathBuf,
-    _daemon: KillOnDrop,
-    _run: scratch::ScratchDir,
+    daemon: std::cell::RefCell<KillOnDrop>,
+    run: scratch::ScratchDir,
 }
 
 impl PathMatrix {
@@ -493,9 +493,23 @@ impl PathMatrix {
             docs,
             outside,
             sock,
-            _daemon: daemon,
-            _run: run,
+            daemon: std::cell::RefCell::new(daemon),
+            run,
         }
+    }
+
+    /// Stop the daemon and start it again, as an upgrade does.
+    fn restart(&self) {
+        let mut daemon = self.daemon.borrow_mut();
+        let _ = daemon.0.kill();
+        let _ = daemon.0.wait();
+        let _ = std::fs::remove_file(&self.sock);
+        *daemon = KillOnDrop(
+            env_cmd(&["daemon"], &self.home, &self.data, &self.run)
+                .spawn()
+                .unwrap(),
+        );
+        assert!(wait_socket(&self.sock), "daemon never bound socket");
     }
 
     fn file(&self, folder: &str) -> PathBuf {
@@ -555,11 +569,9 @@ impl Drop for PathMatrix {
     }
 }
 
-/// Guards: privacy action: every request naming a path answers for the
-/// document that path names, whatever symlinks, removals or replacements
-/// happened on the way: forgetting through one spelling never erases another
-/// document's versions or leaves its own, a restore never runs through a link
-/// put in place of a folder, and nothing outside a source is read.
+/// Guards: privacy action: a request naming a path answers for the document
+/// it names whatever symlinks, removals or replacements happened on the way,
+/// and nothing outside a source is read.
 #[test]
 fn client_path_matrix() {
     let matrix = PathMatrix::start();
@@ -604,30 +616,47 @@ fn versions_by_spelling(matrix: &PathMatrix) -> Vec<i64> {
     other
 }
 
-/// Rows a daemon kept under a symlinked folder's spelling, before client paths
-/// were keyed where they lead, move there with the restore through it: they
-/// were kept for the very file the restore overwrites.
+/// Rows a daemon kept under a symlinked folder's spelling, before client
+/// paths were keyed where they lead, join the real path's rows at the next
+/// start whatever device they recorded, a state kept under both once.
 fn legacy_alias_rows(matrix: &PathMatrix) {
     let real = matrix.ids("real");
     let history = LegacyRows::open(matrix);
+    let versions = history.versions_under("real");
     history.respell_real();
-    assert_eq!(matrix.ids("alias"), real);
+    history
+        .connection
+        .execute(
+            "UPDATE files SET dev = dev + 1 WHERE current_path = ?1",
+            [matrix.file("alias").to_str().unwrap()],
+        )
+        .unwrap();
+    // A row of its own under `real`, holding the state on disk, which the
+    // alias rows hold too.
     assert_answers(
         &matrix.sock,
-        &[(path_cmd("save_version", &matrix.file("alias")), None)],
+        &[(path_cmd("save_version", &matrix.file("real")), None)],
     );
-    assert_eq!(
-        (history.rows_under("alias"), history.rows_under("real")),
-        (0, 1)
+    matrix.restart();
+    assert!(
+        settles(|| history.rows_under("alias") == 0),
+        "the alias rows never merged"
     );
+    assert_eq!(history.rows_under("real"), 1);
+    assert_eq!(history.versions_under("real"), versions);
+    assert_eq!(matrix.ids("alias"), real);
     assert_eq!(matrix.ids("real"), real);
+    assert_answers(
+        &matrix.sock,
+        &[(path_cmd("forget_versions", &matrix.file("alias")), None)],
+    );
+    assert_eq!(history.rows_under("real"), 0);
+    matrix.keep_one("real", "real again");
 }
 
-/// Legacy alias rows of a file an editor has saved since: the new inode is
-/// heard under the real path only, so their identity is stale. They move with
-/// the restore when one of their version states is also kept under the real
-/// path; with none, the restore is refused naming both paths, and forgetting
-/// through the alias spelling is the way out.
+/// Legacy alias rows of a file an editor has saved since carry a stale inode:
+/// they merge at the start when one of their states is also kept under the
+/// real path; with none, a restore through the alias is refused naming both.
 fn legacy_alias_after_save(matrix: &PathMatrix) {
     let history = LegacyRows::open(matrix);
     let (alias, real) = (matrix.file("alias"), matrix.file("real"));
@@ -641,11 +670,12 @@ fn legacy_alias_after_save(matrix: &PathMatrix) {
     // Keeps the state on disk, which the alias rows hold too, under `real`.
     assert_answers(&matrix.sock, &[(path_cmd("save_version", &real), None)]);
     editor_save("real saved by an editor");
-    assert_answers(&matrix.sock, &[(path_cmd("save_version", &alias), None)]);
-    assert_eq!(
-        (history.rows_under("alias"), history.rows_under("real")),
-        (0, 1)
+    matrix.restart();
+    assert!(
+        settles(|| history.rows_under("alias") == 0),
+        "the alias rows never merged"
     );
+    assert_eq!(history.rows_under("real"), 1);
     let listed = matrix.ids("real");
     assert!(
         kept.iter().all(|id| listed.contains(id)),
@@ -693,6 +723,17 @@ impl<'a> LegacyRows<'a> {
         self.connection
             .query_row(
                 "SELECT count(*) FROM files WHERE current_path = ?1",
+                [self.matrix.file(folder).to_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn versions_under(&self, folder: &str) -> i64 {
+        self.connection
+            .query_row(
+                "SELECT count(*) FROM versions JOIN files ON files.id = versions.file_id
+                  WHERE files.current_path = ?1",
                 [self.matrix.file(folder).to_str().unwrap()],
                 |row| row.get(0),
             )

@@ -273,40 +273,79 @@ fn kept_under(conn: &Connection, path: &Path, id: i64, file: &Path) {
     .unwrap();
     kept_at(conn, id, id, &format!("object-{id}"));
 }
+/// The start's merge, with every `alias` spelling leading to `real`.
+fn merge_alias(store: History) -> History {
+    let history: SharedHistory = std::sync::Arc::new(std::sync::Mutex::new(store));
+    worker::merge_spellings(&history, |path| {
+        Some(PathBuf::from(path.to_str()?.replace("/alias/", "/real/")))
+    })
+    .unwrap();
+    std::sync::Arc::into_inner(history)
+        .unwrap()
+        .into_inner()
+        .unwrap()
+}
 
-/// Rows kept under a symlinked folder's spelling move to where it leads when
-/// they were kept for the file there, and stay when nothing is there.
+/// Rows kept under a symlinked folder's spelling join the real path's rows
+/// when they were kept for the file there, whatever device they recorded;
+/// a version of a state the real path holds goes with its object. Rows with
+/// no file where they lead stay.
 #[test]
-fn spelling_adopted_by_identity() {
-    let (dir, store, real, alias) = alias_fixture("bs-history-adopt");
+fn spelling_merged_by_identity() {
+    let (dir, store, real, alias) = alias_fixture("bs-history-merge");
+    let conn = store.conn.as_ref().unwrap();
+    kept_under(conn, &alias, 1, &real);
+    conn.execute("UPDATE files SET dev = dev + 1 WHERE id = 1", [])
+        .unwrap();
+    kept_under(conn, &real, 2, &real);
+    kept_at(conn, 1, 2, "held-1");
+    std::fs::create_dir_all(dir.join("objects")).unwrap();
+    std::fs::write(dir.join("objects/held-1"), "v").unwrap();
+    let missing = dir.join("alias/missing.txt");
+    kept_under(conn, &missing, 3, &real);
+
+    let store = merge_alias(store);
     let conn = store.conn.as_ref().unwrap();
     let real_key = real.to_str().unwrap().to_string();
-
-    kept_under(conn, &alias, 1, &real);
-    kept_under(conn, &real, 2, &real);
-    store.adopt_spelling(&alias, &real).unwrap();
+    let missing_key = missing.to_str().unwrap().to_string();
     assert_eq!(
         version_owners(conn),
         [
             (real_key.clone(), "object-1".to_string()),
             (real_key, "object-2".to_string()),
+            (missing_key, "object-3".to_string()),
         ]
     );
+    assert!(!dir.join("objects/held-1").exists());
+    assert_eq!(file_id_for_path(conn, &real).unwrap(), Some(2));
+}
 
-    let missing = dir.join("alias/missing.txt");
-    kept_under(conn, &missing, 3, &real);
-    store
-        .adopt_spelling(&missing, &dir.join("real/missing.txt"))
+/// With no row under the real path, the spelling's row moves there and takes
+/// the identity of the file there.
+#[test]
+fn spelling_renamed_to_real_path() {
+    let (_dir, store, real, alias) = alias_fixture("bs-history-merge-alone");
+    let conn = store.conn.as_ref().unwrap();
+    kept_under(conn, &alias, 1, &real);
+    conn.execute("UPDATE files SET dev = 0", []).unwrap();
+
+    let store = merge_alias(store);
+    let conn = store.conn.as_ref().unwrap();
+    assert_eq!(file_id_for_path(conn, &real).unwrap(), Some(1));
+    let (dev, ..) = identity(&std::fs::symlink_metadata(&real).unwrap());
+    let stored: i64 = conn
+        .query_row("SELECT dev FROM files WHERE id = 1", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(file_id_for_path(conn, &missing).unwrap(), Some(3));
+    assert_eq!(stored, dev);
 }
 
 /// After an editor's save gave the file a new inode, the rows kept under the
-/// alias spelling move only when a state of theirs is also kept under the
-/// real path; otherwise the restore is refused naming both paths.
+/// alias spelling merge only when a state of theirs is also kept under the
+/// real path; until then a restore through the alias is refused naming both
+/// paths.
 #[test]
-fn stale_spelling_adopted_by_state() {
-    let (_dir, store, real, alias) = alias_fixture("bs-history-adopt-saved");
+fn stale_spelling_merged_by_state() {
+    let (_dir, store, real, alias) = alias_fixture("bs-history-merge-saved");
     let conn = store.conn.as_ref().unwrap();
     kept_under(conn, &alias, 1, &real);
     kept_under(conn, &real, 2, &real);
@@ -314,15 +353,21 @@ fn stale_spelling_adopted_by_state() {
     std::fs::write(&saved, "saved by an editor").unwrap();
     std::fs::rename(&saved, &real).unwrap();
 
-    let refusal = store.adopt_spelling(&alias, &real).unwrap_err().to_string();
+    let store = merge_alias(store);
+    let conn = store.conn.as_ref().unwrap();
+    assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
+    let refusal = store
+        .refuse_moved_spelling(&alias, &real)
+        .unwrap_err()
+        .to_string();
     let named = format!("{} leads to {} now", alias.display(), real.display());
     assert!(refusal.contains(&named), "{refusal}");
-    assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
 
     kept_at(conn, 2, 1, "object-2-again");
-    store.adopt_spelling(&alias, &real).unwrap();
+    let store = merge_alias(store);
+    let conn = store.conn.as_ref().unwrap();
     let real_key = real.to_str().unwrap();
-    let owners: Vec<(String, String)> = ["object-1", "object-2", "object-2-again"]
+    let owners: Vec<(String, String)> = ["object-2", "object-2-again"]
         .into_iter()
         .map(|object| (real_key.to_string(), object.to_string()))
         .collect();

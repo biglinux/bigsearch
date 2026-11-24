@@ -101,6 +101,49 @@ fn note_presence(
     Ok(false)
 }
 
+/// Merge each row whose key `resolve` leads elsewhere inside a source (kept
+/// through a symlinked folder, `.` or a repeated `/`) into where it leads,
+/// when kept for the file there. Locked as [`expire_missing`] is.
+pub(super) fn merge_spellings(
+    history: &SharedHistory,
+    resolve: impl Fn(&Path) -> Option<PathBuf>,
+) -> Result<()> {
+    let files: Vec<(i64, String)> = {
+        let store = history.lock().expect("versions store lock");
+        let Some(conn) = &store.conn else {
+            return Ok(());
+        };
+        conn.prepare("SELECT id, current_path FROM files")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let mut merged = 0usize;
+    for (id, spelled) in files {
+        let Some(real) =
+            resolve(Path::new(&spelled)).filter(|real| real.as_os_str() != spelled.as_str())
+        else {
+            continue;
+        };
+        // Only onto a file: with nothing there the rows stay where a restore
+        // through their spelling finds them, and lose nothing.
+        let Ok(metadata) = std::fs::symlink_metadata(&real) else {
+            continue;
+        };
+        if metadata.is_file()
+            && history
+                .lock()
+                .expect("versions store lock")
+                .merge_spelling(id, &spelled, &real, &metadata)?
+        {
+            merged += 1;
+        }
+    }
+    if merged > 0 {
+        log::info!("versions of {merged} documents moved to the path they are kept under now");
+    }
+    Ok(())
+}
+
 /// What the worker is waiting to save, and until when.
 pub struct Pending {
     deadlines: HashMap<PathBuf, std::time::Instant>,
@@ -347,15 +390,21 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
     }
 }
 
-/// Say once why versions are not kept here, and remove what a crash left.
+/// Say once why versions are not kept here, merge rows kept under another
+/// spelling, and remove what a crash left.
 fn report_and_tidy(history: &SharedHistory) {
-    let mut store = history.lock().expect("versions store lock");
-    if let Support::Unavailable(reason) = store.support()
+    let support = history.lock().expect("versions store lock").support();
+    if let Support::Unavailable(reason) = support
         && reason != Unavailable::Disabled
     {
         log::info!("earlier versions are not kept here: {}", reason.as_str());
     }
-    if let Err(error) = store.sweep_orphans() {
+    let resolve = |path: &Path| crate::settings::sources().resolved_client_path(path);
+    if let Err(error) = merge_spellings(history, resolve) {
+        log::warn!("could not merge versions kept under another path: {error:#}");
+    }
+    let swept = history.lock().expect("versions store lock").sweep_orphans();
+    if let Err(error) = swept {
         log::warn!("could not tidy the versions store: {error:#}");
     }
 }

@@ -112,6 +112,32 @@ pub(super) fn follow_rename(conn: &Connection, from: &Path, to: &Path) -> Result
     Ok(())
 }
 
+/// Move row `from`'s versions to row `into` and delete `from`, inside the
+/// caller's transaction. A version of a state `into` already holds is
+/// dropped; returns their objects, for the caller to remove after the commit.
+pub(super) fn join_row(conn: &Connection, from: i64, into: i64) -> Result<Vec<String>> {
+    let held: Vec<(i64, String)> = conn
+        .prepare(
+            "SELECT id, object FROM versions AS moved
+              WHERE file_id = ?1 AND EXISTS(SELECT 1 FROM versions AS kept
+                     WHERE kept.file_id = ?2 AND kept.mtime_s = moved.mtime_s
+                       AND kept.mtime_ns = moved.mtime_ns AND kept.size = moved.size)",
+        )?
+        .query_map(params![from, into], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut dropped = Vec::with_capacity(held.len());
+    for (version, object) in held {
+        conn.execute("DELETE FROM versions WHERE id = ?1", params![version])?;
+        dropped.push(object);
+    }
+    conn.execute(
+        "UPDATE versions SET file_id = ?2 WHERE file_id = ?1",
+        params![from, into],
+    )?;
+    conn.execute("DELETE FROM files WHERE id = ?1", params![from])?;
+    Ok(dropped)
+}
+
 /// The row for `path`. Rows are keyed by UTF-8 text, so a path that is not
 /// UTF-8 has none: a lossy key would name a different file.
 pub(super) fn file_id_for_path(conn: &Connection, path: &Path) -> Result<Option<i64>> {

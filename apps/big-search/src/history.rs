@@ -50,8 +50,8 @@ pub use worker::{HistoryEvent, Pending, run_worker};
 use disk::disk_capacity;
 use eligibility::{eligible_metadata, eligible_name, git_work_tree};
 use store::{
-    file_id_for_path, first_stored, follow_rename, is_live_session, now_secs, object_name,
-    open_store, prepare_store,
+    file_id_for_path, first_stored, follow_rename, is_live_session, join_row, now_secs,
+    object_name, open_store, prepare_store,
 };
 
 /// Why a version was written.
@@ -325,62 +325,96 @@ impl History {
         follow_rename(conn, from, to)
     }
 
-    /// Settle the versions kept under `spelled`, a path that leads to
-    /// `resolved` now, before a restore through it.
-    ///
-    /// Kept for the file that is at `resolved` (a daemon that keyed client
-    /// paths as spelled kept them under a symlinked folder), they move to
-    /// `resolved`. That file is the one with their identity, or, since no
-    /// watcher event refreshes that identity after an editor's save, the one
-    /// whose versions hold a state theirs hold too (same mtime and size). With
-    /// nothing at `resolved` a restore loses nothing, and they stay where they
-    /// are.
+    /// Merge row `id`, kept under `spelled`, into `real`, where it leads now,
+    /// when kept for the file there (`metadata`): the same inode and birth
+    /// time, not device (removable media and btrfs subvolumes change it), or,
+    /// since no event refreshes a spelling's identity after an editor's save,
+    /// a version state kept under both. Whether it merged; `false` too when
+    /// the row changed since read.
     ///
     /// # Errors
     ///
-    /// Returns an error when another file is at `resolved`: the restore that
-    /// follows would write a version of the file that was at `spelled` over
-    /// it. Also when the versions database cannot be read or changed.
-    pub fn adopt_spelling(&self, spelled: &Path, resolved: &Path) -> Result<()> {
+    /// Returns an error when the versions database cannot be read or changed.
+    pub(crate) fn merge_spelling(
+        &self,
+        id: i64,
+        spelled: &str,
+        real: &Path,
+        metadata: &std::fs::Metadata,
+    ) -> Result<bool> {
+        let (Some(conn), Some(real_key)) = (&self.conn, real.to_str()) else {
+            return Ok(false);
+        };
+        let (dev, ino, born) = identity(metadata);
+        let transaction = conn.unchecked_transaction()?;
+        let target = file_id_for_path(conn, real)?;
+        let same: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND current_path = ?2
+                             AND ino = ?3 AND (born IS NULL OR ?4 IS NULL OR born = ?4))
+                 OR EXISTS(SELECT 1 FROM files
+                             JOIN versions AS spelled ON spelled.file_id = files.id
+                             JOIN versions AS kept USING (mtime_s, mtime_ns, size)
+                            WHERE files.id = ?1 AND files.current_path = ?2
+                              AND kept.file_id = ?5)",
+            params![id, spelled, ino, born, target],
+            |row| row.get(0),
+        )?;
+        if !same {
+            return Ok(false);
+        }
+        let dropped = if let Some(target) = target {
+            join_row(conn, id, target)?
+        } else {
+            conn.execute(
+                "UPDATE files SET current_path = ?2, dev = ?3, ino = ?4, born = ?5,
+                                  missing_since = NULL
+                  WHERE id = ?1",
+                params![id, real_key, dev, ino, born],
+            )?;
+            Vec::new()
+        };
+        transaction.commit()?;
+        // A crash before the commit keeps rows and objects; one after it
+        // leaves objects without rows, which the orphan sweep removes.
+        for name in &dropped {
+            let _ = std::fs::remove_file(self.objects.join(name));
+        }
+        Ok(true)
+    }
+
+    /// Refuse a restore through `spelled` when versions are kept under it and
+    /// it leads to something at `resolved` now. The merge at start moved the
+    /// rows of every spelling kept for the file it leads to, so these are
+    /// another file's, and the restore would write one of them over it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal, or an error when the versions database or
+    /// `resolved` cannot be read.
+    pub fn refuse_moved_spelling(&self, spelled: &Path, resolved: &Path) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        let Some(file_id) = file_id_for_path(conn, spelled)? else {
+        if file_id_for_path(conn, spelled)?.is_none() {
             return Ok(());
-        };
-        let metadata = match std::fs::symlink_metadata(resolved) {
-            Ok(metadata) => metadata,
+        }
+        match std::fs::symlink_metadata(resolved) {
+            Ok(_) => anyhow::bail!(
+                "{} leads to {} now, not to the file its versions were kept from",
+                spelled.display(),
+                resolved.display()
+            ),
+            // Nothing there: the restore loses nothing.
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
                 ) =>
             {
-                return Ok(());
+                Ok(())
             }
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", resolved.display()));
-            }
-        };
-        let (dev, ino, born) = identity(&metadata);
-        let resolved_id = file_id_for_path(conn, resolved)?;
-        let same: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND dev = ?2 AND ino = ?3
-                             AND (born IS NULL OR ?4 IS NULL OR born = ?4))
-                 OR EXISTS(SELECT 1 FROM versions AS spelled
-                             JOIN versions AS kept USING (mtime_s, mtime_ns, size)
-                            WHERE spelled.file_id = ?1 AND kept.file_id = ?5)",
-            params![file_id, dev, ino, born, resolved_id],
-            |row| row.get(0),
-        )?;
-        if !same {
-            anyhow::bail!(
-                "{} leads to {} now, which is not the file its versions were kept from",
-                spelled.display(),
-                resolved.display()
-            );
+            Err(error) => Err(error).with_context(|| format!("read {}", resolved.display())),
         }
-        follow_rename(conn, spelled, resolved)
     }
 
     /// The earlier versions of one document, newest first.
