@@ -47,10 +47,9 @@ pub(super) fn eligible_metadata(path: &Path) -> Result<std::fs::Metadata, &'stat
     // The watcher's paths pass no link, but a folder on the way may have been
     // replaced by one since: the file there is another document, whose
     // version would join this path's history and take on its identity.
-    if path
-        .parent()
-        .is_none_or(|folder| std::fs::canonicalize(folder).ok().as_deref() != Some(folder))
-    {
+    let folder = path.parent().ok_or("it has no folder")?;
+    let real = std::fs::canonicalize(folder).map_err(|_| "its folder cannot be resolved")?;
+    if real != folder {
         return Err("a folder on its path is a link");
     }
     Ok(metadata)

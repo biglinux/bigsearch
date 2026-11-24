@@ -90,6 +90,11 @@ pub(super) fn open_store(path: &Path) -> Result<Connection> {
 /// history), its versions join `from`'s: they hold what the rename overwrote.
 /// Left alone, the unique path would refuse the move, and `from`'s row would
 /// expire with every version in it.
+///
+/// # Errors
+///
+/// Returns an error, moving nothing, when a `to` with a row to receive is not
+/// UTF-8: its key would name no file. Also when the database cannot be written.
 pub(super) fn follow_renames<'a>(
     conn: &Connection,
     moves: impl IntoIterator<Item = (&'a Path, &'a Path)>,
@@ -99,21 +104,33 @@ pub(super) fn follow_renames<'a>(
         let Some(from_id) = file_id_for_path(conn, from)? else {
             continue;
         };
-        if let Some(to_id) = file_id_for_path(conn, to)?
-            && to_id != from_id
-        {
-            conn.execute(
-                "UPDATE versions SET file_id = ?1 WHERE file_id = ?2",
-                params![from_id, to_id],
-            )?;
-            conn.execute("DELETE FROM files WHERE id = ?1", params![to_id])?;
+        let Some(key) = to.to_str() else {
+            anyhow::bail!(
+                "{} is not UTF-8, which versions are kept under",
+                to.display()
+            );
+        };
+        if let Some(to_id) = file_id_for_path(conn, to)? {
+            join_rows(conn, from_id, &[to_id])?;
         }
         conn.execute(
             "UPDATE files SET current_path = ?2, missing_since = NULL WHERE id = ?1",
-            params![from_id, to.to_string_lossy()],
+            params![from_id, key],
         )?;
     }
     transaction.commit()?;
+    Ok(())
+}
+
+/// Give `rows`' versions to the row `into` and delete those rows.
+pub(super) fn join_rows(conn: &Connection, into: i64, rows: &[i64]) -> Result<()> {
+    for &row in rows.iter().filter(|&&row| row != into) {
+        conn.execute(
+            "UPDATE versions SET file_id = ?1 WHERE file_id = ?2",
+            params![into, row],
+        )?;
+        conn.execute("DELETE FROM files WHERE id = ?1", params![row])?;
+    }
     Ok(())
 }
 

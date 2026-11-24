@@ -347,16 +347,17 @@ fn adoption_checks_each_identity_part() {
     }
 }
 
-/// A copy of `real` taken without the lock, as the worker takes it.
-fn copy_in_flight(store: &mut History, dir: &Path, real: &Path) -> VersionToCopy {
-    let object = dir.join("objects/ff/in-flight");
+/// A copy of `real` into the object `name`, taken without the lock, as the
+/// worker takes it.
+fn copy_in_flight(store: &mut History, dir: &Path, real: &Path, name: &str) -> VersionToCopy {
+    let object = dir.join("objects").join(name);
     std::fs::create_dir_all(object.parent().unwrap()).unwrap();
     std::fs::write(&object, "copied").unwrap();
     store.budget_unchecked = false;
     VersionToCopy {
         path: real.to_path_buf(),
         object,
-        name: "ff/in-flight".to_string(),
+        name: name.to_string(),
         metadata: std::fs::metadata(real).unwrap(),
         reason: Reason::Saved,
     }
@@ -373,7 +374,7 @@ fn copy_follows_rows_changed_meanwhile() {
         kept_under(conn, &alias, 1, &real);
         kept_under(conn, &real, 2, &real);
     }
-    let version = copy_in_flight(&mut store, &dir, &real);
+    let version = copy_in_flight(&mut store, &dir, &real, "ff/adopted");
     store.adopt_spelling(&alias, &real).unwrap();
     assert!(store.finish_version(version, Ok(())).unwrap());
     let owner: i64 = store
@@ -381,17 +382,96 @@ fn copy_follows_rows_changed_meanwhile() {
         .as_ref()
         .unwrap()
         .query_row(
-            "SELECT file_id FROM versions WHERE object = 'ff/in-flight'",
+            "SELECT file_id FROM versions WHERE object = 'ff/adopted'",
             [],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(owner, 1);
 
-    let version = copy_in_flight(&mut store, &dir, &real);
+    let version = copy_in_flight(&mut store, &dir, &real, "ff/forgotten");
     let object = version.object.clone();
     store.forget(&[&real], None).unwrap();
     assert!(!store.finish_version(version, Ok(())).unwrap());
     assert!(!object.exists());
     assert_eq!(kept_objects(&store), Vec::<String>::new());
+}
+
+/// Ids of the rows left, in order.
+fn row_ids(conn: &Connection) -> Vec<i64> {
+    conn.prepare("SELECT id FROM files ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// Guards: persisted data: a row kept under a path through a folder since
+/// replaced by a link to where the folder went moves to the file's real path,
+/// as a row whose path is gone does; a hard link at a real path keeps its own.
+#[test]
+fn upsert_takes_rows_the_file_left() {
+    let (dir, store, real, alias) = alias_fixture("bs-history-upsert-left");
+    let conn = store.conn.as_ref().unwrap();
+    kept_under(conn, &alias, 1, &real);
+    kept_under(conn, &dir.join("gone/a.txt"), 2, &real);
+    let metadata = std::fs::symlink_metadata(&real).unwrap();
+    assert_eq!(store.upsert_file(&real, &metadata).unwrap(), 1);
+    assert_eq!(row_ids(conn), [1]);
+    assert_eq!(file_id_for_path(conn, &real).unwrap(), Some(1));
+    assert_eq!(version_owners(conn).len(), 2);
+
+    let hard_link = dir.join("real/b.txt");
+    std::fs::hard_link(&real, &hard_link).unwrap();
+    let id = store.upsert_file(&hard_link, &metadata).unwrap();
+    assert_eq!(row_ids(conn), [1, id]);
+}
+
+/// Guards: privacy action: forget erases the rows listed for the spelling
+/// and every row of the file the path leads to, except when the listed rows
+/// are another file's kept under another path: then only those.
+#[test]
+fn forget_reaches_the_file_rows() {
+    let (dir, mut store, real, alias) = alias_fixture("bs-history-forget-rows");
+    let other = dir.join("other.txt");
+    std::fs::write(&other, "another document").unwrap();
+    let elsewhere = dir.join("gone/a.txt");
+    // Rows as (key, id, the file whose identity it records).
+    let mut left_after = |rows: &[(&Path, i64, &Path)], spellings: &[&Path]| {
+        let conn = store.conn.as_ref().unwrap();
+        conn.execute_batch("DELETE FROM versions; DELETE FROM files;")
+            .unwrap();
+        for (key, id, file) in rows {
+            kept_under(conn, key, *id, file);
+        }
+        store.forget(spellings, Some(&real)).unwrap();
+        row_ids(store.conn.as_ref().unwrap())
+    };
+    let other_at_alias = [(alias.as_path(), 1, other.as_path()), (&real, 2, &real)];
+    assert_eq!(left_after(&other_at_alias, &[&alias, &real]), [2]);
+    let moved_at_alias = [(alias.as_path(), 1, real.as_path()), (&real, 2, &real)];
+    assert_eq!(
+        left_after(&moved_at_alias, &[&alias, &real]),
+        Vec::<i64>::new()
+    );
+    let stale_at_real = [(real.as_path(), 1, other.as_path()), (&elsewhere, 2, &real)];
+    assert_eq!(left_after(&stale_at_real, &[&real]), Vec::<i64>::new());
+}
+
+/// Rows are never moved to a key that is not UTF-8: it would name no file.
+#[test]
+fn adoption_into_non_utf8_refused() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = crate::test_env::scratch_dir("bs-history-adopt-utf8");
+    let store = store_with(open_store(&dir.join("history.sqlite")).unwrap(), &dir);
+    let folder = dir.join(std::ffi::OsStr::from_bytes(b"Relat\xf3rios"));
+    std::fs::create_dir(&folder).unwrap();
+    std::os::unix::fs::symlink(&folder, dir.join("alias")).unwrap();
+    let (real, alias) = (folder.join("a.txt"), dir.join("alias/a.txt"));
+    std::fs::write(&real, "kept").unwrap();
+    let conn = store.conn.as_ref().unwrap();
+    kept_under(conn, &alias, 1, &real);
+    assert!(store.adopt_spelling(&alias, &real).is_err());
+    assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
 }

@@ -50,8 +50,8 @@ pub use worker::{HistoryEvent, Pending, run_worker};
 use disk::disk_capacity;
 use eligibility::{eligible_metadata, eligible_name, git_work_tree};
 use store::{
-    file_id_for_path, first_stored, follow_renames, is_live_session, now_secs, object_name,
-    open_store, paths_under, prepare_store, rows_of_file,
+    file_id_for_path, first_stored, follow_renames, is_live_session, join_rows, now_secs,
+    object_name, open_store, paths_under, prepare_store, rows_of_file,
 };
 
 /// Why a version was written.
@@ -140,6 +140,15 @@ fn identity(metadata: &std::fs::Metadata) -> (i64, i64, Option<i64>) {
         .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
         .and_then(|since| i64::try_from(since.as_nanos()).ok());
     (metadata.dev() as i64, metadata.ino() as i64, born)
+}
+
+/// Whether `key` names the file with this identity as a real path: a key
+/// through a folder replaced by a link reaches it by way of another path.
+fn holds(key: &Path, file: (i64, i64, Option<i64>)) -> bool {
+    std::fs::symlink_metadata(key).is_ok_and(|metadata| identity(&metadata) == file)
+        && key
+            .parent()
+            .is_some_and(|folder| std::fs::canonicalize(folder).is_ok_and(|real| real == folder))
 }
 
 /// The versions store.
@@ -267,7 +276,7 @@ impl History {
     /// The document is the first of `spellings` that has a stored row, and
     /// with `file_at`, every row kept for the file there under another path
     /// (its folder moved while the service was stopped), unless that stored
-    /// row is another file's.
+    /// row is another file's kept under another path than `file_at`.
     ///
     /// # Errors
     ///
@@ -285,18 +294,32 @@ impl History {
                 &opened
             }
         };
-        let stored = first_stored(conn, spellings)?.map(|(file_id, _)| file_id);
-        let mut file_ids: Vec<i64> = stored.into_iter().collect();
-        if let Some(metadata) = file_at.and_then(|path| std::fs::symlink_metadata(path).ok()) {
+        let stored = first_stored(conn, spellings)?;
+        let mut file_ids: Vec<i64> = stored.iter().map(|(file_id, _)| *file_id).collect();
+        if let Some(file_at) = file_at
+            && let Ok(metadata) = std::fs::symlink_metadata(file_at)
+        {
             let of_the_file: Vec<i64> = rows_of_file(conn, identity(&metadata))?
                 .into_iter()
                 .map(|(file_id, _)| file_id)
                 .collect();
-            if stored.is_none_or(|file_id| of_the_file.contains(&file_id)) {
-                file_ids = of_the_file;
+            // The row at `file_at` is its file's by path, whatever identity it
+            // recorded before an unwatched save.
+            let another_files = stored
+                .is_some_and(|(file_id, path)| path != file_at && !of_the_file.contains(&file_id));
+            if !another_files {
+                file_ids.extend(of_the_file);
             }
         }
-        for file_id in file_ids {
+        file_ids.sort_unstable();
+        file_ids.dedup();
+        self.erase_rows(conn, &file_ids)
+    }
+
+    /// Delete these rows with their versions: the objects first, as
+    /// [`Self::forget_everything`] explains.
+    fn erase_rows(&self, conn: &Connection, file_ids: &[i64]) -> Result<()> {
+        for &file_id in file_ids {
             let objects: Vec<String> = conn
                 .prepare("SELECT object FROM versions WHERE file_id = ?1")?
                 .query_map(params![file_id], |row| row.get::<_, String>(0))?
@@ -341,6 +364,14 @@ impl History {
         // unlink, and following it there would file the history
         // under a name nobody can type, out of reach of the request to forget it.
         moves.retain(|(_, moved)| eligible_name(moved).is_ok());
+        // rename(2) moves a folder only onto an empty one, so a row below the
+        // destination is a vanished document's: erased as its expiry would
+        // erase it, never joined to the moved document's.
+        let mut vanished = Vec::new();
+        for (_, moved) in moves.iter().filter(|(kept, _)| kept != from) {
+            vanished.extend(file_id_for_path(conn, moved)?);
+        }
+        self.erase_rows(conn, &vanished)?;
         follow_renames(
             conn,
             moves
@@ -653,12 +684,15 @@ impl History {
             .collect()
     }
 
-    /// Find or create the catalogue row for this document.
+    /// Find or create the catalogue row for this document, and join to it the
+    /// rows kept for the same file under paths it has left.
     ///
     /// Two rules, in order. The path comes first because that is what an atomic
-    /// save looks like: same name, brand-new inode. Identity comes second, and
-    /// only when the row's path is gone; otherwise two hard links to one inode
-    /// would take turns renaming each other's history. Identity includes the
+    /// save looks like: same name, brand-new inode. Identity comes second: a
+    /// row recorded for this file under another path is the file moved while
+    /// nothing watched, unless that path holds it as a real path. That is a
+    /// hard link, which keeps its own row; otherwise two hard links to one
+    /// inode would take turns renaming each other's history. Identity includes the
     /// birth time where the filesystem records one: XFS hands a deleted
     /// document's inode number to the next new file, which must not inherit
     /// that document's versions. A row without one (written before it was
@@ -666,8 +700,15 @@ impl History {
     fn upsert_file(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<i64> {
         let conn = self.conn.as_ref().expect("checked by the caller");
         let key = path.to_string_lossy().into_owned();
-        let (dev, ino, born) = identity(metadata);
-        if let Some(id) = file_id_for_path(conn, path)? {
+        let file = identity(metadata);
+        let (dev, ino, born) = file;
+        let left: Vec<i64> = rows_of_file(conn, file)?
+            .into_iter()
+            .filter(|(_, previous)| *previous != key && !holds(Path::new(previous), file))
+            .map(|(id, _)| id)
+            .collect();
+        let transaction = conn.unchecked_transaction()?;
+        let id = if let Some(id) = file_id_for_path(conn, path)? {
             // Only on a change: an UPDATE that rewrites the same values still
             // writes the page to the WAL, and every save passes through here.
             conn.execute(
@@ -676,24 +717,24 @@ impl History {
                                      OR missing_since IS NOT NULL)",
                 params![id, dev, ino, born],
             )?;
-            return Ok(id);
-        }
-        let renamed = rows_of_file(conn, (dev, ino, born))?.into_iter().next();
-        if let Some((id, previous)) = renamed
-            && !Path::new(&previous).exists()
-        {
+            id
+        } else if let Some(&id) = left.first() {
             conn.execute(
                 "UPDATE files SET current_path = ?2, born = ?3, missing_since = NULL WHERE id = ?1",
                 params![id, key, born],
             )?;
-            return Ok(id);
-        }
-        conn.execute(
-            "INSERT INTO files(current_path, dev, ino, born, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![key, dev, ino, born, now_secs()],
-        )?;
-        Ok(conn.last_insert_rowid())
+            id
+        } else {
+            conn.execute(
+                "INSERT INTO files(current_path, dev, ino, born, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![key, dev, ino, born, now_secs()],
+            )?;
+            conn.last_insert_rowid()
+        };
+        join_rows(conn, id, &left)?;
+        transaction.commit()?;
+        Ok(id)
     }
 
     fn record_version(

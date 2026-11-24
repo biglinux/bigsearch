@@ -641,10 +641,13 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   refused, since the restore that follows could write one document's version
   over another's; with nothing there it proceeds. `forget_versions` also
   erases the rows kept for the file where the path lands under any other
-  key, unless the rows found under the path are another file's. The watcher
-  moves the rows of a renamed folder's documents with it, never keeps a
-  version of a file reached through a folder replaced by a link, and checks a
-  reindex again before it reads.
+  key, unless the rows found under the path as spelled are another file's.
+  The watcher moves the rows of a renamed folder's documents with it, erasing
+  rows a deleted document left below the destination (a folder is renamed
+  only onto an empty one), never keeps a version of a file reached through a
+  folder replaced by a link, and checks a reindex again before it reads. A
+  saved file takes the rows kept for it under paths that no longer hold it
+  as a real path, so one file has one row; a hard link keeps its own.
 - Extraction subprocesses get argv arrays, never `sh -c`; a failure or a
   timeout skips the file and is logged, and never stops the daemon.
 - The socket lives in `$XDG_RUNTIME_DIR`, mode `0600`, `AF_UNIX` only, same UID.

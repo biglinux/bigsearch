@@ -56,6 +56,7 @@ fn versions_survive_replacing_saves() {
     hidden_rename_and_forget(&mut history, &home, &renamed);
     folder_rename_carries_the_history(&mut history, &home);
     forget_after_a_move_while_stopped(&mut history, &home);
+    folder_moved_onto_a_vanished_one(&mut history, &home);
     linked_folder_never_kept(&mut history, &home);
     non_documents_never_kept(&mut history, &home);
 }
@@ -276,6 +277,30 @@ fn forget_after_a_move_while_stopped(history: &mut History, home: &Path) {
     let now_at = docs.join("arquivo/pasta/c.odt");
     history.forget(&[&now_at], Some(&now_at)).expect("forget");
     assert!(history.versions(&[&before]).expect("versions").is_empty());
+}
+
+/// Guards: persisted data: `rm -r velha; mv nova velha` leaves the deleted
+/// document's versions nowhere: they are not offered as the moved one's.
+fn folder_moved_onto_a_vanished_one(history: &mut History, home: &Path) {
+    let docs = home.join("Documentos");
+    let vanished = docs.join("velha/e.odt");
+    kept_twice(history, &vanished);
+    let objects: Vec<PathBuf> = history
+        .versions(&[&vanished])
+        .expect("versions")
+        .into_iter()
+        .map(|version| version.object)
+        .collect();
+    std::fs::remove_dir_all(docs.join("velha")).expect("delete the folder");
+    kept_twice(history, &docs.join("nova/e.odt"));
+    std::fs::rename(docs.join("nova"), docs.join("velha")).expect("move the folder");
+    history
+        .note_rename(&docs.join("nova"), &docs.join("velha"))
+        .expect("note the rename");
+    assert_eq!(history.versions(&[&vanished]).expect("versions").len(), 1);
+    for object in objects {
+        assert!(!object.exists(), "{} was left behind", object.display());
+    }
 }
 
 /// Guards: persisted data: a save heard before a folder on the way was
