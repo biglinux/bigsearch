@@ -573,6 +573,7 @@ fn client_path_matrix() {
     matrix.rearrange();
     let other = versions_by_spelling(&matrix);
     legacy_alias_rows(&matrix);
+    legacy_alias_after_save(&matrix);
     disk_requests(&matrix);
     origin_requests(&matrix);
     forget_by_spelling(&matrix, &other);
@@ -608,34 +609,108 @@ fn versions_by_spelling(matrix: &PathMatrix) -> Vec<i64> {
 /// were kept for the very file the restore overwrites.
 fn legacy_alias_rows(matrix: &PathMatrix) {
     let real = matrix.ids("real");
-    let history =
-        rusqlite::Connection::open(matrix.data.join("big-search/history.sqlite")).unwrap();
-    history.busy_timeout(Duration::from_secs(30)).unwrap();
-    let rows_under = |folder: &str| -> i64 {
-        history
-            .query_row(
-                "SELECT count(*) FROM files WHERE current_path = ?1",
-                [matrix.file(folder).to_str().unwrap()],
-                |row| row.get(0),
-            )
-            .unwrap()
-    };
-    history
-        .execute(
-            "UPDATE files SET current_path = ?1 WHERE current_path = ?2",
-            [
-                matrix.file("alias").to_str().unwrap(),
-                matrix.file("real").to_str().unwrap(),
-            ],
-        )
-        .unwrap();
+    let history = LegacyRows::open(matrix);
+    history.respell_real();
     assert_eq!(matrix.ids("alias"), real);
     assert_answers(
         &matrix.sock,
         &[(path_cmd("save_version", &matrix.file("alias")), None)],
     );
-    assert_eq!((rows_under("alias"), rows_under("real")), (0, 1));
+    assert_eq!(
+        (history.rows_under("alias"), history.rows_under("real")),
+        (0, 1)
+    );
     assert_eq!(matrix.ids("real"), real);
+}
+
+/// Legacy alias rows of a file an editor has saved since: the new inode is
+/// heard under the real path only, so their identity is stale. They move with
+/// the restore when one of their version states is also kept under the real
+/// path; with none, the restore is refused naming both paths, and forgetting
+/// through the alias spelling is the way out.
+fn legacy_alias_after_save(matrix: &PathMatrix) {
+    let history = LegacyRows::open(matrix);
+    let (alias, real) = (matrix.file("alias"), matrix.file("real"));
+    let editor_save = |text: &str| {
+        let saved = matrix.docs.join("real/.a.txt.new");
+        std::fs::write(&saved, text).unwrap();
+        std::fs::rename(&saved, &real).unwrap();
+    };
+    history.respell_real();
+    let kept = matrix.ids("alias");
+    // Keeps the state on disk, which the alias rows hold too, under `real`.
+    assert_answers(&matrix.sock, &[(path_cmd("save_version", &real), None)]);
+    editor_save("real saved by an editor");
+    assert_answers(&matrix.sock, &[(path_cmd("save_version", &alias), None)]);
+    assert_eq!(
+        (history.rows_under("alias"), history.rows_under("real")),
+        (0, 1)
+    );
+    let listed = matrix.ids("real");
+    assert!(
+        kept.iter().all(|id| listed.contains(id)),
+        "{kept:?} {listed:?}"
+    );
+
+    history.respell_real();
+    // States no file has, so no version the watcher keeps under `real` meanwhile shares one.
+    history
+        .connection
+        .execute(
+            "UPDATE versions SET mtime_s = 0
+              WHERE file_id = (SELECT id FROM files WHERE current_path = ?1)",
+            [alias.to_str().unwrap()],
+        )
+        .unwrap();
+    editor_save("real saved again");
+    let named = format!("{} leads to {} now", alias.display(), real.display());
+    assert_answers(
+        &matrix.sock,
+        &[
+            (path_cmd("save_version", &alias), Some(named.as_str())),
+            (path_cmd("forget_versions", &alias), None),
+        ],
+    );
+    assert_eq!(history.rows_under("alias"), 0);
+}
+
+/// The daemon's versions store, opened beside it to write rows as a daemon
+/// that keyed client paths as spelled kept them.
+struct LegacyRows<'a> {
+    matrix: &'a PathMatrix,
+    connection: rusqlite::Connection,
+}
+
+impl<'a> LegacyRows<'a> {
+    fn open(matrix: &'a PathMatrix) -> Self {
+        let connection =
+            rusqlite::Connection::open(matrix.data.join("big-search/history.sqlite")).unwrap();
+        connection.busy_timeout(Duration::from_secs(30)).unwrap();
+        Self { matrix, connection }
+    }
+
+    fn rows_under(&self, folder: &str) -> i64 {
+        self.connection
+            .query_row(
+                "SELECT count(*) FROM files WHERE current_path = ?1",
+                [self.matrix.file(folder).to_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The rows of `real`'s file, as kept through the `alias` link to its folder.
+    fn respell_real(&self) {
+        self.connection
+            .execute(
+                "UPDATE files SET current_path = ?1 WHERE current_path = ?2",
+                [
+                    self.matrix.file("alias").to_str().unwrap(),
+                    self.matrix.file("real").to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+    }
 }
 
 /// Requests that read the disk follow a link and stay inside the source. A restore through a link put in place of a folder that

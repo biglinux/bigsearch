@@ -240,37 +240,50 @@ fn unreadable_shard_keeps_versions() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Rows kept under a symlinked folder's spelling move to where it leads when
-/// they were kept for the file there, stay when nothing is there, and refuse
-/// the restore when another file is there, an editor's save included.
-#[test]
-fn spelling_adopted_by_identity() {
-    let dir = crate::test_env::scratch_dir("bs-history-adopt");
+/// A store beside `real/a.txt` and `alias`, a link to `real`; returns the
+/// file's real and alias spellings.
+fn alias_fixture(name: &str) -> (crate::test_env::ScratchDir, History, PathBuf, PathBuf) {
+    let dir = crate::test_env::scratch_dir(name);
     let store = store_with(open_store(&dir.join("history.sqlite")).unwrap(), &dir);
-    let conn = store.conn.as_ref().unwrap();
     std::fs::create_dir_all(dir.join("real")).unwrap();
     std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
     let (real, alias) = (dir.join("real/a.txt"), dir.join("alias/a.txt"));
     std::fs::write(&real, "kept").unwrap();
-    let kept_under = |path: &Path, id: i64, file: &Path| {
-        let (dev, ino, born) = identity(&std::fs::symlink_metadata(file).unwrap());
-        conn.execute(
-            "INSERT INTO files(id, current_path, dev, ino, born, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-            params![id, path.to_str().unwrap(), dev, ino, born],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO versions(file_id, saved_at, mtime_s, mtime_ns, size, object, reason)
-             VALUES (?1, 0, 0, 0, 1, ?2, 'saved')",
-            params![id, format!("object-{id}")],
-        )
-        .unwrap();
-    };
+    (dir, store, real, alias)
+}
+
+/// A version of row `id` in a state of its own: `mtime_s` tells states apart.
+fn kept_at(conn: &Connection, id: i64, mtime_s: i64, object: &str) {
+    conn.execute(
+        "INSERT INTO versions(file_id, saved_at, mtime_s, mtime_ns, size, object, reason)
+         VALUES (?1, 0, ?2, 0, 1, ?3, 'saved')",
+        params![id, mtime_s, object],
+    )
+    .unwrap();
+}
+
+/// Row `id` under `path`, with `file`'s identity and one version `object-{id}`.
+fn kept_under(conn: &Connection, path: &Path, id: i64, file: &Path) {
+    let (dev, ino, born) = identity(&std::fs::symlink_metadata(file).unwrap());
+    conn.execute(
+        "INSERT INTO files(id, current_path, dev, ino, born, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+        params![id, path.to_str().unwrap(), dev, ino, born],
+    )
+    .unwrap();
+    kept_at(conn, id, id, &format!("object-{id}"));
+}
+
+/// Rows kept under a symlinked folder's spelling move to where it leads when
+/// they were kept for the file there, and stay when nothing is there.
+#[test]
+fn spelling_adopted_by_identity() {
+    let (dir, store, real, alias) = alias_fixture("bs-history-adopt");
+    let conn = store.conn.as_ref().unwrap();
     let real_key = real.to_str().unwrap().to_string();
 
-    kept_under(&alias, 1, &real);
-    kept_under(&real, 2, &real);
+    kept_under(conn, &alias, 1, &real);
+    kept_under(conn, &real, 2, &real);
     store.adopt_spelling(&alias, &real).unwrap();
     assert_eq!(
         version_owners(conn),
@@ -281,18 +294,37 @@ fn spelling_adopted_by_identity() {
     );
 
     let missing = dir.join("alias/missing.txt");
-    kept_under(&missing, 3, &real);
+    kept_under(conn, &missing, 3, &real);
     store
         .adopt_spelling(&missing, &dir.join("real/missing.txt"))
         .unwrap();
     assert_eq!(file_id_for_path(conn, &missing).unwrap(), Some(3));
+}
 
-    kept_under(&alias, 4, &real);
-    let saved = dir.join("real/a.txt.tmp");
+/// After an editor's save gave the file a new inode, the rows kept under the
+/// alias spelling move only when a state of theirs is also kept under the
+/// real path; otherwise the restore is refused naming both paths.
+#[test]
+fn stale_spelling_adopted_by_state() {
+    let (_dir, store, real, alias) = alias_fixture("bs-history-adopt-saved");
+    let conn = store.conn.as_ref().unwrap();
+    kept_under(conn, &alias, 1, &real);
+    kept_under(conn, &real, 2, &real);
+    let saved = real.with_added_extension("tmp");
     std::fs::write(&saved, "saved by an editor").unwrap();
     std::fs::rename(&saved, &real).unwrap();
+
     let refusal = store.adopt_spelling(&alias, &real).unwrap_err().to_string();
-    assert!(refusal.contains("not the file"), "{refusal}");
-    assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(4));
-    let _ = std::fs::remove_dir_all(&dir);
+    let named = format!("{} leads to {} now", alias.display(), real.display());
+    assert!(refusal.contains(&named), "{refusal}");
+    assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
+
+    kept_at(conn, 2, 1, "object-2-again");
+    store.adopt_spelling(&alias, &real).unwrap();
+    let real_key = real.to_str().unwrap();
+    let owners: Vec<(String, String)> = ["object-1", "object-2", "object-2-again"]
+        .into_iter()
+        .map(|object| (real_key.to_string(), object.to_string()))
+        .collect();
+    assert_eq!(version_owners(conn), owners);
 }

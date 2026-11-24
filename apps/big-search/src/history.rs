@@ -330,8 +330,11 @@ impl History {
     ///
     /// Kept for the file that is at `resolved` (a daemon that keyed client
     /// paths as spelled kept them under a symlinked folder), they move to
-    /// `resolved`. With nothing at `resolved` a restore loses nothing, and
-    /// they stay where they are.
+    /// `resolved`. That file is the one with their identity, or, since no
+    /// watcher event refreshes that identity after an editor's save, the one
+    /// whose versions hold a state theirs hold too (same mtime and size). With
+    /// nothing at `resolved` a restore loses nothing, and they stay where they
+    /// are.
     ///
     /// # Errors
     ///
@@ -360,10 +363,14 @@ impl History {
             }
         };
         let (dev, ino, born) = identity(&metadata);
+        let resolved_id = file_id_for_path(conn, resolved)?;
         let same: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND dev = ?2 AND ino = ?3
-                             AND (born IS NULL OR ?4 IS NULL OR born = ?4))",
-            params![file_id, dev, ino, born],
+                             AND (born IS NULL OR ?4 IS NULL OR born = ?4))
+                 OR EXISTS(SELECT 1 FROM versions AS spelled
+                             JOIN versions AS kept USING (mtime_s, mtime_ns, size)
+                            WHERE spelled.file_id = ?1 AND kept.file_id = ?5)",
+            params![file_id, dev, ino, born, resolved_id],
             |row| row.get(0),
         )?;
         if !same {
