@@ -159,6 +159,28 @@ impl Watches {
         self.dirs.remove_tree(dir);
     }
 
+    /// Run `walk`, which watches each folder it reaches, as the whole list
+    /// under `tops`: a folder listed there that it no longer reaches, one the
+    /// rules came to leave out, leaves the list and loses its watch.
+    pub(super) fn relist<'a, T>(
+        &mut self,
+        tops: impl IntoIterator<Item = &'a Path>,
+        walk: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let mut listed = Vec::new();
+        for top in tops {
+            listed.extend(self.dirs.tree(top)?);
+            self.dirs.remove_tree(top);
+        }
+        let walked = walk(self)?;
+        for folder in listed {
+            if self.dirs.recorded(&folder).is_none() {
+                self.unwatch(&folder);
+            }
+        }
+        Ok(walked)
+    }
+
     /// Drop the watch on `dir`. A folder deleted, moved or never watched has
     /// no watch left to drop.
     pub(super) fn unwatch(&mut self, dir: &Path) {

@@ -258,6 +258,53 @@ fn reindex_evicts_ignored_folder() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A rescan judges the folder list as the walk does: a folder its repository
+/// came to ignore leaves the list and loses its watch, with its subfolders.
+#[test]
+fn rescan_unwatches_ignored_folder() {
+    let base = scratch::scratch_dir("bs-rescan-ignored");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    let repo = home.join("docs/repo");
+    let generated = repo.join("generated");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(&generated).unwrap();
+    std::fs::write(generated.join("inner.txt"), "alpha").unwrap();
+    for sub in 0..10 {
+        std::fs::create_dir_all(generated.join(format!("sub{sub}"))).unwrap();
+    }
+    std::fs::create_dir_all(&run).unwrap();
+    let sock = run.join("biglinux/indexd.sock");
+    let daemon = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+    assert!(
+        settles(|| catalogue_rows(&xdg_storage_home, "watch", &generated) == 10),
+        "the first walk did not list the subfolders"
+    );
+    let watches = inotify_watches(daemon.0.id());
+
+    std::fs::write(repo.join(".gitignore"), "generated/\n").unwrap();
+    assert!(command_accepted(&sock, "rescan"));
+    assert!(
+        settles(|| query_paths(&sock, "name", "inner", &home).0 == 0),
+        "the rescan kept the ignored file"
+    );
+    assert!(
+        settles(|| catalogue_rows(&xdg_storage_home, "watch", &generated) == 0),
+        "the ignored folders are still listed"
+    );
+    assert!(
+        settles(|| inotify_watches(daemon.0.id()) + 11 <= watches),
+        "the ignored folders are still watched"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A forced reindex of a folder compares its whole tree with the catalogue: a
 /// subfolder its repository came to ignore leaves every index and the folder
 /// list.

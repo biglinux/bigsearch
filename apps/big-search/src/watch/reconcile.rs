@@ -190,17 +190,11 @@ impl ReconcilePass<'_> {
         path: &Path,
     ) -> Result<scan::ReconcileOutcome> {
         if self.forced {
-            let listed = watches.dirs.tree(path)?;
-            watches.dirs.remove_tree(path);
-            let outcome = scan::reconcile_folder(self.writer, self.f, state, path, &mut |dir| {
-                watches.watch(dir);
-            })?;
-            for folder in listed {
-                if watches.dirs.recorded(&folder).is_none() {
-                    watches.unwatch(&folder);
-                }
-            }
-            return Ok(outcome);
+            return watches.relist([path], |watches| {
+                scan::reconcile_folder(self.writer, self.f, state, path, &mut |dir| {
+                    watches.watch(dir);
+                })
+            });
         }
         watches.watch(path);
         scan::reconcile_subtree_inline(self.writer, self.f, state, self.scope, path, &mut |dir| {

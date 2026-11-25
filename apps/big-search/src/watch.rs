@@ -619,15 +619,20 @@ impl WatchLoop<'_> {
         // over the catalogue starts again from the top.
         self.history_pass_done = false;
         self.history_cursor = None;
-        let walked = scan::reconcile_inline(
-            active_index_writer(&mut self.writer),
-            &self.f,
-            &mut self.state,
-            self.roots,
-            &mut |dir| {
-                self.watches.watch(dir);
-            },
-        )?;
+        let roots = self.roots;
+        let walked = self
+            .watches
+            .relist(roots.iter().map(PathBuf::as_path), |watches| {
+                scan::reconcile_inline(
+                    active_index_writer(&mut self.writer),
+                    &self.f,
+                    &mut self.state,
+                    roots,
+                    &mut |dir| {
+                        watches.watch(dir);
+                    },
+                )
+            })?;
         // A folder the walk could not read leaves this run unable to vouch
         // for it.
         self.watches.missed |= walked.unread;
@@ -756,8 +761,10 @@ fn rebuild(
     close_index_writer(content.writer).context("close content writer after rebuild clear")?;
     state.clear();
     content::clear_content_state().context("clear content state for rebuild")?;
-    let walked = scan::reconcile_inline(writer, f, state, roots, &mut |dir| {
-        watches.watch(dir);
+    let walked = watches.relist(roots.iter().map(PathBuf::as_path), |watches| {
+        scan::reconcile_inline(writer, f, state, roots, &mut |dir| {
+            watches.watch(dir);
+        })
     })?;
     watches.missed |= walked.unread;
     // The clear above must reach disk even when the walk found nothing.
