@@ -534,7 +534,9 @@ fn open_writer(path: &Path) -> Result<Connection> {
         "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
         params![SCHEMA_VERSION],
     )?;
-    conn.execute_batch("PRAGMA optimize;")?;
+    // No `PRAGMA optimize`: each registration opens this database, and the
+    // ANALYZE it ran failed some with "database is locked", without the busy
+    // wait, beside another connection.
     Ok(conn)
 }
 
