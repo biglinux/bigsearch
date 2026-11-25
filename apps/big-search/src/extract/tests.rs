@@ -1,6 +1,33 @@
 use super::*;
 use std::io::Write;
 
+/// The content worker checks a path is a regular file before the readers open
+/// it; a FIFO renamed into place between the two gets no text instead of a wait.
+#[test]
+fn readers_pass_over_fifo() {
+    let dir = temporary_extract_dir("fifo");
+    for name in [
+        "a.txt", "a.html", "a.docx", "a.epub", "a.eml", "a.rtf", "a.doc",
+    ] {
+        let path = dir.join(name);
+        crate::test_env::make_fifo(&path);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader_path = path.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(content(&reader_path));
+        });
+        let text = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{name}: the reader waits on the FIFO"));
+        assert_eq!(text, None, "{name}");
+    }
+    let file = dir.join("b.txt");
+    std::fs::write(&file, "beta").unwrap();
+    assert!(open_regular(&file).is_some());
+    assert!(open_regular(&dir).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn pages_and_markdown_name_titles() {
     assert_eq!(

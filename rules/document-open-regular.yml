@@ -1,0 +1,21 @@
+id: document-open-regular
+language: Rust
+severity: error
+message: Open a file's bytes through extract::open_regular, which refuses a FIFO or a device without waiting on it.
+note: A stat taken before cannot see a FIFO renamed into place since, and a plain open of one waits for a writer, stopping the extraction worker or the scan.
+files:
+  - apps/big-search/src/extract.rs
+  - apps/big-search/src/extract/**
+  - apps/big-search/src/extract_*.rs
+  - apps/big-search/src/meta.rs
+  - apps/big-search/src/mime.rs
+  - apps/big-search/src/prominent.rs
+ignores:
+  - '**/tests.rs'
+rule:
+  any:
+    - pattern: File::open($PATH)
+    - pattern: std::fs::File::open($PATH)
+    - pattern: FileFormat::from_file($PATH)
+    - pattern: file_format::FileFormat::from_file($PATH)
+    - pattern: imagesize::size($PATH)

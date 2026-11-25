@@ -16,7 +16,7 @@
 //!   BIG_SEARCH_META_VIDEO      mkv/webm/mp4 duration (symphonia)
 //!   BIG_SEARCH_META_IMAGE      image dimensions (imagesize)
 //!   BIG_SEARCH_META_MAX_MB     skip metadata parse above this size (default 64)
-use crate::extract::ext_of;
+use crate::extract::{ext_of, open_regular};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -240,7 +240,8 @@ pub fn metadata_text(path: &Path, with_content: bool) -> Option<String> {
     let mut sniffed_mime: Option<String> = None;
     if kind.is_none()
         && metadata_config.sniff_type
-        && let Ok(fmt) = file_format::FileFormat::from_file(path)
+        && let Some(file) = open_regular(path)
+        && let Ok(fmt) = file_format::FileFormat::from_reader(file)
     {
         let mime = fmt.media_type();
         if mime != "application/octet-stream" {
@@ -294,7 +295,7 @@ fn media_text(path: &Path) -> Vec<String> {
     use symphonia::core::units::{Duration, Timestamp};
 
     let mut out = Vec::new();
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some(file) = open_regular(path) else {
         return out;
     };
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -345,7 +346,10 @@ fn media_text(path: &Path) -> Vec<String> {
 
 /// Image dimensions via imagesize (header only, no decode).
 fn image_text(path: &Path) -> Vec<String> {
-    match imagesize::size(path) {
+    let Some(file) = open_regular(path) else {
+        return Vec::new();
+    };
+    match imagesize::reader_size(std::io::BufReader::new(file)) {
         Ok(size) => vec![format!("{}x{}", size.width, size.height)],
         Err(_) => Vec::new(),
     }

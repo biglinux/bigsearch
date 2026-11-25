@@ -9,6 +9,32 @@ use epub::read_epub;
 use std::io::Read;
 use std::path::Path;
 
+/// `path` opened for reading when it is a regular file, a link followed: the
+/// readers' one way to a file's bytes. A `stat` taken before cannot see a FIFO
+/// renamed into place since, and a plain open of one waits for a writer.
+pub(crate) fn open_regular(path: &Path) -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // `O_NONBLOCK` makes the open of a FIFO return at once. It is cleared
+    // before any read, since open(2) does not promise regular files ignore it.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` is owned by `file`, open for the whole block; F_GETFL and
+    // F_SETFL pass only integers.
+    let blocking = unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) == 0
+    };
+    blocking.then_some(file)
+}
+
 /// Adaptive cap on extracted text per file, sized by the machine's memory to
 /// bound index and memory cost. `BIG_SEARCH_EXTRACT_MAX_MB` or config
 /// `[defaults].extract_max_mb` can override the automatic value.
@@ -78,10 +104,7 @@ fn read_doc(path: &Path) -> Option<(String, Option<String>)> {
         return None;
     }
     let mut magic = [0u8; 8];
-    std::fs::File::open(path)
-        .ok()?
-        .read_exact(&mut magic)
-        .ok()?;
+    open_regular(path)?.read_exact(&mut magic).ok()?;
     if magic == [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1] {
         crate::extract_pdf::read_word(path).map(|text| (text, None))
     } else if magic.starts_with(b"{\\rtf") {
@@ -108,8 +131,7 @@ fn read_capped_bytes(path: &Path) -> Option<Vec<u8>> {
     let cap = max_extract_bytes();
     // Sized up front: a text file is read whole, and growth copies it.
     let mut buf = Vec::with_capacity(size.min(cap as u64) as usize);
-    std::fs::File::open(path)
-        .ok()?
+    open_regular(path)?
         .take(cap as u64)
         .read_to_end(&mut buf)
         .ok()?;
@@ -397,7 +419,7 @@ fn read_office(path: &Path, ext: &str) -> Option<String> {
     if exceeds_input_cap(path) {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = open_regular(path)?;
     office_text_from_reader(std::io::BufReader::new(file), ext)
 }
 
@@ -434,7 +456,7 @@ pub(crate) fn capped_zip<R: std::io::Read + std::io::Seek>(
 pub(crate) fn open_archive(
     path: &Path,
 ) -> Option<zip::ZipArchive<std::io::BufReader<std::fs::File>>> {
-    capped_zip(std::io::BufReader::new(std::fs::File::open(path).ok()?))
+    capped_zip(std::io::BufReader::new(open_regular(path)?))
 }
 
 /// Slides, worksheets, speaker notes, headers or footers read from one archive,

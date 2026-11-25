@@ -225,8 +225,7 @@ fn sniff(path: &Path) -> Option<String> {
     // Room for the whole head up front: an empty Vec makes `read_to_end` probe
     // with a tiny read and then grow, several syscalls for every file sniffed.
     let mut head = Vec::with_capacity(HEAD_BYTES as usize);
-    std::fs::File::open(path)
-        .ok()?
+    crate::extract::open_regular(path)?
         .take(HEAD_BYTES)
         .read_to_end(&mut head)
         .ok()?;

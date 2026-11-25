@@ -253,7 +253,7 @@ fn skipped_entries_become_tombstones() {
     std::fs::write(&movie, b"binario").unwrap();
     std::fs::write(&note, b"texto").unwrap();
     std::fs::create_dir_all(&folder).unwrap();
-    make_fifo(&pipe);
+    crate::test_env::make_fifo(&pipe);
 
     let mut catalog =
         catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE)
@@ -343,7 +343,7 @@ fn extraction_passes_over_fifo() {
         EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap()),
     ];
     std::fs::write(&note, b"reachable body").unwrap();
-    make_fifo(&pipe);
+    crate::test_env::make_fifo(&pipe);
 
     // A file listed by a watcher event skips the selection's settling.
     let index = crate::index::open_content_or_create(&base.join("idx")).unwrap();
@@ -361,19 +361,6 @@ fn extraction_passes_over_fifo() {
     assert_eq!(hits.len(), 1);
 
     let _ = std::fs::remove_dir_all(&base);
-}
-
-#[expect(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    reason = "coreutils makes the FIFO, outside this crate"
-)]
-fn make_fifo(path: &std::path::Path) {
-    let status = std::process::Command::new("mkfifo")
-        .arg(path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "mkfifo {}", path.display());
 }
 
 #[test]

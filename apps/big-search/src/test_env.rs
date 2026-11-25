@@ -52,3 +52,16 @@ impl Drop for EnvVarGuard {
 #[path = "../tests/scratch/mod.rs"]
 mod scratch;
 pub use scratch::{ScratchDir, runs_as_root, scratch_dir};
+
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "coreutils makes the FIFO, outside this crate"
+)]
+pub fn make_fifo(path: &std::path::Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo {}", path.display());
+}
