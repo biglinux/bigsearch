@@ -161,7 +161,9 @@ impl Watches {
 
     /// Run `walk`, which watches each folder it reaches, as the whole list
     /// under `tops`: a folder listed there that it no longer reaches, one the
-    /// rules came to leave out, leaves the list and loses its watch.
+    /// rules came to leave out, leaves the list and loses its watch. One below
+    /// a folder this user cannot read stays listed and watched, unchecked, as
+    /// at a start: the walk could not look.
     pub(super) fn relist<'a, T>(
         &mut self,
         tops: impl IntoIterator<Item = &'a Path>,
@@ -169,13 +171,25 @@ impl Watches {
     ) -> Result<T> {
         let mut listed = Vec::new();
         for top in tops {
-            listed.extend(self.dirs.tree(top)?);
+            for folder in self.dirs.tree(top)? {
+                let row = self.dirs.recorded(&folder);
+                listed.push((folder, row));
+            }
             self.dirs.remove_tree(top);
         }
         let walked = walk(self)?;
-        for folder in listed {
-            if self.dirs.recorded(&folder).is_none() {
-                self.unwatch(&folder);
+        for (folder, row) in listed {
+            if self.dirs.recorded(&folder).is_some() {
+                continue;
+            }
+            let below_unreadable = !self.unreadable.is_empty()
+                && folder
+                    .ancestors()
+                    .skip(1)
+                    .any(|above| self.unreadable.contains(above));
+            match row {
+                Some((mtime, size)) if below_unreadable => self.dirs.set(&folder, mtime, size),
+                _ => self.unwatch(&folder),
             }
         }
         Ok(walked)
