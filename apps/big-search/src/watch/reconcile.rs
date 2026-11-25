@@ -41,7 +41,8 @@ pub(super) fn reconcile_batch(
     Ok(pass.outcome)
 }
 
-/// Reconcile the one path a forced reindex names, judged as new.
+/// Reconcile one path judged as new: the one a forced reindex names, or a
+/// folder walked whole for the paths a batch could not hold.
 pub(super) fn reconcile_forced(
     writer: &mut IndexWriter,
     f: &Fields,

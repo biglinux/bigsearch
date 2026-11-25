@@ -81,6 +81,26 @@ pub(super) struct Watches {
 }
 
 impl Watches {
+    /// No watch placed yet; `dirs` holds the list saved for the next start.
+    pub(super) fn new(
+        watcher: RecommendedWatcher,
+        runtime: &super::WatchRuntime,
+        dirs: State,
+        fingerprint: Option<i64>,
+    ) -> Self {
+        Self {
+            watcher,
+            failed: Arc::clone(&runtime.unwatched_dirs),
+            dirs,
+            fingerprint,
+            recorded: true,
+            run_started: None,
+            missed: false,
+            unreadable: HashSet::new(),
+            paused: Arc::clone(&runtime.paused),
+        }
+    }
+
     /// Watch a folder a walk or an event reached, and list it, also when this
     /// user cannot read it (see [`Self::unreadable`]).
     pub(super) fn watch(&mut self, dir: &Path) -> bool {

@@ -21,15 +21,13 @@ use crate::origin;
 use crate::scan;
 use anyhow::{Context, Result};
 use content_backfill::{ContentBackfill, compact_when_worth_it, run_content_backfill_batch};
-use event_batch::{WatchBatch, ingest, observe_origin_batch};
-use notify::event::{AccessKind, AccessMode, EventKind};
-use notify::recommended_watcher;
+use event_batch::{Heard, WatchBatch, observe_origin_batch};
+use notify::{RecommendedWatcher, recommended_watcher};
 use reconcile::{evict, reconcile_batch, reconcile_forced};
 use start::{catch_up_at_start, watch_initial_dirs};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime};
 use tantivy::{Index, IndexWriter};
@@ -40,10 +38,6 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
 /// How often an idle watcher offers the versions worker another catalogue page.
 /// Slow on purpose: the first-version pass must be an unnoticed trickle.
 const HISTORY_PASS_TICK: Duration = Duration::from_millis(750);
-/// Filesystem events waiting for the watcher, at most. Past it they are
-/// dropped and the loop rescans, as the kernel does when its own queue fills:
-/// a backup or a recursive copy must not queue its whole tree in memory.
-const MAX_QUEUED_EVENTS: usize = 16_384;
 pub const ACTIVITY_IDLE: u8 = 0;
 pub const ACTIVITY_INDEXING: u8 = 1;
 pub const ACTIVITY_BACKFILLING: u8 = 2;
@@ -136,10 +130,12 @@ pub enum WatchControlCommand {
     WarmContent,
 }
 
-/// What the watcher loop consumes: a filesystem event, a control command or
-/// a stop.
+/// What the watcher loop consumes: a wake for what the inotify thread heard,
+/// a control command or a stop.
 pub enum WatchMessage {
-    Fs(notify::Result<notify::Event>),
+    /// The inotify thread heard the first event since the loop last took
+    /// what it heard.
+    Heard,
     ControlCommand(WatchControlCommand),
     /// End [`run`], which returns this exit status, once the events heard
     /// before the stop are applied and the versions worker has noted them.
@@ -153,21 +149,20 @@ struct ContentIndexWrite<'a> {
 
 /// Watch `roots` and keep `index` (and the `state` cache) in sync until a
 /// [`WatchMessage::Stop`], and return its exit status. `paused` mirrors the runtime
-/// state for the IPC `status` reply. `tx`/`rx` are the shared `WatchMessage` channel:
-/// `tx` is cloned into the inotify callback, and the IPC thread holds another clone
-/// to deliver control commands. Blocking.
+/// state for the IPC `status` reply. `rx` receives what `inotify` hears and what
+/// the IPC thread sends. Blocking.
 ///
 /// # Errors
 ///
-/// Returns an error when the index writers or the file watcher cannot be started, or a
-/// batch cannot be committed; the caller ends the daemon.
+/// Returns an error when the index writers cannot be started, or a batch cannot
+/// be committed; the caller ends the daemon.
 pub fn run(
     index: Index,
     content_index: Index,
     scope: WatchScope<'_>,
     mut state: State,
     runtime: WatchRuntime,
-    tx: Sender<WatchMessage>,
+    inotify: Inotify,
     rx: Receiver<WatchMessage>,
     history: crate::history::SharedHistory,
 ) -> Result<i32> {
@@ -185,8 +180,12 @@ pub fn run(
     let check_sources_at = matches!(scope.dirs, StartDirs::Saved(..))
         .then(|| Instant::now() + saved_start_check_delay());
     let (history_tx, history_worker) = spawn_history_worker(&history);
-    let (mut watches, queued, overflowed) =
-        start_inotify(tx, &runtime, scope.watch_list, scope.fingerprint)?;
+    let mut watches = Watches::new(
+        inotify.watcher,
+        &runtime,
+        scope.watch_list,
+        scope.fingerprint,
+    );
     let catch_up = watch_initial_dirs(&mut watches, scope.roots, scope.dirs, scope.started);
     catch_up_at_start(
         &mut writer,
@@ -212,8 +211,7 @@ pub fn run(
         history_tx,
         origin_writer,
         watches,
-        overflowed,
-        queued,
+        heard: inotify.heard,
         path_scope,
         content_writer: None,
         writer,
@@ -237,48 +235,26 @@ pub fn run(
     Ok(status)
 }
 
-/// Start inotify. Returns the watches, the count of events the callback has
-/// sent and the loop not yet received, and the flag it raises when it had to
-/// drop one.
-fn start_inotify(
-    tx: Sender<WatchMessage>,
-    runtime: &WatchRuntime,
-    watch_list: State,
-    fingerprint: Option<i64>,
-) -> Result<(Watches, Arc<AtomicUsize>, Arc<AtomicBool>)> {
-    let fs_tx = tx;
-    let queued = Arc::new(AtomicUsize::new(0));
-    let overflowed = Arc::new(AtomicBool::new(false));
-    let (callback_queued, callback_overflowed) = (Arc::clone(&queued), Arc::clone(&overflowed));
-    let watcher = recommended_watcher(move |watcher_result: notify::Result<notify::Event>| {
-        // notify always asks for IN_OPEN; a read changes nothing and must not
-        // wake the indexer. A close after writing is how a save ends.
-        if let Ok(event) = &watcher_result
-            && matches!(event.kind, EventKind::Access(kind)
-                if kind != AccessKind::Close(AccessMode::Write))
-        {
-            return;
-        }
-        if callback_queued.fetch_add(1, Ordering::Relaxed) >= MAX_QUEUED_EVENTS {
-            callback_queued.fetch_sub(1, Ordering::Relaxed);
-            callback_overflowed.store(true, Ordering::Relaxed);
-            return;
-        }
-        let _ = fs_tx.send(WatchMessage::Fs(watcher_result));
-    })
-    .context("inotify init")?;
-    let watches = Watches {
-        watcher,
-        failed: Arc::clone(&runtime.unwatched_dirs),
-        dirs: watch_list,
-        fingerprint,
-        recorded: true,
-        run_started: None,
-        missed: false,
-        unreadable: HashSet::new(),
-        paused: Arc::clone(&runtime.paused),
-    };
-    Ok((watches, queued, overflowed))
+/// The file watcher, with no watch yet, and what its thread hears for [`run`].
+pub struct Inotify {
+    watcher: RecommendedWatcher,
+    heard: Arc<Heard>,
+}
+
+/// Start inotify for the sources `roots`; each event heard wakes the watcher
+/// loop through `wake`. Call it from a thread at normal priority: notify's
+/// reader thread takes its caller's, and one at the indexer's idle priority
+/// falls behind the kernel's queue on a busy machine.
+///
+/// # Errors
+///
+/// Returns an error when inotify cannot be initialized.
+pub fn start_inotify(wake: Sender<WatchMessage>, roots: Vec<PathBuf>) -> Result<Inotify> {
+    let heard = Arc::new(Heard::new(roots, wake));
+    let hearing = Arc::clone(&heard);
+    let watcher = recommended_watcher(move |watcher_result| hearing.hear(watcher_result))
+        .context("inotify init")?;
+    Ok(Inotify { watcher, heard })
 }
 
 /// The origin database, with what the browsers already know imported into it.
@@ -345,10 +321,7 @@ struct WatchLoop<'a> {
     history_tx: Sender<crate::history::HistoryEvent>,
     origin_writer: origin::OriginWriter,
     watches: Watches,
-    /// Set by the inotify callback when it dropped an event.
-    overflowed: Arc<AtomicBool>,
-    /// Events the inotify callback sent and the loop has not received yet.
-    queued: Arc<AtomicUsize>,
+    heard: Arc<Heard>,
     path_scope: scan::Scope,
     content_writer: Option<IndexWriter>,
     writer: Option<IndexWriter>,
@@ -475,7 +448,7 @@ impl WatchLoop<'_> {
     }
 
     fn handle(&mut self, message: WatchMessage) -> Result<()> {
-        let first = match message {
+        match message {
             WatchMessage::ControlCommand(WatchControlCommand::WarmContent) => {
                 self.content_backfill.warm();
                 return Ok(());
@@ -508,32 +481,29 @@ impl WatchLoop<'_> {
                 self.stop_status = Some(status);
                 return self.apply_last_burst();
             }
-            WatchMessage::Fs(watcher_result) => {
-                self.queued.fetch_sub(1, Ordering::Relaxed);
-                watcher_result
-            }
-        };
-        if self.runtime.paused.load(Ordering::Relaxed) {
-            return Ok(()); // dropped while paused; Resume reconciles what was missed
+            WatchMessage::Heard => {}
         }
-        self.index_burst(first)
+        if self.runtime.paused.load(Ordering::Relaxed) {
+            // Dropped while paused; Resume reconciles what was missed.
+            self.heard.take();
+            return Ok(());
+        }
+        self.index_burst()
     }
 
-    /// Apply what the inotify thread passes on within one more [`DEBOUNCE`]
+    /// Apply what the inotify thread hears within one more [`DEBOUNCE`]
     /// after a stop, so a save made just before it still reaches the versions
     /// worker. A request or another stop that arrives meanwhile is dropped.
     fn apply_last_burst(&mut self) -> Result<()> {
         if self.runtime.paused.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let mut batch = WatchBatch::new();
-        let mut rescan = false;
         let deadline = Instant::now() + DEBOUNCE;
-        while self
-            .coalesce_burst(deadline, &mut batch, &mut rescan)
-            .is_some()
-        {}
-        self.apply_batch(batch, rescan)
+        while self.wait_out_burst(deadline).is_some() {}
+        match self.heard.take() {
+            Some(batch) => self.apply_batch(batch),
+            None => Ok(()),
+        }
     }
 
     fn reindex_path(&mut self, path: PathBuf) -> Result<()> {
@@ -606,16 +576,16 @@ impl WatchLoop<'_> {
         Ok(())
     }
 
-    /// Index a burst of filesystem events that begins with `first`, then run
+    /// Index what the inotify thread hears within one [`DEBOUNCE`], then run
     /// the control command that ended the burst early, if one did.
-    fn index_burst(&mut self, first: notify::Result<notify::Event>) -> Result<()> {
+    fn index_burst(&mut self) -> Result<()> {
         self.runtime
             .activity
             .store(ACTIVITY_INDEXING, Ordering::Relaxed);
-        let mut batch = WatchBatch::new();
-        let mut rescan = ingest(&mut batch, first);
-        let deferred = self.coalesce_burst(Instant::now() + DEBOUNCE, &mut batch, &mut rescan);
-        self.apply_batch(batch, rescan)?;
+        let deferred = self.wait_out_burst(Instant::now() + DEBOUNCE);
+        if let Some(batch) = self.heard.take() {
+            self.apply_batch(batch)?;
+        }
         self.runtime
             .activity
             .store(ACTIVITY_IDLE, Ordering::Relaxed);
@@ -625,20 +595,12 @@ impl WatchLoop<'_> {
         Ok(())
     }
 
-    /// Coalesce a burst until `deadline`. A control command or a stop ends it
-    /// early and is returned, for the caller to run after the batch commits.
-    fn coalesce_burst(
-        &self,
-        deadline: Instant,
-        batch: &mut WatchBatch,
-        rescan: &mut bool,
-    ) -> Option<WatchMessage> {
+    /// Let a burst gather until `deadline`. A control command or a stop ends
+    /// it early and is returned, for the caller to run after the batch commits.
+    fn wait_out_burst(&self, deadline: Instant) -> Option<WatchMessage> {
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match self.rx.recv_timeout(remaining) {
-                Ok(WatchMessage::Fs(event_result)) => {
-                    self.queued.fetch_sub(1, Ordering::Relaxed);
-                    *rescan |= ingest(batch, event_result);
-                }
+                Ok(WatchMessage::Heard) => {}
                 Ok(message) => return Some(message),
                 Err(_) => break,
             }
@@ -646,10 +608,9 @@ impl WatchLoop<'_> {
         None
     }
 
-    /// Reconcile one coalesced batch, commit the name index and persist the
-    /// catalogue when they changed, and hand the saves it saw to the versions
-    /// worker.
-    fn apply_batch(&mut self, mut batch: WatchBatch, rescan: bool) -> Result<()> {
+    /// Reconcile one batch, commit the name index and persist the catalogue
+    /// when they changed, and hand the saves it saw to the versions worker.
+    fn apply_batch(&mut self, mut batch: WatchBatch) -> Result<()> {
         observe_origin_batch(&self.origin_writer, &batch);
         // Reconciled first, history second: only a file that reached a coherent
         // state is worth a version, and the search never waits on this.
@@ -664,6 +625,16 @@ impl WatchLoop<'_> {
             batch.paths,
             None,
         )?;
+        for folder in &batch.folders {
+            outcome.absorb(reconcile_forced(
+                active_index_writer(&mut self.writer),
+                &self.f,
+                &mut self.watches,
+                &mut self.state,
+                &self.path_scope,
+                folder,
+            )?);
+        }
         for (from, to) in history_renames {
             let _ = self
                 .history_tx
@@ -674,11 +645,8 @@ impl WatchLoop<'_> {
                 .history_tx
                 .send(crate::history::HistoryEvent::Changed(path));
         }
-        let overflowed = self.overflowed.swap(false, Ordering::Relaxed);
-        let walk_started = if rescan || overflowed {
-            if overflowed {
-                log::warn!("inotify overflow: full rescan");
-            }
+        let walk_started = if batch.rescan {
+            log::warn!("inotify overflow: full rescan");
             Some(self.rescan_sources(&mut outcome)?)
         } else {
             None

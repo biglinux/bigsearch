@@ -449,8 +449,11 @@ fn spawn_watcher(
     history: &big_search::history::SharedHistory,
     available: Vec<&'static settings::Source>,
 ) -> Result<()> {
+    // Started on this thread, at normal priority, which notify's reader thread
+    // takes: the watcher thread's idle priority would starve it.
+    let roots = available.iter().map(|source| source.path.clone()).collect();
+    let inotify = watch::start_inotify(control.commands.clone(), roots)?;
     let watch_history = history.clone();
-    let watch_commands = control.commands.clone();
     let watch_paused = control.paused.clone();
     let watch_activity = control.activity.clone();
     let watch_pending_content = control.pending_content.clone();
@@ -489,7 +492,7 @@ fn spawn_watcher(
                     watch_pending_content,
                     watch_unwatched_dirs,
                 ),
-                watch_commands,
+                inotify,
                 rx,
                 watch_history,
             ) {

@@ -524,6 +524,104 @@ fn save_before_stop_kept() {
     );
 }
 
+/// Guards: the kernel's event queue: the thread reading the sources' inotify
+/// descriptor runs at normal priority while the indexer runs idle, so a busy
+/// machine does not leave the queue to overflow into a walk of every source.
+#[test]
+fn inotify_reader_keeps_priority() {
+    let base = scratch::scratch_dir("bs-priority");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    std::fs::create_dir_all(home.join("docs")).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    let daemon = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .env_remove("BIG_SEARCH_KEEP_PRIORITY")
+            .spawn()
+            .unwrap(),
+    );
+    let pid = daemon.0.id();
+    let watcher = || {
+        thread_ids(pid, "watcher")
+            .first()
+            .map(|&tid| thread_policy(pid, tid))
+    };
+    assert!(
+        settles(|| watcher() == Some(libc::SCHED_IDLE)),
+        "the indexer does not run idle: {:?}",
+        watcher()
+    );
+    let docs = home.join("docs");
+    assert!(
+        settles(|| inotify_reader(pid, &docs).is_some()),
+        "no thread reads the watch on {}",
+        docs.display()
+    );
+    let reader = inotify_reader(pid, &docs).unwrap();
+    assert_eq!(thread_policy(pid, reader), libc::SCHED_OTHER);
+}
+
+/// The notify thread reading the inotify descriptor that watches `folder`.
+/// It waits in epoll_wait, whose first argument its parent can read in
+/// `syscall`, on an epoll descriptor whose `fdinfo` lists the inotify one.
+fn inotify_reader(pid: u32, folder: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let watch = format!("ino:{:x}", std::fs::metadata(folder).unwrap().ino());
+    let fdinfo =
+        |fd: u64| std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).unwrap_or_default();
+    let watches_folder = |fd: u64| {
+        fdinfo(fd).lines().any(|line| {
+            line.starts_with("inotify wd:") && line.split_whitespace().any(|field| field == watch)
+        })
+    };
+    // `comm` holds the first 15 bytes of notify's "notify-rs inotify loop".
+    thread_ids(pid, "notify-rs inoti").into_iter().find(|tid| {
+        let Ok(syscall) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/syscall")) else {
+            return false;
+        };
+        let Some(epoll) = syscall
+            .split_whitespace()
+            .nth(1)
+            .and_then(|arg| u64::from_str_radix(arg.trim_start_matches("0x"), 16).ok())
+        else {
+            return false;
+        };
+        fdinfo(epoll)
+            .lines()
+            .filter_map(|line| line.strip_prefix("tfd:"))
+            .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
+            .any(watches_folder)
+    })
+}
+
+/// The threads of `pid` named `name`.
+fn thread_ids(pid: u32, name: &str) -> Vec<u32> {
+    std::fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .flatten()
+        .filter(|task| {
+            std::fs::read_to_string(task.path().join("comm"))
+                .is_ok_and(|comm| comm.trim_end() == name)
+        })
+        .filter_map(|task| task.file_name().to_str()?.parse().ok())
+        .collect()
+}
+
+/// The scheduling policy of thread `tid`, field 41 of its `stat`
+/// (proc_pid_stat(5)).
+fn thread_policy(pid: u32, tid: u32) -> i32 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/stat")).unwrap();
+    // Fields from the third on follow the parenthesized name.
+    let (_, fields) = stat.rsplit_once(')').unwrap();
+    fields
+        .split_whitespace()
+        .nth(41 - 3)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
 /// The versions listed through each spelling.
 fn versions_by_spelling(matrix: &PathMatrix) {
     // Alias inside a source: one document under either spelling.
