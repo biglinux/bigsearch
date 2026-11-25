@@ -46,13 +46,6 @@ impl Heard {
         let Ok(event) = watcher_result else {
             return;
         };
-        // notify always asks for IN_OPEN; a read changes nothing and must not
-        // wake the indexer. A close after writing is how a save ends.
-        if matches!(event.kind, EventKind::Access(kind)
-            if kind != AccessKind::Close(AccessMode::Write))
-        {
-            return;
-        }
         let first = {
             let mut batch = self.batch.lock().unwrap_or_else(PoisonError::into_inner);
             let first = batch.is_none();
@@ -108,7 +101,7 @@ impl WatchBatch {
         }
     }
 
-    fn add_origin_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+    fn add_origin_paths(&mut self, paths: &[PathBuf]) {
         if self.origin_overflow || !origin::settings().watch_enabled {
             return;
         }
@@ -118,7 +111,7 @@ impl WatchBatch {
                 self.origin_overflow = true;
                 return;
             }
-            self.origin_paths.push(path);
+            self.origin_paths.push(path.clone());
         }
     }
 
@@ -176,7 +169,10 @@ impl WatchBatch {
     }
 
     fn add_path(&mut self, path: PathBuf, roots: &[PathBuf]) {
-        if self.rescan || path.ancestors().any(|folder| self.folders.contains(folder)) {
+        // Most batches hold no folder: no event pays the walk up its path.
+        let in_folder = !self.folders.is_empty()
+            && path.ancestors().any(|folder| self.folders.contains(folder));
+        if self.rescan || in_folder {
             return;
         }
         self.paths.insert(path);
@@ -233,15 +229,13 @@ pub(super) fn observe_origin_batch(origin_writer: &origin::OriginWriter, batch: 
     }
 }
 
-fn origin_paths_for_event(kind: EventKind, paths: &[PathBuf]) -> Vec<PathBuf> {
+fn origin_paths_for_event(kind: EventKind, paths: &[PathBuf]) -> &[PathBuf] {
     match kind {
-        EventKind::Create(CreateKind::Any | CreateKind::File | CreateKind::Other) => paths.to_vec(),
-        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-            paths.get(1).into_iter().cloned().collect()
-        }
+        EventKind::Create(CreateKind::Any | CreateKind::File | CreateKind::Other) => paths,
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => paths.get(1..2).unwrap_or(&[]),
         EventKind::Modify(ModifyKind::Name(
             RenameMode::Any | RenameMode::To | RenameMode::Other,
-        )) => paths.to_vec(),
-        _ => Vec::new(),
+        )) => paths,
+        _ => &[],
     }
 }

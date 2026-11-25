@@ -130,6 +130,34 @@ fn lower_policy_unclamped(refused: &std::io::Error, report: bool) {
     }
 }
 
+/// Run `start` with the calling thread at `SCHED_BATCH`, so the threads it
+/// spawns take that policy, then give the caller back its own. A batch thread
+/// keeps a normal program's share of the CPU, but when an event wakes it, it
+/// waits for the running task's turn to end instead of preempting it: on a
+/// busy machine it wakes less often and reads more each time. Best-effort: a
+/// refusal leaves the threads at the caller's policy.
+pub fn spawn_batched<T>(start: impl FnOnce() -> T) -> T {
+    let param = libc::sched_param { sched_priority: 0 };
+    // SAFETY: sched_getscheduler on the calling thread (pid = 0).
+    let policy = unsafe { libc::sched_getscheduler(0) };
+    let batched = policy >= 0
+        // SAFETY: sched_setscheduler on the calling thread (pid = 0); `param`
+        // outlives the call.
+        && unsafe { libc::sched_setscheduler(0, libc::SCHED_BATCH, &raw const param) } == 0;
+    if !batched {
+        let error = std::io::Error::last_os_error();
+        log::warn!("the file watch reader keeps its starting thread's policy: {error}");
+        return start();
+    }
+    let started = start();
+    // SAFETY: as above; `policy` came from the same thread.
+    if unsafe { libc::sched_setscheduler(0, policy, &raw const param) } != 0 {
+        let error = std::io::Error::last_os_error();
+        log::warn!("the thread that started the file watch stays SCHED_BATCH: {error}");
+    }
+    started
+}
+
 /// The cgroup indexing threads join, once [`prepare_idle_cgroup`] made it.
 struct IdleCgroup {
     dir: std::path::PathBuf,

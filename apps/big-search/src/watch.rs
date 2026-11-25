@@ -22,7 +22,7 @@ use crate::scan;
 use anyhow::{Context, Result};
 use content_backfill::{ContentBackfill, compact_when_worth_it, run_content_backfill_batch};
 use event_batch::{Heard, WatchBatch, observe_origin_batch};
-use notify::{RecommendedWatcher, recommended_watcher};
+use notify::{Config, EventKindMask, RecommendedWatcher, Watcher};
 use reconcile::{evict, reconcile_batch, reconcile_forced};
 use start::{catch_up_at_start, watch_initial_dirs};
 use std::path::PathBuf;
@@ -243,8 +243,9 @@ pub struct Inotify {
 
 /// Start inotify for the sources `roots`; each event heard wakes the watcher
 /// loop through `wake`. Call it from a thread at normal priority: notify's
-/// reader thread takes its caller's, and one at the indexer's idle priority
-/// falls behind the kernel's queue on a busy machine.
+/// reader thread takes its caller's nice value and cgroup, and one at the
+/// indexer's idle priority falls behind the kernel's queue on a busy machine.
+/// The reader runs `SCHED_BATCH` ([`crate::throttle::spawn_batched`]).
 ///
 /// # Errors
 ///
@@ -252,8 +253,15 @@ pub struct Inotify {
 pub fn start_inotify(wake: Sender<WatchMessage>, roots: Vec<PathBuf>) -> Result<Inotify> {
     let heard = Arc::new(Heard::new(roots, wake));
     let hearing = Arc::clone(&heard);
-    let watcher = recommended_watcher(move |watcher_result| hearing.hear(watcher_result))
-        .context("inotify init")?;
+    // Without IN_OPEN, which notify asks for by default: every read under a
+    // source, the indexer's own included, would cost the reader an event.
+    // A close after writing is how a save ends.
+    let config =
+        Config::default().with_event_kinds(EventKindMask::CORE | EventKindMask::ACCESS_CLOSE);
+    let watcher = crate::throttle::spawn_batched(|| {
+        RecommendedWatcher::new(move |watcher_result| hearing.hear(watcher_result), config)
+    })
+    .context("inotify init")?;
     Ok(Inotify { watcher, heard })
 }
 

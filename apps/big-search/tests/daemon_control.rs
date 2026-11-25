@@ -525,8 +525,9 @@ fn save_before_stop_kept() {
 }
 
 /// Guards: the kernel's event queue: the thread reading the sources' inotify
-/// descriptor runs at normal priority while the indexer runs idle, so a busy
-/// machine does not leave the queue to overflow into a walk of every source.
+/// descriptor keeps a normal program's share (`SCHED_BATCH`) while the indexer
+/// runs idle, so a busy machine does not leave the queue to overflow into a
+/// walk of every source.
 #[test]
 fn inotify_reader_keeps_priority() {
     let base = scratch::scratch_dir("bs-priority");
@@ -542,6 +543,13 @@ fn inotify_reader_keeps_priority() {
             .unwrap(),
     );
     let pid = daemon.0.id();
+    // The main thread binds the socket once it has started the sources' watch
+    // and the query readers' watches on the index folders, none of which waits
+    // on the idle indexer.
+    assert!(
+        wait_socket(&run.join("biglinux/indexd.sock")),
+        "the daemon did not bind its socket"
+    );
     let watcher = || {
         thread_ids(pid, "watcher")
             .first()
@@ -552,47 +560,67 @@ fn inotify_reader_keeps_priority() {
         "the indexer does not run idle: {:?}",
         watcher()
     );
-    let docs = home.join("docs");
+    let data_folder = xdg_storage_home.join("big-search");
+    let index_folders = [data_folder.join("index"), data_folder.join("content-index")];
+    let readers = || sources_readers(pid, &index_folders);
     assert!(
-        settles(|| inotify_reader(pid, &docs).is_some()),
-        "no thread reads the watch on {}",
-        docs.display()
+        settles(|| readers().len() == 1),
+        "not one thread reads the sources' watch: {:?}",
+        readers()
     );
-    let reader = inotify_reader(pid, &docs).unwrap();
-    assert_eq!(thread_policy(pid, reader), libc::SCHED_OTHER);
+    assert_eq!(thread_policy(pid, readers()[0]), libc::SCHED_BATCH);
+    // The thread that started it answers queries.
+    assert_eq!(thread_policy(pid, pid), libc::SCHED_OTHER);
 }
 
-/// The notify thread reading the inotify descriptor that watches `folder`.
-/// It waits in epoll_wait, whose first argument its parent can read in
-/// `syscall`, on an epoll descriptor whose `fdinfo` lists the inotify one.
-fn inotify_reader(pid: u32, folder: &Path) -> Option<u32> {
+/// The notify threads reading an inotify descriptor that watches none of
+/// `index_folders`, which the query readers watch for commits. Each waits in
+/// epoll_wait, whose first argument its parent can read in `syscall`, on an
+/// epoll descriptor whose `fdinfo` lists the inotify one.
+fn sources_readers(pid: u32, index_folders: &[PathBuf]) -> Vec<u32> {
     use std::os::unix::fs::MetadataExt;
-    let watch = format!("ino:{:x}", std::fs::metadata(folder).unwrap().ino());
+    let index_watches: Vec<String> = index_folders
+        .iter()
+        .map(|folder| format!("ino:{:x}", std::fs::metadata(folder).unwrap().ino()))
+        .collect();
     let fdinfo =
         |fd: u64| std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).unwrap_or_default();
-    let watches_folder = |fd: u64| {
+    let is_inotify = |fd: &u64| {
+        std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))
+            .is_ok_and(|target| target.as_os_str() == "anon_inode:inotify")
+    };
+    let watches_index = |fd: u64| {
         fdinfo(fd).lines().any(|line| {
-            line.starts_with("inotify wd:") && line.split_whitespace().any(|field| field == watch)
+            line.starts_with("inotify wd:")
+                && line
+                    .split_whitespace()
+                    .any(|field| index_watches.iter().any(|watch| watch == field))
         })
     };
     // `comm` holds the first 15 bytes of notify's "notify-rs inotify loop".
-    thread_ids(pid, "notify-rs inoti").into_iter().find(|tid| {
-        let Ok(syscall) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/syscall")) else {
-            return false;
-        };
-        let Some(epoll) = syscall
-            .split_whitespace()
-            .nth(1)
-            .and_then(|arg| u64::from_str_radix(arg.trim_start_matches("0x"), 16).ok())
-        else {
-            return false;
-        };
-        fdinfo(epoll)
-            .lines()
-            .filter_map(|line| line.strip_prefix("tfd:"))
-            .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
-            .any(watches_folder)
-    })
+    thread_ids(pid, "notify-rs inoti")
+        .into_iter()
+        .filter(|tid| {
+            let Ok(syscall) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/syscall"))
+            else {
+                return false;
+            };
+            let Some(epoll) = syscall
+                .split_whitespace()
+                .nth(1)
+                .and_then(|arg| u64::from_str_radix(arg.trim_start_matches("0x"), 16).ok())
+            else {
+                return false;
+            };
+            let inotify: Vec<u64> = fdinfo(epoll)
+                .lines()
+                .filter_map(|line| line.strip_prefix("tfd:"))
+                .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
+                .filter(is_inotify)
+                .collect();
+            !inotify.is_empty() && !inotify.into_iter().any(watches_index)
+        })
+        .collect()
 }
 
 /// The threads of `pid` named `name`.
