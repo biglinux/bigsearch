@@ -114,11 +114,8 @@ fn scope() -> &'static crate::scan::Scope {
     SCOPE.get_or_init(crate::scan::Scope::compile)
 }
 
-/// The nearest folder above `path` that is the root of a work tree
-/// ([`crate::scan::work_tree_root`]).
-///
-/// The walk stops at the catalogued folder that owns `path`: a repository
-/// above it belongs to something the person did not ask to have searched.
+/// The nearest work-tree root above `path` ([`crate::scan::work_tree_root`]),
+/// looked for no higher than the source that owns `path`.
 pub(super) fn work_tree(path: &Path) -> Option<&Path> {
     let top = crate::settings::sources()
         .owner(path)

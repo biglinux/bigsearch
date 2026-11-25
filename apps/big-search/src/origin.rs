@@ -506,6 +506,34 @@ pub(crate) fn forget_all(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The origin store's tables, created when missing.
+const ORIGIN_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1');
+    CREATE TABLE IF NOT EXISTS file_origin (
+        path TEXT PRIMARY KEY,
+        dev INTEGER,
+        ino INTEGER,
+        fs INTEGER,
+        born INTEGER,
+        kind TEXT NOT NULL,
+        confidence INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        source_app TEXT,
+        source_path TEXT,
+        source_device_id TEXT,
+        source_device_label TEXT,
+        source_domain TEXT,
+        first_seen_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_file_origin_kind_time
+        ON file_origin(kind, first_seen_at DESC);
+";
+
 fn open_writer(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -513,34 +541,7 @@ fn open_writer(path: &Path) -> Result<Connection> {
     }
     let conn = Connection::open(path)?;
     configure_connection(&conn)?;
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1');
-        CREATE TABLE IF NOT EXISTS file_origin (
-            path TEXT PRIMARY KEY,
-            dev INTEGER,
-            ino INTEGER,
-            fs INTEGER,
-            born INTEGER,
-            kind TEXT NOT NULL,
-            confidence INTEGER NOT NULL,
-            label TEXT NOT NULL,
-            source_app TEXT,
-            source_path TEXT,
-            source_device_id TEXT,
-            source_device_label TEXT,
-            source_domain TEXT,
-            first_seen_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_file_origin_kind_time
-            ON file_origin(kind, first_seen_at DESC);
-        ",
-    )?;
+    conn.execute_batch(ORIGIN_SCHEMA)?;
     add_identity_columns(&conn)?;
     conn.execute_batch(
         "DROP INDEX IF EXISTS idx_file_origin_dev_ino;
@@ -569,11 +570,9 @@ fn open_writer(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Give a store whose rows recorded `st_dev`, which btrfs draws anew at each
-/// mount, the columns of [`crate::history::identity`], once: a row whose path
-/// still holds the file it recorded takes that file's, the others none and
-/// are found by path alone. `dev` stays, unread, for the older builds that
-/// still write it.
+/// Add the [`crate::history::identity`] columns, once, to a store that recorded
+/// `st_dev` (btrfs draws it anew per mount): only a row whose path still holds
+/// the file it recorded gets one. `dev` stays, unread, for older builds.
 #[expect(
     clippy::disallowed_methods,
     reason = "kept: compares the st_dev an older build recorded"
@@ -788,16 +787,10 @@ fn select_records(
     Ok(by_path)
 }
 
-/// Fill in the paths the name lookup missed by the file's identity, filed
-/// under the name asked for, so a renamed file keeps its origin.
-///
-/// A downloaded document renamed in another program keeps its origin: the row
-/// still holds the earlier name, and the file is the same file (same
-/// filesystem, inode and birth). The record found this way is filed under the
-/// name that was asked for, not the stale one it is stored under.
-///
-/// The price, on a filesystem that records no birth time and reuses inode
-/// numbers: a deleted download's origin can land on an unrelated new file.
+/// Fill in the paths the name lookup missed by the file's identity (filesystem,
+/// inode, birth), filed under the name asked for, so a renamed file keeps its
+/// origin. Without birth times, a deleted download's origin can land on a new
+/// file that reused its inode.
 fn attach_by_identity(
     conn: &Connection,
     paths: &[String],

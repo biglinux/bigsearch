@@ -722,11 +722,8 @@ impl History {
             .collect()
     }
 
-    /// Find or create the catalogue row for this document. The row at its
-    /// path is its own, as an editor's save is a new file at the same path,
-    /// unless it records another file that arrived unheard: where its document
-    /// was found gone, or born before this run began. That row is parked
-    /// (DESIGN.md, section 11).
+    /// Find or create the row for this document: the row at its path, unless it
+    /// records another file that arrived unheard, which parks it (DESIGN.md, section 11).
     fn upsert_file(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<i64> {
         let conn = self.conn.as_ref().expect("checked by the caller");
         let key = path.to_string_lossy().into_owned();

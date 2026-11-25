@@ -223,6 +223,30 @@ const STORE_RECORDING_DEVICES: &str = "
     CREATE INDEX idx_file_origin_dev_ino ON file_origin(dev, ino);
 ";
 
+/// An old store at `db` with a row per `(path, ino)`, each on device `dev`.
+fn write_store_recording_devices(db: &Path, dev: i64, rows: &[(String, i64)]) {
+    let old = Connection::open(db).unwrap();
+    old.execute_batch(STORE_RECORDING_DEVICES).unwrap();
+    for (path, ino) in rows {
+        old.execute(
+            "INSERT INTO file_origin(path, dev, ino, kind, confidence, label,
+                                     first_seen_at, updated_at)
+             VALUES (?1, ?2, ?3, 'web_download', 3, '', 1, 1)",
+            params![path, dev, ino],
+        )
+        .unwrap();
+    }
+}
+
+fn origin_index_names(conn: &Connection) -> Vec<String> {
+    conn.prepare("SELECT name FROM pragma_index_list('file_origin') ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 /// Guards: persisted format: a store whose rows recorded `st_dev` opens with
 /// its rows kept, each given the identity of the file at its path when that
 /// is still the file it recorded, and none otherwise.
@@ -239,23 +263,15 @@ fn store_recording_devices_migrated() {
     std::fs::write(&file, b"pdf").unwrap();
     let metadata = std::fs::symlink_metadata(&file).unwrap();
     let (dev, ino) = (metadata.dev().cast_signed(), metadata.ino().cast_signed());
-    {
-        let old = Connection::open(&db).unwrap();
-        old.execute_batch(STORE_RECORDING_DEVICES).unwrap();
-        for (path, ino) in [
+    write_store_recording_devices(
+        &db,
+        dev,
+        &[
             (path_key(&file), ino),
             (path_key(&folder.join("replaced.pdf")), ino + 1),
             ("/gone/x.pdf".to_string(), ino),
-        ] {
-            old.execute(
-                "INSERT INTO file_origin(path, dev, ino, kind, confidence, label,
-                                         first_seen_at, updated_at)
-                 VALUES (?1, ?2, ?3, 'web_download', 3, '', 1, 1)",
-                params![path, dev, ino],
-            )
-            .unwrap();
-        }
-    }
+        ],
+    );
     std::fs::write(folder.join("replaced.pdf"), b"another").unwrap();
 
     let conn = open_writer(&db).unwrap();
@@ -268,13 +284,7 @@ fn store_recording_devices_migrated() {
         .collect();
     let (fs, _, born) = crate::history::identity(&file, &metadata).unwrap();
     assert_eq!(identities, [(Some(fs), born), (None, None), (None, None)]);
-    let indexes: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_index_list('file_origin') ORDER BY name")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
+    let indexes = origin_index_names(&conn);
     assert!(
         indexes.contains(&"idx_file_origin_fs_ino".to_string()),
         "{indexes:?}"
