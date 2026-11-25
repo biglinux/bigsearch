@@ -159,7 +159,7 @@ tantivy.
 ### Name search
 
 Names are folded once, before the grams (`index::name_text` over
-`extract::fold_lower`: precomposed or decomposed accents, Latin through
+`fold::fold_lower`: precomposed or decomposed accents, Latin through
 tantivy's `AsciiFoldingFilter`, ё to е, Greek tonos and final sigma, separators
 as spaces and a space at each end). The post-filter reads the same text, so
 recall and verification agree.
@@ -219,7 +219,7 @@ filter, and counts its total from the postings up to a ceiling
 
 ### Folding and scripts
 
-Every text is put in NFKC before anything else reads it (`extract::compose`,
+Every text is put in NFKC before anything else reads it (`fold::compose`,
 used by `fold_lower` and by the content tokenizer, so names, pages, content and
 queries agree): Korean syllables written as jamo, kana with a separate voicing
 mark (macOS names, some PDFs), halfwidth katakana, Arabic presentation forms,
@@ -231,7 +231,7 @@ this finds 100 % of Korean NFD documents (0 % without), and of Japanese NFD and
 halfwidth documents (79 % and 37 % without), with no other result changed.
 
 Content words are folded at index time like names (`index::ScriptFold` over
-`extract::fold_script_into`, then ASCII folding): combining marks, ё, Greek
+`fold::fold_script_into`, then ASCII folding): combining marks, ё, Greek
 accents and final sigma, Arabic hamza alef, alef maqsura and Persian yeh,
 Persian kaf, ta marbuta as heh, vowel signs, tatweel and the article. The
 tokenizer keeps combining marks inside a word, so a decomposed accent does not

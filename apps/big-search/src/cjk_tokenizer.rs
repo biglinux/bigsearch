@@ -119,7 +119,7 @@ fn tokenize(text: &str) -> Vec<Token> {
 /// separator or letter is decided from its byte, and a word is copied into the
 /// token as one slice.
 pub struct CjkTokenStream<'a> {
-    /// The text composed as [`crate::extract::compose`] says: a decomposed
+    /// The text composed as [`crate::fold::compose`] says: a decomposed
     /// Hangul syllable or halfwidth kana must be one character before it can
     /// be part of a bigram. Offsets point into this text.
     text: std::borrow::Cow<'a, str>,
@@ -278,7 +278,7 @@ impl Tokenizer for CjkFriendlyTokenizer {
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
         CjkTokenStream {
-            text: crate::extract::compose(text),
+            text: crate::fold::compose(text),
             cursor: 0,
             run: None,
             unigrams: self.unigrams,
@@ -349,7 +349,7 @@ mod tests {
             "relato\u{301}rio \u{301}solto ca\u{327}a\u{303}o",
         ];
         for text in corpus {
-            let expected = tokenize(&crate::extract::compose(text));
+            let expected = tokenize(&crate::fold::compose(text));
             let got = streamed(text);
             assert_eq!(got.len(), expected.len(), "count for {text:?}");
             for (got, expected) in got.iter().zip(expected.iter()) {

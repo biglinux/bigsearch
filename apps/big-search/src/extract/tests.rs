@@ -118,19 +118,6 @@ fn unclosed_script_hides_the_rest() {
     assert_eq!(html_text("<p>kept<script>a<script>b<style>c"), "\nkept");
 }
 
-#[test]
-fn composed_text_stops_at_extraction_cap() {
-    let _lock = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _cap = crate::test_env::EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
-    let cap = max_extract_bytes();
-    // U+FDFA is 3 bytes and 33 under NFKC.
-    let text = "\u{FDFA}".repeat(cap / 3);
-    let composed = compose(&text);
-    assert!(composed.len() <= cap && composed.len() > cap - 33);
-}
-
 /// Paragraphs become lines, a word Word split across runs stays whole, and
 /// entity references come back as characters.
 #[test]
@@ -144,34 +131,6 @@ fn office_lines_keep_whole_words() {
     let mut out = String::new();
     xml_text_lines(odt, &mut out);
     assert_eq!(out, "Ata da reunião\nPauta\t1 item\n");
-}
-
-/// What a person types matches what the name or page writes, in every script
-/// the folding covers; other scripts pass through untouched.
-#[test]
-fn folding_matches_what_people_type() {
-    for (written, typed) in [
-        ("Relatório FINAL 2026", "relatorio final 2026"),
-        ("Relato\u{301}rio", "relatorio"),
-        ("ÇÃO çao ÑÖÜ", "cao cao nou"),
-        ("Straße GROSS", "strasse gross"),
-        ("Łódź Ørsted Æble", "lodz orsted aeble"),
-        ("İstanbul ılık", "istanbul ilik"),
-        ("Отчёт ЁЛКА", "отчет елка"),
-        ("Αναφορά ΟΔΟΣ οδός", "αναφορα οδοσ οδοσ"),
-        ("أحمد مُحَمَّد مستشفى", "احمد محمد مستشفي"),
-        ("مدرسة کتاب فارسی", "مدرسه كتاب فارسي"),
-        ("中文内容 ABC", "中文内容 abc"),
-        ("會議記錄 资料庫", "会议记录 资料库"),
-        ("\u{1112}\u{1161}\u{11AB}\u{1100}\u{116E}\u{11A8}", "한국"),
-        ("テ\u{3099}ータ ﾃﾞｰﾀ", "データ データ"),
-        ("ＡＢＣ１２ ﬁle", "abc12 file"),
-        ("ﻣﺮﺣﺒﺎ \u{F900}", "مرحبا 岂"),
-        ("🙂 EMOJI", "🙂 emoji"),
-        ("", ""),
-    ] {
-        assert_eq!(fold_lower(written), typed, "for {written:?}");
-    }
 }
 
 fn temporary_extract_dir(label: &str) -> crate::test_env::ScratchDir {

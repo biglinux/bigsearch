@@ -23,6 +23,7 @@ pub mod extract;
 mod extract_mail;
 mod extract_pdf;
 mod extract_rtf;
+mod fold;
 pub mod history;
 pub mod index;
 pub mod ipc;
