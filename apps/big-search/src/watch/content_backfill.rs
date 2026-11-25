@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tantivy::{Index, IndexWriter};
 /// Longest wait after content backfill batches keep failing (a full disk, a
-/// damaged index): the daemon must not wake every few seconds to fail again.
+/// damaged index) or passes keep finding every file busy (a process out of
+/// descriptors): the daemon must not wake every few seconds to fail again.
 const MAX_BACKFILL_RETRY: Duration = Duration::from_secs(600);
 
 pub(super) struct ContentBackfill {
@@ -41,6 +42,11 @@ pub(super) struct ContentBackfill {
     /// batch left.
     pass_deferred: usize,
     pass_busy: usize,
+    /// Some file this pass was read or refused rather than left busy.
+    pass_settled_any: bool,
+    /// Passes in a row that left files busy and settled none; each one doubles
+    /// the wait before the next.
+    busy_passes: u32,
     /// Time until the earliest file this pass deferred leaves its cooldown.
     pass_retry_in: Option<Duration>,
     /// Shared gauge read by the IPC thread: files the pass left unread, by the
@@ -67,6 +73,8 @@ impl ContentBackfill {
             next_batch_at: None,
             pass_deferred: 0,
             pass_busy: 0,
+            pass_settled_any: false,
+            busy_passes: 0,
             pass_retry_in: None,
             deferred_gauge,
             // The first pass after a start prunes unconditionally: deletions may
@@ -81,11 +89,14 @@ impl ContentBackfill {
     pub(super) fn retry_after_failure(&mut self) {
         self.request();
         self.failures = self.failures.saturating_add(1);
-        let wait = self
-            .idle_delay
-            .saturating_mul(1 << self.failures.min(10))
-            .min(MAX_BACKFILL_RETRY);
-        self.snooze_until = Some(Instant::now() + wait);
+        self.snooze_until = Some(Instant::now() + self.doubled_delay(self.failures));
+    }
+
+    /// The idle delay doubled `times` times, at most [`MAX_BACKFILL_RETRY`].
+    fn doubled_delay(&self, times: u32) -> Duration {
+        self.idle_delay
+            .saturating_mul(1 << times.min(10))
+            .min(MAX_BACKFILL_RETRY)
     }
 
     pub(super) fn note_deletion(&mut self) {
@@ -126,6 +137,7 @@ impl ContentBackfill {
         self.bypass_cooldown = false;
         self.pass_deferred = 0;
         self.pass_busy = 0;
+        self.pass_settled_any = false;
         self.pass_retry_in = None;
     }
 
@@ -195,6 +207,7 @@ pub(super) fn run_content_backfill_batch(
         )?;
         crate::throttle::release_idle_memory();
         content_backfill.pass_busy += read.busy;
+        content_backfill.pass_settled_any |= read.busy < attempted;
         Some((attempted, read.indexed))
     };
     content_backfill.deferred_gauge.store(
@@ -292,16 +305,22 @@ fn end_pass(
     crate::throttle::release_idle_memory();
     let deferred = content_backfill.pass_deferred;
     let busy = content_backfill.pass_busy;
+    if busy > 0 && !content_backfill.pass_settled_any {
+        content_backfill.busy_passes = content_backfill.busy_passes.saturating_add(1);
+    } else {
+        content_backfill.busy_passes = 0;
+    }
     if deferred > 0 || busy > 0 {
-        // A busy file is tried again after the idle delay, a deferred one once
-        // the earliest leaves its cooldown; a content search warms either sooner.
-        let retry_in = if busy > 0 {
-            content_backfill.idle_delay
-        } else {
-            content_backfill
-                .pass_retry_in
-                .unwrap_or(content_backfill.idle_delay)
-        };
+        // A busy file is tried again after the idle delay, doubled for each pass
+        // in a row that settled nothing; a deferred one once the earliest leaves
+        // its cooldown. A file change or a content search asks again sooner.
+        let busy_retry_in =
+            (busy > 0).then(|| content_backfill.doubled_delay(content_backfill.busy_passes));
+        let retry_in = busy_retry_in
+            .into_iter()
+            .chain(content_backfill.pass_retry_in)
+            .min()
+            .unwrap_or(content_backfill.idle_delay);
         log::info!(
             "content backfill: {deferred} file(s) deferred by edit cooldown, {busy} busy in another process; retry in ~{}s",
             retry_in.as_secs()
@@ -390,7 +409,8 @@ mod tests {
     }
 
     /// A file another process holds busy keeps the backfill pending, so a
-    /// later pass reads it although the file never changes again.
+    /// later pass reads it although the file never changes again; passes that
+    /// read nothing wait longer each time.
     #[test]
     fn busy_file_keeps_the_backfill_pending() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -409,11 +429,19 @@ mod tests {
 
         let mut holder = crate::test_env::hold_write_lease(&shared);
         let under_lease = run_content_backfill_batch(&index, &mut writer, &f, &mut backfill);
+        let first_wait = backfill.wait_before_batch();
+        let still_leased = run_content_backfill_batch(&index, &mut writer, &f, &mut backfill);
+        let second_wait = backfill.wait_before_batch();
         holder.kill().unwrap();
         holder.wait().unwrap();
         assert!(
             !under_lease.unwrap(),
             "a pass that left a file unread is not complete"
+        );
+        assert!(!still_leased.unwrap());
+        assert!(
+            second_wait > first_wait,
+            "{second_wait:?} after {first_wait:?}"
         );
         assert_eq!(gauge.load(Ordering::Relaxed), 1);
         assert!(backfill.should_run_when_idle(&AtomicBool::new(false)));
@@ -428,7 +456,7 @@ mod tests {
     /// A file the cooldown deferred in an early batch of a pass still keeps the
     /// pass pending when the last batch defers nothing.
     #[test]
-    fn deferral_in_an_early_batch_keeps_the_backfill_pending() {
+    fn early_deferral_keeps_pass_pending() {
         let _lock = ENV_LOCK.lock().unwrap();
         let base = crate::test_env::scratch_dir("bs-backfill-deferred");
         let _env = backfill_env(&base, "1", "3600");
