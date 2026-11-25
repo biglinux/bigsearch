@@ -329,7 +329,8 @@ struct PathMatrix {
     docs: PathBuf,
     outside: PathBuf,
     sock: PathBuf,
-    _daemon: KillOnDrop,
+    /// Stopped before `base` is removed, or it writes its data folder again.
+    daemon: Option<KillOnDrop>,
     _run: scratch::ScratchDir,
 }
 
@@ -371,7 +372,7 @@ impl PathMatrix {
             docs,
             outside,
             sock,
-            _daemon: daemon,
+            daemon: Some(daemon),
             _run: run,
         }
     }
@@ -432,6 +433,7 @@ impl PathMatrix {
 
 impl Drop for PathMatrix {
     fn drop(&mut self) {
+        drop(self.daemon.take());
         let _ = std::fs::remove_dir_all(&self.base);
     }
 }
