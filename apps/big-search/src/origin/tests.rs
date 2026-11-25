@@ -38,7 +38,7 @@ fn writer_waits_for_open_transaction() {
 #[test]
 fn open_drops_statistics() {
     let db = temporary_origin_path("statistics");
-    let insert = "INSERT INTO file_origin(path, dev, ino, kind, confidence, label,
+    let insert = "INSERT INTO file_origin(path, fs, ino, kind, confidence, label,
                                           first_seen_at, updated_at)
                   VALUES (?1, 1, ?2, 'downloaded', 1, 'x', 0, 0)";
     {
@@ -53,14 +53,14 @@ fn open_drops_statistics() {
     let plan = |conn: &Connection| -> String {
         conn.query_row(
             "EXPLAIN QUERY PLAN SELECT path FROM file_origin
-              WHERE dev = 1 AND ino = 7 ORDER BY updated_at DESC LIMIT 1",
+              WHERE fs = 1 AND ino = 7 ORDER BY updated_at DESC LIMIT 1",
             [],
             |row| row.get(3),
         )
         .unwrap()
     };
     let watcher = Connection::open(&db).unwrap();
-    assert!(!plan(&watcher).contains("idx_file_origin_dev_ino"));
+    assert!(!plan(&watcher).contains("idx_file_origin_fs_ino"));
     let conn = open_writer(&db).unwrap();
     // A statement that runs, unlike EXPLAIN, notices the schema changed.
     watcher
@@ -70,7 +70,7 @@ fn open_drops_statistics() {
         .unwrap();
     for conn in [&conn, &watcher] {
         let plan = plan(conn);
-        assert!(plan.contains("idx_file_origin_dev_ino"), "{plan}");
+        assert!(plan.contains("idx_file_origin_fs_ino"), "{plan}");
     }
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
@@ -114,8 +114,9 @@ fn a_download_never_replaces_another_origin() {
     let conn = open_writer(&db).unwrap();
     let record = |kind, domain: Option<&str>| OriginRecord {
         path: "/d/report.pdf".to_string(),
-        dev: None,
+        fs: None,
         ino: None,
+        born: None,
         kind,
         confidence: OriginConfidence::High,
         source_app: None,
@@ -146,8 +147,9 @@ fn label_built_on_read() {
     let conn = open_writer(&db).unwrap();
     let record = OriginRecord {
         path: "/d/copy.pdf".to_string(),
-        dev: None,
+        fs: None,
         ino: None,
+        born: None,
         kind: OriginKind::RemovableCopy,
         confidence: OriginConfidence::High,
         source_app: None,
@@ -166,4 +168,131 @@ fn label_built_on_read() {
     let read = select_record(&conn, "/d/copy.pdf").unwrap().unwrap();
     assert_eq!(read.label(), "Copied from the removable drive KINGSTON");
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// A renamed file keeps its origin, found by its identity under the new
+/// name; a file given a deleted one's inode number, born later, does not
+/// take it.
+#[test]
+fn renamed_file_found_by_identity() {
+    let db = temporary_origin_path("identity");
+    let folder = db.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&folder).unwrap();
+    let (before, after) = (folder.join("report.pdf"), folder.join("renamed.pdf"));
+    std::fs::write(&before, b"pdf").unwrap();
+    let conn = open_writer(&db).unwrap();
+    let arrived =
+        OriginRecord::arrived(&before, OriginKind::WebDownload, OriginConfidence::High, 1);
+    upsert_record(&conn, &arrived).unwrap();
+    std::fs::rename(&before, &after).unwrap();
+    let key = path_key(&after);
+    let by_name = |conn: &Connection| select_record(conn, &key).unwrap();
+    let in_listing = |conn: &Connection| select_records(conn, std::slice::from_ref(&key)).unwrap();
+    assert_eq!(
+        by_name(&conn).map(|record| record.kind),
+        Some(OriginKind::WebDownload)
+    );
+    assert!(in_listing(&conn).contains_key(&key));
+
+    conn.execute("UPDATE file_origin SET born = born + 1", [])
+        .unwrap();
+    assert!(by_name(&conn).is_none());
+    assert!(in_listing(&conn).is_empty());
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// The store as it was while rows recorded `st_dev`.
+const STORE_RECORDING_DEVICES: &str = "
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO meta(key, value) VALUES ('schema_version', '1');
+    CREATE TABLE file_origin (
+        path TEXT PRIMARY KEY,
+        dev INTEGER,
+        ino INTEGER,
+        kind TEXT NOT NULL,
+        confidence INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        source_app TEXT,
+        source_path TEXT,
+        source_device_id TEXT,
+        source_device_label TEXT,
+        source_domain TEXT,
+        first_seen_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_file_origin_dev_ino ON file_origin(dev, ino);
+";
+
+/// Guards: persisted format: a store whose rows recorded `st_dev` opens with
+/// its rows kept, each given the identity of the file at its path when that
+/// is still the file it recorded, and none otherwise.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "writes the st_dev an older build recorded"
+)]
+fn store_recording_devices_migrated() {
+    let db = temporary_origin_path("migrate");
+    let folder = db.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("kept.pdf");
+    std::fs::write(&file, b"pdf").unwrap();
+    let metadata = std::fs::symlink_metadata(&file).unwrap();
+    let (dev, ino) = (metadata.dev().cast_signed(), metadata.ino().cast_signed());
+    {
+        let old = Connection::open(&db).unwrap();
+        old.execute_batch(STORE_RECORDING_DEVICES).unwrap();
+        for (path, ino) in [
+            (path_key(&file), ino),
+            (path_key(&folder.join("replaced.pdf")), ino + 1),
+            ("/gone/x.pdf".to_string(), ino),
+        ] {
+            old.execute(
+                "INSERT INTO file_origin(path, dev, ino, kind, confidence, label,
+                                         first_seen_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'web_download', 3, '', 1, 1)",
+                params![path, dev, ino],
+            )
+            .unwrap();
+        }
+    }
+    std::fs::write(folder.join("replaced.pdf"), b"another").unwrap();
+
+    let conn = open_writer(&db).unwrap();
+    let identities: Vec<(Option<i64>, Option<i64>)> = conn
+        .prepare("SELECT fs, born FROM file_origin ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let (fs, _, born) = crate::history::identity(&file, &metadata).unwrap();
+    assert_eq!(identities, [(Some(fs), born), (None, None), (None, None)]);
+    let indexes: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_index_list('file_origin') ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        indexes.contains(&"idx_file_origin_fs_ino".to_string()),
+        "{indexes:?}"
+    );
+    assert!(
+        !indexes.contains(&"idx_file_origin_dev_ino".to_string()),
+        "{indexes:?}"
+    );
+    drop(conn);
+    // Opened again, nothing changes.
+    let conn = open_writer(&db).unwrap();
+    let rows: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM file_origin WHERE fs IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1);
+    let _ = std::fs::remove_dir_all(&folder);
 }

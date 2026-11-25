@@ -1,3 +1,4 @@
+use super::disk::filesystem_id;
 use super::*;
 
 pub(super) fn store_with(conn: Connection, dir: &Path) -> History {
@@ -598,7 +599,7 @@ fn store_recording_devices_migrated() {
 
     let conn = open_store(&db).unwrap();
     let rows = migrated_rows(&conn);
-    let here = filesystem_id(&dir, std::fs::metadata(&dir).unwrap().dev()).unwrap();
+    let here = filesystem_id(&dir, &std::fs::metadata(&dir).unwrap()).unwrap();
     assert_eq!(
         rows,
         [

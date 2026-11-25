@@ -124,7 +124,7 @@ fn filesystems_of_keys(conn: &Connection) -> Result<Vec<(i64, i64)>> {
         };
         let fs = *by_folder.entry(folder.to_path_buf()).or_insert_with(|| {
             std::fs::metadata(folder)
-                .and_then(|metadata| super::disk::filesystem_id(folder, metadata.dev()))
+                .and_then(|metadata| super::disk::filesystem_id(folder, &metadata))
                 .ok()
         });
         if let Some(fs) = fs {

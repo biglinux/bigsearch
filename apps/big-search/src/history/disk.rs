@@ -1,7 +1,9 @@
 //! What the filesystem allows: sharing a document's blocks with `FICLONE`, and
-//! how much free space must stay for that to remain harmless.
+//! how much free space must stay for that to remain harmless; and what tells
+//! one file from another.
 //!
-//! [`clone_file`] is also how `content_dedupe` merges identical files.
+//! [`clone_file`] is also how `content_dedupe` merges identical files, and
+//! [`identity`] how `origin` finds a renamed file's record.
 
 use std::io;
 use std::os::fd::AsRawFd;
@@ -63,17 +65,45 @@ pub(super) fn disk_capacity(path: &Path) -> io::Result<DiskCapacity> {
     })
 }
 
+/// What tells one file from another: its filesystem ([`filesystem_id`]),
+/// its inode number, and the birth time where the filesystem records one,
+/// since XFS hands a deleted document's inode number to the next new file.
+pub(crate) fn identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> io::Result<(i64, i64, Option<i64>)> {
+    Ok((
+        filesystem_id(path, metadata)?,
+        metadata.ino().cast_signed(),
+        born(metadata),
+    ))
+}
+
+/// A file's birth time in nanoseconds, where its filesystem records one.
+pub(super) fn born(metadata: &std::fs::Metadata) -> Option<i64> {
+    metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|since| i64::try_from(since.as_nanos()).ok())
+}
+
 /// The filesystem holding `path`: `f_fsid`, which ext4 and btrfs derive from
 /// its UUID (btrfs with the subvolume, whose `st_dev` changes at each mount),
-/// or `dev` where the filesystem reports none (FUSE, NFS).
-pub(super) fn filesystem_id(path: &Path, dev: u64) -> io::Result<i64> {
+/// or `st_dev` where the filesystem reports none (FUSE, NFS).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the owner of a file's filesystem, st_dev its fallback"
+)]
+pub(super) fn filesystem_id(path: &Path, metadata: &std::fs::Metadata) -> io::Result<i64> {
     let fsid = match statvfs(path)?.f_fsid {
-        0 => dev,
+        0 => metadata.dev(),
         fsid => fsid,
     };
     Ok(fsid.cast_signed())
 }
 
+#[expect(clippy::disallowed_methods, reason = "the owner of statvfs")]
 fn statvfs(path: &Path) -> io::Result<libc::statvfs> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
@@ -94,6 +124,10 @@ fn statvfs(path: &Path) -> io::Result<libc::statvfs> {
 /// The destination is created exclusively and read-only: a version somebody can
 /// save over is not a version. Nothing here ever copies bytes: a refusal is a
 /// refusal.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "kept: compares one file before and after its copy, on one mount"
+)]
 pub(crate) fn clone_file(source: &Path, destination: &Path) -> std::result::Result<(), Refusal> {
     let before = std::fs::symlink_metadata(source).map_err(|_| Refusal::File)?;
     // `O_NOFOLLOW`: a link is not a document, and following one would keep a

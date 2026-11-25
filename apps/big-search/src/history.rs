@@ -44,11 +44,11 @@ mod store;
 mod tests;
 mod worker;
 
-pub(crate) use disk::{Refusal, clone_file};
+pub(crate) use disk::{Refusal, clone_file, identity};
 pub use eligibility::may_be_a_document;
 pub use worker::{HistoryEvent, Pending, check_kept_paths, run_worker};
 
-use disk::{disk_capacity, filesystem_id};
+use disk::{born, disk_capacity};
 use eligibility::{eligible_metadata, eligible_name, work_tree};
 use store::{
     file_id_for_path, first_stored, follow_renames, is_live_session, kept_at, now_secs,
@@ -147,26 +147,6 @@ fn not_kept_error(why: &'static str) -> anyhow::Error {
     anyhow::Error::msg(why).context("the current state was not kept")
 }
 
-/// What tells one file from another: its filesystem ([`filesystem_id`]),
-/// its inode number, and the birth time where the filesystem records one,
-/// since XFS hands a deleted document's inode number to the next new file.
-fn identity(path: &Path, metadata: &std::fs::Metadata) -> io::Result<(i64, i64, Option<i64>)> {
-    Ok((
-        filesystem_id(path, metadata.dev())?,
-        metadata.ino() as i64,
-        born(metadata),
-    ))
-}
-
-/// A file's birth time in nanoseconds, where its filesystem records one.
-fn born(metadata: &std::fs::Metadata) -> Option<i64> {
-    metadata
-        .created()
-        .ok()
-        .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
-        .and_then(|since| i64::try_from(since.as_nanos()).ok())
-}
-
 /// Now, in the nanoseconds [`born`] counts in.
 fn now_nanos() -> i64 {
     std::time::SystemTime::now()
@@ -174,6 +154,16 @@ fn now_nanos() -> i64 {
         .ok()
         .and_then(|since| i64::try_from(since.as_nanos()).ok())
         .unwrap_or(0)
+}
+
+/// The device holding a file, which a refusal to clone is filed against for
+/// this run.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "kept: a refusal lasts this run, on one mount"
+)]
+fn device(metadata: &std::fs::Metadata) -> u64 {
+    metadata.dev()
 }
 
 /// The versions store.
@@ -577,7 +567,7 @@ impl History {
         if reason != Reason::BeforeRestore && self.left_to_git(path) {
             return Ok(None);
         }
-        if self.hopeless_devices.contains(&metadata.dev()) {
+        if self.hopeless_devices.contains(&device(&metadata)) {
             return not_kept("this disk cannot share blocks");
         }
         // The baseline is allowed even when space is short: it shares the live
@@ -810,7 +800,7 @@ impl History {
         match refusal {
             // The whole device cannot do this. One answer for every file on it.
             Refusal::Device(reason) => {
-                self.hopeless_devices.push(metadata.dev());
+                self.hopeless_devices.push(device(metadata));
                 if self.support == Support::Untested {
                     self.support = Support::Unavailable(reason);
                     log::info!("file history is not available here: {}", reason.as_str());

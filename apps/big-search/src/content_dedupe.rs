@@ -208,6 +208,10 @@ impl ContentSignatures {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "legacy: migrate to history::identity, since the signatures persist st_dev"
+)]
 fn physical_content_identity(path: &Path, size: u64) -> Option<String> {
     if size == 0 {
         return None;

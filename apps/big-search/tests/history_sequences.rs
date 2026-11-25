@@ -93,6 +93,10 @@ fn survey(folder: &Path, tree: &mut Tree) {
 
 /// `(fs, ino, born)` as the store records a file: the filesystem is its
 /// `f_fsid` (`statvfs(3)`), or the device number where it reports none.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "an oracle apart from the store's own identity"
+)]
 fn identity(path: &Path) -> (i64, i64, Option<i64>) {
     use std::os::unix::ffi::OsStrExt;
     let metadata = std::fs::symlink_metadata(path).expect("stat a document");
