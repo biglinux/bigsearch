@@ -285,8 +285,8 @@ pub(super) fn cmd_daemon() -> Result<()> {
         unwatched_dirs: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     // One versions store shared by the watcher (writes) and IPC (answers).
-    let history: big_search::history::SharedHistory = std::sync::Arc::new(std::sync::Mutex::new(
-        big_search::history::History::open(&big_search_config::read().history),
+    let history = big_search::history::SharedHistory::new(big_search::history::History::open(
+        &big_search_config::read().history,
     ));
 
     // All indexing runs in the watcher thread at background priority; the main
@@ -412,7 +412,7 @@ fn spawn_watcher(
     history: &big_search::history::SharedHistory,
     available: Vec<&'static settings::Source>,
 ) -> Result<()> {
-    let watch_history = std::sync::Arc::clone(history);
+    let watch_history = history.clone();
     let watch_commands = control.commands.clone();
     let watch_paused = control.paused.clone();
     let watch_activity = control.activity.clone();

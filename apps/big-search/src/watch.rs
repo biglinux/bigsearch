@@ -275,7 +275,7 @@ fn spawn_history_worker(
     history: &crate::history::SharedHistory,
 ) -> Sender<crate::history::HistoryEvent> {
     let (history_tx, history_rx) = std::sync::mpsc::channel::<crate::history::HistoryEvent>();
-    let history_store = std::sync::Arc::clone(history);
+    let history_store = history.clone();
     let spawned = std::thread::Builder::new()
         .name("history".into())
         .spawn(move || crate::history::run_worker(&history_store, history_rx));

@@ -30,6 +30,7 @@
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
@@ -116,7 +117,21 @@ pub struct Version {
 /// One store and one lock: whether this disk can share blocks, and whether
 /// space has run out, are learned by *trying* to write a version, so a second
 /// store would report "not tested yet" forever.
-pub type SharedHistory = std::sync::Arc<std::sync::Mutex<History>>;
+#[derive(Clone)]
+pub struct SharedHistory(Arc<Mutex<History>>);
+
+impl SharedHistory {
+    pub fn new(history: History) -> Self {
+        Self(Arc::new(Mutex::new(history)))
+    }
+
+    /// The store, also after a thread panicked holding it: SQLite rolls back
+    /// the transaction a panic drops, and every other step is one statement
+    /// or a flag the next step sets again.
+    pub fn lock(&self) -> MutexGuard<'_, History> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 /// A version [`History::prepare_version`] decided to keep, before its copy.
 struct VersionToCopy {

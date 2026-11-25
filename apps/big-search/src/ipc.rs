@@ -209,7 +209,7 @@ fn spawn_connection(
     let catalogue = catalogue::CatalogueReader::new(state_db);
     // Shared with the versions writer: only it knows whether reflinks work
     // and whether space ran out.
-    let history = std::sync::Arc::clone(history);
+    let history = history.clone();
     let spawned = std::thread::Builder::new()
         .name("ipc-conn".into())
         .spawn(move || {
@@ -538,7 +538,7 @@ fn versions_reply(
     let Some(spellings) = version_spellings(&request.path) else {
         return err(format!("{} is relative or holds ..", request.path));
     };
-    let store = history.lock().expect("versions store lock");
+    let store = history.lock();
     let versions = match store.versions(&spellings) {
         Ok(versions) => versions,
         Err(e) => return err(format!("versions: {e:#}")),
@@ -681,7 +681,7 @@ fn history_reply(
     history: &crate::history::SharedHistory,
     change: impl FnOnce(&mut crate::history::History) -> anyhow::Result<()>,
 ) -> Reply {
-    let mut store = history.lock().expect("versions store lock");
+    let mut store = history.lock();
     match change(&mut store) {
         Ok(()) => Reply::Ok {
             v: PROTOCOL_VERSION,

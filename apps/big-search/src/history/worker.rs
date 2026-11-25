@@ -28,7 +28,7 @@ const MISSING_GRACE_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// left for the next sweep.
 fn expire_missing(history: &SharedHistory) -> Result<()> {
     let files: Vec<(i64, Option<String>, Option<i64>)> = {
-        let store = history.lock().expect("versions store lock");
+        let store = history.lock();
         let Some(conn) = &store.conn else {
             return Ok(());
         };
@@ -45,7 +45,7 @@ fn expire_missing(history: &SharedHistory) -> Result<()> {
         .collect();
 
     let now = now_secs();
-    let store = history.lock().expect("versions store lock");
+    let store = history.lock();
     let Some(conn) = &store.conn else {
         return Ok(());
     };
@@ -213,10 +213,7 @@ const DROP_BATCH: usize = 16;
 /// Drop `versions`, objects first, a batch per hold of the lock.
 fn drop_in_batches(history: &SharedHistory, versions: &[(i64, String)]) -> Result<()> {
     for batch in versions.chunks(DROP_BATCH) {
-        history
-            .lock()
-            .expect("versions store lock")
-            .drop_versions(batch)?;
+        history.lock().drop_versions(batch)?;
     }
     Ok(())
 }
@@ -226,9 +223,9 @@ fn drop_in_batches(history: &SharedHistory, versions: &[(i64, String)]) -> Resul
 /// Two passes, because size and age answer different questions: first no
 /// document may hold more than a tenth of the budget, then the oldest go.
 fn enforce_budget(history: &SharedHistory) -> Result<()> {
-    let hogs = history.lock().expect("versions store lock").budget_hogs()?;
+    let hogs = history.lock().budget_hogs()?;
     drop_in_batches(history, &hogs)?;
-    let oldest = history.lock().expect("versions store lock").over_budget()?;
+    let oldest = history.lock().over_budget()?;
     drop_in_batches(history, &oldest)
 }
 
@@ -239,14 +236,14 @@ fn enforce_budget(history: &SharedHistory) -> Result<()> {
 /// because these versions are still holding the superseded blocks, and the
 /// person has no idea this store exists.
 fn watch_free_space(history: &SharedHistory) -> Result<()> {
-    if history.lock().expect("versions store lock").conn.is_none() {
+    if history.lock().conn.is_none() {
         return Ok(());
     }
     let Ok(capacity) = disk_capacity(&crate::config::data_dir()) else {
         return Ok(());
     };
     let (paused, cost) = {
-        let store = history.lock().expect("versions store lock");
+        let store = history.lock();
         (store.paused_for_space, store.total_bytes()?)
     };
     // Once paused, the store waits for the recovered target, not the threshold.
@@ -256,23 +253,14 @@ fn watch_free_space(history: &SharedHistory) -> Result<()> {
         low_disk_threshold(cost)
     };
     if capacity.available_bytes >= resume_at {
-        history
-            .lock()
-            .expect("versions store lock")
-            .paused_for_space = false;
+        history.lock().paused_for_space = false;
         return Ok(());
     }
-    history
-        .lock()
-        .expect("versions store lock")
-        .paused_for_space = true;
+    history.lock().paused_for_space = true;
     log::info!("little disk space left: giving kept versions back");
     let (available, target) = give_space_back(history, capacity.available_bytes, cost)?;
     if available >= target {
-        history
-            .lock()
-            .expect("versions store lock")
-            .paused_for_space = false;
+        history.lock().paused_for_space = false;
     }
     Ok(())
 }
@@ -289,7 +277,6 @@ fn give_space_back(history: &SharedHistory, mut available: u64, cost: u64) -> Re
         // ceiling on what comes back, never the amount.
         let dropped = history
             .lock()
-            .expect("versions store lock")
             .oldest_versions_totaling(target - available)?;
         if dropped.is_empty() {
             break;
@@ -303,7 +290,7 @@ fn give_space_back(history: &SharedHistory, mut available: u64, cost: u64) -> Re
         }
         available = now.available_bytes;
         // Fewer versions lower what they need left free.
-        target = recovered_disk_target(history.lock().expect("versions store lock").total_bytes()?);
+        target = recovered_disk_target(history.lock().total_bytes()?);
     }
     Ok((available, target))
 }
@@ -314,7 +301,7 @@ fn give_space_back(history: &SharedHistory, mut available: u64, cost: u64) -> Re
 /// failure here must never be able to stop the watcher.
 pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<HistoryEvent>) {
     crate::throttle::lower_priority();
-    report_and_tidy(history);
+    run_step(|| report_and_tidy(history));
     let mut pending = Pending::new();
     let mut next_housekeeping = std::time::Instant::now() + HOUSEKEEPING;
     let mut next_missing_sweep = std::time::Instant::now() + MISSING_SWEEP;
@@ -327,33 +314,45 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
         if received.is_ok() {
             housekeeping_owed = true;
         }
-        match received {
-            Ok(event) => queue_event(history, &mut pending, event),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        let event = match received {
+            Ok(event) => Some(event),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-        }
+        };
+        run_step(|| {
+            if let Some(event) = event {
+                queue_event(history, &mut pending, event);
+            }
+            if save_due_versions(history, &mut pending) {
+                housekeeping_owed = true;
+            }
+            if housekeeping_owed && std::time::Instant::now() >= next_housekeeping {
+                housekeeping_owed = false;
+                next_housekeeping = std::time::Instant::now() + HOUSEKEEPING;
+                keep_house(history, &mut next_missing_sweep);
+            }
+        });
+    }
+}
 
-        if save_due_versions(history, &mut pending) {
-            housekeeping_owed = true;
-        }
-
-        if housekeeping_owed && std::time::Instant::now() >= next_housekeeping {
-            housekeeping_owed = false;
-            next_housekeeping = std::time::Instant::now() + HOUSEKEEPING;
-            keep_house(history, &mut next_missing_sweep);
-        }
+/// Run one step of the worker. A panic costs that step, not the versions of
+/// the rest of the run: the store's lock outlives it ([`SharedHistory::lock`]),
+/// and a document due in it was taken off [`Pending`] before its save began.
+fn run_step(step: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)).is_err() {
+        log::error!("a step of the versions worker panicked; the worker carries on");
     }
 }
 
 /// Say once why versions are not kept here, and remove what a crash left.
 fn report_and_tidy(history: &SharedHistory) {
-    let support = history.lock().expect("versions store lock").support();
+    let support = history.lock().support();
     if let Support::Unavailable(reason) = support
         && reason != Unavailable::Disabled
     {
         log::info!("earlier versions are not kept here: {}", reason.as_str());
     }
-    let swept = history.lock().expect("versions store lock").sweep_orphans();
+    let swept = history.lock().sweep_orphans();
     if let Err(error) = swept {
         log::warn!("could not tidy the versions store: {error:#}");
     }
@@ -387,10 +386,7 @@ fn queue_event(history: &SharedHistory, pending: &mut Pending, event: HistoryEve
     match event {
         HistoryEvent::Changed(path) => pending.note(path, QUIET_PERIOD),
         HistoryEvent::Renamed(from, to) => {
-            let noted = history
-                .lock()
-                .expect("versions store lock")
-                .note_rename(&from, &to);
+            let noted = history.lock().note_rename(&from, &to);
             if let Err(error) = noted {
                 log::debug!("could not follow a rename: {error:#}");
             }
@@ -401,7 +397,7 @@ fn queue_event(history: &SharedHistory, pending: &mut Pending, event: HistoryEve
         // start's catch-up recorded it. A document whose newest version
         // matches its catalogue entry is skipped without touching the disk.
         HistoryEvent::Catalogued(entries) => {
-            let unkept = history.lock().expect("versions store lock").unkept(entries);
+            let unkept = history.lock().unkept(entries);
             for path in unkept {
                 pending.note(path, std::time::Duration::ZERO);
             }
@@ -433,17 +429,11 @@ fn save_due_versions(history: &SharedHistory, pending: &mut Pending) -> bool {
 /// idle priority it can wait a long time for the disk, and the file manager's
 /// request before a restore must not wait with it.
 fn save_version_unlocked(history: &SharedHistory, path: &Path) -> Result<bool> {
-    let prepared = history
-        .lock()
-        .expect("versions store lock")
-        .prepare_version(path, Reason::Saved);
+    let prepared = history.lock().prepare_version(path, Reason::Saved);
     match prepared {
         Ok(Some(version)) => {
             let copied = clone_file(path, &version.object);
-            history
-                .lock()
-                .expect("versions store lock")
-                .finish_version(version, copied)
+            history.lock().finish_version(version, copied)
         }
         Ok(None) => Ok(false),
         Err(error) => Err(error),
@@ -459,17 +449,9 @@ fn keep_house(history: &SharedHistory, next_missing_sweep: &mut std::time::Insta
     if let Err(error) = watch_free_space(history) {
         log::warn!("could not check the free space: {error:#}");
     }
-    let unchecked = std::mem::take(
-        &mut history
-            .lock()
-            .expect("versions store lock")
-            .budget_unchecked,
-    );
+    let unchecked = std::mem::take(&mut history.lock().budget_unchecked);
     if unchecked && let Err(error) = enforce_budget(history) {
-        history
-            .lock()
-            .expect("versions store lock")
-            .budget_unchecked = true;
+        history.lock().budget_unchecked = true;
         log::warn!("could not keep versions inside the budget: {error:#}");
     }
     if std::time::Instant::now() >= *next_missing_sweep {
@@ -514,11 +496,10 @@ mod tests {
             )
             .unwrap();
         }
-        let history: SharedHistory =
-            std::sync::Arc::new(std::sync::Mutex::new(store_with(conn, &dir)));
+        let history = SharedHistory::new(store_with(conn, &dir));
         expire_missing(&history).unwrap();
 
-        let store = history.lock().unwrap();
+        let store = history.lock();
         let rows: Vec<(i64, Option<i64>)> = store
             .conn
             .as_ref()
@@ -533,6 +514,31 @@ mod tests {
         assert_eq!(rows[0], (1, None));
         assert!(rows[1].0 == 3 && rows[1].1.is_some(), "{rows:?}");
         assert_eq!(rows[2].0, 5, "{rows:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A thread that panicked holding the store leaves it usable to the
+    /// worker's next step and to every request.
+    #[test]
+    fn store_outlives_panic_under_lock() {
+        let dir = crate::test_env::scratch_dir("bs-history-poisoned");
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        let history = SharedHistory::new(store_with(conn, &dir));
+        let held = history.clone();
+        let panicked = std::thread::spawn(move || {
+            let _store = held.lock();
+            panic!("a step panicked holding the store");
+        })
+        .join();
+        assert!(panicked.is_err());
+        expire_missing(&history).unwrap();
+        assert!(
+            history
+                .lock()
+                .versions(&[dir.join("a.odt")])
+                .unwrap()
+                .is_empty()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
