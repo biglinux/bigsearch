@@ -339,8 +339,7 @@ impl History {
             let objects: Vec<String> = conn
                 .prepare("SELECT object FROM versions WHERE file_id = ?1")?
                 .query_map(params![file_id], |row| row.get::<_, String>(0))?
-                .flatten()
-                .collect();
+                .collect::<rusqlite::Result<_>>()?;
             for name in &objects {
                 let _ = std::fs::remove_file(self.objects.join(name));
             }
@@ -484,17 +483,19 @@ impl History {
                 row.get::<_, i64>(7)?,
             ))
         })?;
-        Ok(rows
-            .flatten()
-            .filter(|(version, mtime_s, mtime_ns)| {
-                !live.as_ref().is_some_and(|metadata| {
-                    *mtime_s == metadata.mtime()
-                        && *mtime_ns == metadata.mtime_nsec()
-                        && version.size == metadata.len()
-                })
-            })
-            .map(|(version, _, _)| version)
-            .collect())
+        let mut versions = Vec::new();
+        for row in rows {
+            let (version, mtime_s, mtime_ns) = row?;
+            let is_live = live.as_ref().is_some_and(|metadata| {
+                mtime_s == metadata.mtime()
+                    && mtime_ns == metadata.mtime_nsec()
+                    && version.size == metadata.len()
+            });
+            if !is_live {
+                versions.push(version);
+            }
+        }
+        Ok(versions)
     }
 
     /// Keep the state `path` is in now, if it earns a version.

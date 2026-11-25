@@ -168,9 +168,9 @@ impl State {
                 AND instr(substr(path, length(?2) + 1), '/') = 0",
         )?;
         let rows = statement.query_map(params![self.namespace, low, high], |row| {
-            row.get::<_, String>(0)
+            row.get::<_, String>(0).map(PathBuf::from)
         })?;
-        Ok(rows.flatten().map(PathBuf::from).collect())
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// `dir` and the paths under it, pending changes included.
