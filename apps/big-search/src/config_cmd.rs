@@ -49,7 +49,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
 pub(super) fn print_config_help() {
     let title = bold("big-search config");
     println!(
-        "{title}\n\n{}\n  config show\n  config path\n  config set names-only|content|metadata|follow-symlinks true|false\n  config set content-index-mode auto|basic|freqs   (also content-mode)\n  config set extract-max-mb N   (0 = automatic)\n  config set text-max-mb|pdf-max-mb N   (0 = no limit)\n  config set office-max-mb N   (0 = automatic; also content-max-mb)\n  config set pdf-timeout-secs N\n  config set content-cooldown-secs N   (also cooldown-secs)\n  config set symlink-policy personal-local|local-exact\n  config preset names-only|low-memory|balanced|complete\n\n{}\n  names-only     smallest index: names and paths only\n  low-memory     content on, Basic postings, conservative caps\n  balanced       automatic: Basic below 6 GiB of RAM, Freqs above\n  complete       Freqs and a larger extraction cap\n",
+        "{title}\n\n{}\n  config show\n  config path\n  config set names-only|content|metadata|follow-symlinks true|false\n  config set content-index-mode auto|basic|freqs   (also content-mode)\n  config set extract-max-mb N   (0 = automatic)\n  config set text-max-mb|pdf-max-mb N   (0 = no limit)\n  config set office-max-mb N   (0 = automatic; also content-max-mb)\n  config set pdf-timeout-secs N\n  config set content-cooldown-secs N   (also cooldown-secs)\n  config set symlink-policy personal-local|local-exact\n  config preset names-only|low-memory|balanced|complete\n\n{}\n  names-only     smallest index: names and paths only\n  low-memory     content on, Basic postings, conservative caps\n  balanced       automatic: Basic when the service may use below 6 GiB, Freqs above\n  complete       Freqs and a larger extraction cap\n",
         cyan("Usage:"),
         cyan("Profiles:"),
     );
@@ -93,7 +93,10 @@ pub(super) fn cmd_config_show() -> Result<()> {
     let capacity = settings::effective_memory_bytes()
         .map(format_bytes)
         .unwrap_or_else(|| "unknown (conservative limits)".to_owned());
-    println!("{} {capacity}", bold("Memory sized for:"));
+    println!(
+        "{} {capacity} here; the service sizes by its own memory limit",
+        bold("Memory sized for:")
+    );
     println!("{} {profile}", bold("Effective profile:"));
     println!(
         "{} requested={}, effective={}",

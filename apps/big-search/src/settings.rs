@@ -625,13 +625,16 @@ const CONFIG_TEMPLATE: &str = "\
 #   big-search config preset low-memory   # content on, doc-id-only postings
 #   big-search config preset balanced     # automatic defaults
 #   big-search config preset complete     # larger content cap + frequency ranking
+# auto and adaptive (0) values follow the memory the indexer may use: for the
+# service, its own limit (MemoryHigh in big-search.service), not the RAM.
 content = true          # extract file content (text/PDF/office) by default
 metadata = false        # extract metadata (type, audio/video duration, image size)
 names_only = false      # true = only filenames; disables content/metadata sidecar
-content_index_mode = \"auto\" # auto | basic | freqs. auto: basic below 6 GiB RAM
+content_index_mode = \"auto\" # auto | basic | freqs. auto: basic below 6 GiB, chosen
+                        # when the content index is created
 extract_max_mb = 0      # extracted text per file. 0 = adaptive (4/8/16/32 MiB)
 text_max_mb = 0         # plain text input cap. 0 = no input-size skip; output is capped
-office_max_mb = 0       # Office input cap. 0 = adaptive (64 MiB low RAM, else 256 MiB)
+office_max_mb = 0       # Office input cap. 0 = adaptive (64 MiB below 6 GiB, else 256 MiB)
 pdf_max_mb = 0          # PDF input cap. 0 = no input-size skip; timeout/output cap apply
 pdf_timeout_secs = 5    # seconds of work per PDF extraction (CPU time at full clock)
 content_cooldown_secs = 900 # wait this long after a change before re-reading a file's
