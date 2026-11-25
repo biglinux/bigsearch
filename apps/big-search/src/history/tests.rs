@@ -398,6 +398,34 @@ fn copy_follows_rows_changed_meanwhile() {
     assert_eq!(kept_objects(&store), Vec::<String>::new());
 }
 
+/// Guards: persisted data: a version recorded when its older ones cannot be
+/// thinned (a row the store cannot read) is reported kept and counted against
+/// the budget.
+#[test]
+fn version_kept_when_thinning_fails() {
+    let (dir, mut store, real, _) = alias_fixture("bs-history-thinning-fails");
+    {
+        let conn = store.conn.as_ref().unwrap();
+        kept_under(conn, &real, 1, &real);
+        conn.execute("UPDATE versions SET object = X'00'", [])
+            .unwrap();
+    }
+    let version = copy_in_flight(&mut store, &dir, &real, "ff/kept");
+    assert!(store.finish_version(version, Ok(())).unwrap());
+    assert!(store.budget_unchecked);
+    let kept: i64 = store
+        .conn
+        .as_ref()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM versions WHERE object = 'ff/kept'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 1);
+}
+
 /// Ids of the rows left, in order.
 fn row_ids(conn: &Connection) -> Vec<i64> {
     conn.prepare("SELECT id FROM files ORDER BY id")

@@ -419,7 +419,7 @@ fn save_due_versions(history: &SharedHistory, pending: &mut Pending) -> bool {
                 kept_any = true;
             }
             Ok(false) => {}
-            Err(error) => log::debug!("no version of {}: {error:#}", path.display()),
+            Err(error) => log::warn!("no version of {}: {error:#}", path.display()),
         }
     }
     kept_any

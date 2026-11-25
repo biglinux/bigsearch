@@ -635,8 +635,13 @@ impl History {
             &version.name,
             version.reason,
         )?;
-        self.prune_file(file_id)?;
         self.budget_unchecked = true;
+        if let Err(error) = self.prune_file(file_id) {
+            log::warn!(
+                "kept a version of {}, but could not thin its older ones: {error:#}",
+                version.path.display()
+            );
+        }
         Ok(true)
     }
 
