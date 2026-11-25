@@ -501,7 +501,7 @@ fn status_reply(index: &IndexReader, content_index: &IndexReader, control: &Cont
         paused,
         activity: crate::watch::activity_label(paused, control.activity.load(Ordering::Relaxed))
             .to_string(),
-        capabilities: daemon_capabilities(),
+        capabilities: daemon_capabilities(content_index),
         pending_content: control.pending_content.load(Ordering::Relaxed),
         content_docs: index::document_count(content_index),
         name_index_bytes: flat_directory_file_bytes(&config::index_dir()),
@@ -629,13 +629,12 @@ fn flat_directory_file_bytes(dir: &Path) -> u64 {
     total
 }
 
-fn daemon_capabilities() -> Vec<String> {
+fn daemon_capabilities(content_index: &IndexReader) -> Vec<String> {
     let mut capabilities = origin::capabilities();
     if settings::content_index_enabled() {
-        capabilities.push(format!(
-            "content-index-mode:{}",
-            settings::resolved_content_index_mode().as_str()
-        ));
+        let mode = index::stored_content_mode(content_index.searcher().index())
+            .unwrap_or_else(settings::resolved_content_index_mode);
+        capabilities.push(format!("content-index-mode:{}", mode.as_str()));
         capabilities.push(format!("extract-cap:{}", settings::extract_max_mb_label()));
     } else {
         capabilities.push(big_indexd_client::NAMES_ONLY.to_string());

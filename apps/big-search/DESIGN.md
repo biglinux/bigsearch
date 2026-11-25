@@ -108,7 +108,8 @@ The name index holds one document per visible file:
 
 The content index holds `path` and `body`. `body` stores no text and keeps
 either document lists or term frequencies (`content_index_mode`, `auto` by
-default); changing the mode changes the schema and recreates the content index.
+default). `auto` chooses only when the content index is created and then keeps
+what it holds; setting `basic` or `freqs` to the other detail recreates it.
 Keeping the two apart lets a name schema change rebuild only the name index:
 the content rows stay unless the content index is empty.
 

@@ -2,6 +2,7 @@
 //! separate content index (`path`, `body`).
 use crate::catalogue::State;
 use crate::cjk_tokenizer::CjkFriendlyTokenizer;
+use crate::settings::{ContentIndexMode, ResolvedContentIndexMode};
 use anyhow::{Context, Result};
 use std::path::Path;
 use tantivy::indexer::IndexWriterOptions;
@@ -37,12 +38,13 @@ const MAX_INDEX_TO_STATE_EXTRA_PERCENT: u64 = 20;
 const MAX_INDEX_TO_STATE_SURPLUS: u64 = 10_000;
 const MIN_REPAIRABLE_NAME_DEFICIT: u64 = 1_000;
 
-/// Posting detail used for the content body field. The schema changes when this
-/// setting changes, so the content sidecar is recreated cleanly on next open.
+/// Posting detail for a new content index. An explicit mode that differs from
+/// the stored one recreates the content index at the next writer open; `auto`
+/// keeps what is stored (see `reusable_content_schema`).
 pub fn content_record_option() -> IndexRecordOption {
     match crate::settings::resolved_content_index_mode() {
-        crate::settings::ResolvedContentIndexMode::Basic => IndexRecordOption::Basic,
-        crate::settings::ResolvedContentIndexMode::Freqs => IndexRecordOption::WithFreqs,
+        ResolvedContentIndexMode::Basic => IndexRecordOption::Basic,
+        ResolvedContentIndexMode::Freqs => IndexRecordOption::WithFreqs,
     }
 }
 
@@ -400,7 +402,8 @@ pub(crate) fn content_fields(index: &Index) -> Result<ContentFields> {
 ///
 /// # Errors
 ///
-/// Returns an error when the index is missing, unreadable or of another schema.
+/// Returns an error when the index is missing or unreadable. An index of
+/// another schema opens without its analyzers.
 pub fn open_read_only(dir: &Path) -> Result<Index> {
     open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open)
 }
@@ -411,7 +414,8 @@ pub fn open_read_only(dir: &Path) -> Result<Index> {
 ///
 /// # Errors
 ///
-/// Returns an error when the index is missing, unreadable or of another schema.
+/// Returns an error when the index is missing or unreadable. An index of
+/// another schema opens without its analyzers.
 pub fn open_for_queries(dir: &Path) -> Result<Index> {
     open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open_for_queries)
 }
@@ -442,10 +446,7 @@ fn open_read_only_with(
     })?;
     if index.schema() == build_name_schema() {
         register_name_tokenizer(&index);
-    } else if [IndexRecordOption::Basic, IndexRecordOption::WithFreqs]
-        .into_iter()
-        .any(|record| index.schema() == build_content_schema_for(record))
-    {
+    } else if content_record_of(&index.schema()).is_some() {
         // A read-only client must follow the stored schema. Its current RAM,
         // cgroup or configuration may differ from the writer's profile; that
         // changes future builds, not how an existing content index is queried.
@@ -461,7 +462,9 @@ fn open_read_only_with(
 /// Returns an error when the directory cannot be created or the index cannot be opened or
 /// recreated.
 pub fn open_or_create(dir: &Path) -> Result<Index> {
-    let index = open_or_create_with_schema(dir, build_name_schema)?;
+    let index = open_or_create_with_schema(dir, build_name_schema, |schema| {
+        *schema == build_name_schema()
+    })?;
     register_name_tokenizer(&index);
     Ok(index)
 }
@@ -473,9 +476,39 @@ pub fn open_or_create(dir: &Path) -> Result<Index> {
 /// Returns an error when the directory cannot be created or the index cannot be opened or
 /// recreated.
 pub fn open_content_or_create(dir: &Path) -> Result<Index> {
-    let index = open_or_create_with_schema(dir, build_content_schema)?;
+    let index = open_or_create_with_schema(dir, build_content_schema, reusable_content_schema)?;
     register_body_tokenizer(&index);
     Ok(index)
+}
+
+/// Whether an existing content index of `schema` is kept. In `auto` mode either
+/// posting detail is: the memory rule sizes by the caller's limit (the unit's
+/// `MemoryHigh` for the service, the machine's RAM in a shell), so applying it at
+/// every open would rebuild the index each time the two alternate.
+fn reusable_content_schema(schema: &Schema) -> bool {
+    match crate::settings::content_index_mode() {
+        ContentIndexMode::Auto => content_record_of(schema).is_some(),
+        ContentIndexMode::Basic | ContentIndexMode::Freqs => *schema == build_content_schema(),
+    }
+}
+
+/// The posting detail of a content index of `schema`, `None` for any other schema.
+fn content_record_of(schema: &Schema) -> Option<IndexRecordOption> {
+    [IndexRecordOption::Basic, IndexRecordOption::WithFreqs]
+        .into_iter()
+        .find(|record| *schema == build_content_schema_for(*record))
+}
+
+/// The posting detail `index` holds, which in `auto` mode may differ from what
+/// [`content_record_option`] resolves now; `None` when it is no content index.
+pub fn stored_content_mode(index: &Index) -> Option<ResolvedContentIndexMode> {
+    content_record_of(&index.schema()).map(|record| {
+        if record == IndexRecordOption::Basic {
+            ResolvedContentIndexMode::Basic
+        } else {
+            ResolvedContentIndexMode::Freqs
+        }
+    })
 }
 
 /// Test fixtures select posting detail explicitly rather than depending on RAM
@@ -488,13 +521,21 @@ pub(crate) fn create_content_fixture(dir: &Path, record: IndexRecordOption) -> R
     Ok(index)
 }
 
-fn open_or_create_with_schema(dir: &Path, build_schema: fn() -> Schema) -> Result<Index> {
+fn open_or_create_with_schema(
+    dir: &Path,
+    build_schema: fn() -> Schema,
+    reusable: fn(&Schema) -> bool,
+) -> Result<Index> {
     std::fs::create_dir_all(dir).with_context(|| format!("create index dir {}", dir.display()))?;
     match open_existing(dir) {
-        // Reuse only if the on-disk schema matches the current one; otherwise the
-        // schema evolved (e.g. a new field) → rebuild from scratch.
-        Ok(index) if index.schema() == build_schema() => Ok(index),
-        Ok(_) => recreate(dir, build_schema),
+        Ok(index) if reusable(&index.schema()) => Ok(index),
+        Ok(_) => {
+            log::info!(
+                "index at {} has another schema; rebuilding it",
+                dir.display()
+            );
+            recreate(dir, build_schema)
+        }
         Err(error) if is_non_empty_dir(dir) => {
             log::warn!(
                 "failed to open index at {}; recreating it: {error:#}",
@@ -898,6 +939,8 @@ mod tests {
 
     #[test]
     fn body_stays_out_of_name_index() {
+        // Both schema reads below resolve the mode another test may be setting.
+        let _lock = crate::test_env::ENV_LOCK.lock().unwrap();
         let name_schema = build_name_schema();
         assert!(name_schema.get_field("body").is_err());
 
@@ -937,6 +980,51 @@ mod tests {
             assert_eq!(std::fs::read(dir.join("meta.json")).unwrap(), before);
             drop(reader);
             drop(read_only);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// Guards: persisted data: under `auto` the service (sized by its memory
+    /// limit) and a shell command (by the machine's RAM) open the same index.
+    #[test]
+    fn auto_keeps_stored_content_detail() {
+        use crate::test_env::{ENV_LOCK, EnvVarGuard};
+        let _lock = ENV_LOCK.lock().unwrap();
+        for (stored, explicit, explicit_record) in [
+            (
+                IndexRecordOption::Basic,
+                "freqs",
+                IndexRecordOption::WithFreqs,
+            ),
+            (
+                IndexRecordOption::WithFreqs,
+                "basic",
+                IndexRecordOption::Basic,
+            ),
+        ] {
+            let dir = crate::test_env::scratch_dir(&format!("bs-content-detail-{stored:?}"));
+            let index = create_content_fixture(&dir, stored).unwrap();
+            let fields = content_fields(&index).unwrap();
+            let mut writer = index.writer::<TantivyDocument>(15_000_000).unwrap();
+            writer
+                .add_document(tantivy::doc!(fields.path => "/kept.txt", fields.body => "kept"))
+                .unwrap();
+            writer.commit().unwrap();
+            writer.wait_merging_threads().unwrap();
+            drop(index);
+
+            let auto = EnvVarGuard::set("BIG_SEARCH_CONTENT_INDEX_MODE", "auto");
+            let reopened = open_content_or_create(&dir).unwrap();
+            assert_eq!(reopened.schema(), build_content_schema_for(stored));
+            assert_eq!(document_count(&reopened.reader().unwrap()), 1, "{stored:?}");
+            drop(reopened);
+            drop(auto);
+
+            let _explicit = EnvVarGuard::set("BIG_SEARCH_CONTENT_INDEX_MODE", explicit);
+            let rebuilt = open_content_or_create(&dir).unwrap();
+            assert_eq!(rebuilt.schema(), build_content_schema_for(explicit_record));
+            assert_eq!(document_count(&rebuilt.reader().unwrap()), 0, "{explicit}");
+            drop(rebuilt);
             std::fs::remove_dir_all(&dir).unwrap();
         }
     }
