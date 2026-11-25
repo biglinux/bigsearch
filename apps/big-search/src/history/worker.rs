@@ -456,7 +456,7 @@ fn queue_event(history: &SharedHistory, pending: &mut Pending, event: HistoryEve
 fn note_change(history: &SharedHistory, path: &Path) {
     let noted = history.lock().note_change(path);
     if let Err(error) = noted {
-        log::debug!("could not note a change of {}: {error:#}", path.display());
+        log::warn!("could not note a change of {}: {error:#}", path.display());
     }
 }
 
