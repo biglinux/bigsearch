@@ -275,7 +275,7 @@ pub(super) fn cmd_daemon() -> Result<()> {
 
     // `paused` and `activity` mirror indexing state for `status`; the channel
     // carries both fs events and lifecycle commands so the watcher reacts without
-    // a polling timer. `pending_content` counts cooldown-deferred extractions.
+    // a polling timer. `pending_content` counts deferred extractions.
     let (commands, rx) = std::sync::mpsc::channel::<watch::WatchMessage>();
     let control = ipc::Control {
         commands,

@@ -379,7 +379,7 @@ fn cmd_status() -> Result<()> {
                 println!(
                     "{}",
                     yellow(&format!(
-                        "content pending: {} recently edited file(s)",
+                        "content pending: {} file(s) recently edited or busy in another program",
                         s.pending_content
                     ))
                 );
@@ -711,13 +711,13 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
             ))
         );
     }
-    // "Loading" hint: recently-edited files are still being extracted (this very
-    // search already told the daemon to prioritize them, bypassing the cooldown).
+    // "Loading" hint: files recently edited or busy in another program are not
+    // extracted yet (this very search already told the daemon to try them now).
     if outcome.content_pending > 0 {
         eprintln!(
             "{}",
             dim(&format!(
-                "the content of {} recently edited file(s) is still being indexed; search again in a moment",
+                "the content of {} file(s) recently edited or busy in another program is not indexed yet; search again in a moment",
                 outcome.content_pending
             ))
         );

@@ -267,10 +267,11 @@ pub struct QueryOutcome {
     pub total: usize,
     /// Offset to request next, or `None` at the end.
     pub next_offset: Option<usize>,
-    /// Approximate number of recently-changed files whose content is not yet
-    /// (re-)extracted. `> 0` on a content/both query means results may be
-    /// incomplete; the daemon has already been nudged to extract them, so a
-    /// retry shortly will see them ("loading" hint for UIs).
+    /// Approximate number of files whose content is not yet (re-)extracted
+    /// because they changed recently or another program held them busy. `> 0`
+    /// on a content/both query means results may be incomplete; the daemon has
+    /// already been nudged to extract them, so a retry shortly will see them
+    /// ("loading" hint for UIs).
     #[serde(default)]
     pub content_pending: u64,
     /// The search stopped at [`CANDIDATE_CEILING`] candidates before the
@@ -605,7 +606,8 @@ pub struct Status {
     /// Optional features this daemon answers, such as [`KIND_FILTER`]: a
     /// request field it does not list is ignored by it.
     pub capabilities: Vec<String>,
-    /// Recently-changed files whose content extraction is still deferred.
+    /// Files whose content extraction is still deferred: changed recently, or
+    /// held busy by another program.
     pub pending_content: u64,
     /// Live document count in the content index.
     pub content_docs: u64,

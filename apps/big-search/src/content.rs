@@ -273,12 +273,13 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
             }
             break;
         }
-        indexed_total = indexed_total.saturating_add(index_content_limited_with_writer(
+        let read = index_content_limited_with_writer(
             &mut writer,
             &f,
             batch.files,
             Some(catalog_content_batch_limit()),
-        )?);
+        )?;
+        indexed_total = indexed_total.saturating_add(read.indexed);
         if !batch.has_more {
             break;
         }
@@ -305,11 +306,19 @@ pub fn index_content_limited(
     }
     let f = content_fields(index)?;
     let mut writer = crate::index::content_writer(index).context("content writer")?;
-    let indexed = index_content_limited_with_writer(&mut writer, &f, files, limit)?;
+    let read = index_content_limited_with_writer(&mut writer, &f, files, limit)?;
     writer
         .wait_merging_threads()
         .context("wait content merges")?;
-    Ok(indexed)
+    Ok(read.indexed)
+}
+
+/// What one extraction batch did.
+pub(crate) struct BatchRead {
+    pub(crate) indexed: u64,
+    /// Files another process held busy: they get no content row, so they stay
+    /// pending until a later pass reads them.
+    pub(crate) busy: usize,
 }
 
 pub(crate) fn index_content_limited_with_writer(
@@ -317,9 +326,13 @@ pub(crate) fn index_content_limited_with_writer(
     f: &ContentFields,
     files: Vec<PathBuf>,
     limit: Option<usize>,
-) -> Result<u64> {
+) -> Result<BatchRead> {
+    let nothing_read = BatchRead {
+        indexed: 0,
+        busy: 0,
+    };
     if !crate::settings::content_index_enabled() {
-        return Ok(0);
+        return Ok(nothing_read);
     }
     let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
@@ -329,7 +342,7 @@ pub(crate) fn index_content_limited_with_writer(
         pending_batch_with_byte_limit(files, &content_state, limit.unwrap_or(usize::MAX), u64::MAX)
             .files;
     if files.is_empty() {
-        return Ok(0);
+        return Ok(nothing_read);
     }
 
     let queue = Arc::new(Mutex::new(files.into_iter()));
@@ -347,14 +360,17 @@ pub(crate) fn index_content_limited_with_writer(
         let signatures = signatures.clone();
         let tx = tx.clone();
         workers.push(std::thread::spawn(move || {
-            run_extraction_worker(&queue, signatures.as_deref(), &tx);
+            run_extraction_worker(&queue, signatures.as_deref(), &tx)
         }));
     }
     drop(tx); // close channel once all workers finish
 
     let indexed = write_content_results(writer, f, rx, &mut content_state)?;
+    let mut busy = 0;
     for w in workers {
-        let _ = w.join();
+        // A worker that panicked outside the extractors' catch_unwind takes
+        // its count with it, as it already took the file it was reading.
+        busy += w.join().unwrap_or(0);
     }
     if let Some(signatures) = signatures {
         let mut signatures = signatures.lock().expect("signature lock");
@@ -366,17 +382,19 @@ pub(crate) fn index_content_limited_with_writer(
         signatures.persist()?;
     }
     content_state.persist()?;
-    Ok(indexed)
+    Ok(BatchRead { indexed, busy })
 }
 
 /// One extraction worker: drains the shared queue at background priority and
-/// sends one result per file it could stat and another process does not hold busy.
+/// sends one result per file it could stat and another process does not hold
+/// busy; returns how many it found busy.
 fn run_extraction_worker(
     queue: &Mutex<std::vec::IntoIter<PathBuf>>,
     signatures: Option<&Mutex<ContentSignatures>>,
     tx: &mpsc::SyncSender<ContentResult>,
-) {
+) -> usize {
     throttle::lower_priority();
+    let mut busy = 0;
     loop {
         let next = {
             let mut q = queue.lock().expect("queue lock");
@@ -394,7 +412,10 @@ fn run_extraction_worker(
         let _lease_bar = match extract::open_regular_with(&path, libc::O_NOFOLLOW) {
             Ok(file) => file,
             // No result: the file stays pending and a later pass reads it.
-            Err(extract::Unopened::Busy) => continue,
+            Err(extract::Unopened::Busy) => {
+                busy += 1;
+                continue;
+            }
             Err(extract::Unopened::Refused) => {
                 let _ = tx.send(ContentResult {
                     path,
@@ -430,6 +451,7 @@ fn run_extraction_worker(
             body,
         });
     }
+    busy
 }
 
 /// The indexed body of one file: its text and/or media metadata, as the

@@ -22,8 +22,8 @@ pub struct Control {
     pub commands: Sender<WatchMessage>,
     pub paused: Arc<AtomicBool>,
     pub activity: Arc<AtomicU8>,
-    /// Files whose content extraction is deferred by the edit cooldown; exposed
-    /// on query/status replies so UIs can show a "content still indexing" hint.
+    /// Files whose content extraction is deferred by the edit cooldown or by
+    /// another process holding them busy; exposed on query/status replies so UIs can show a "content still indexing" hint.
     pub pending_content: Arc<AtomicU64>,
     /// Folders the watcher could not watch.
     pub unwatched_dirs: Arc<AtomicU64>,
