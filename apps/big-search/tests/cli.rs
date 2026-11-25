@@ -143,6 +143,32 @@ fn config_change_names_the_restart() {
     let _ = fs::remove_dir_all(&base);
 }
 
+/// `config show` reports the posting detail the content index holds, which
+/// `auto` keeps, not what this shell's memory would choose for a new one.
+#[test]
+fn config_show_reads_stored_detail() {
+    let base = scratch::scratch_dir("bs-cli-detail");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&xdg_storage_home).unwrap();
+    fs::write(home.join("a.txt"), "alpha").unwrap();
+    let shown = || run(&home, &xdg_storage_home, &["config", "show"]);
+    let before = shown();
+    assert!(before.contains("for a new content index"), "{before}");
+    let reindexed = big_search(&home, &xdg_storage_home, &["reindex"])
+        .env("BIG_SEARCH_CONTENT_INDEX_MODE", "basic")
+        .status()
+        .unwrap();
+    assert!(reindexed.success());
+    let after = shown();
+    assert!(
+        after.contains("requested=auto, effective=basic, from the content index"),
+        "{after}"
+    );
+    let _ = fs::remove_dir_all(&base);
+}
+
 /// A file name is outside text: its control characters reach the terminal
 /// escaped, never as an escape sequence.
 #[test]
@@ -241,12 +267,12 @@ fn reindex_refuses_unopenable_state() {
     fs::write(home.join("alpha.txt"), "a").unwrap();
     let home_str = home.to_str().unwrap();
     run(&home, &xdg_storage_home, &["reindex", home_str]);
-    let data = xdg_storage_home.join("big-search");
+    let storage = xdg_storage_home.join("big-search");
     for name in ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"] {
-        let _ = fs::remove_file(data.join(name));
+        let _ = fs::remove_file(storage.join(name));
     }
-    fs::create_dir(data.join("state.sqlite")).unwrap();
-    let index_meta = || fs::read(data.join("index/meta.json")).unwrap();
+    fs::create_dir(storage.join("state.sqlite")).unwrap();
+    let index_meta = || fs::read(storage.join("index/meta.json")).unwrap();
     let before = index_meta();
     for args in [&["reindex"][..], &["reindex", home_str][..]] {
         let output = big_search(&home, &xdg_storage_home, args).output().unwrap();

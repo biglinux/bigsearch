@@ -75,7 +75,7 @@ fn print_unknown_choices() {
 // shape: declares a view: one line per effective setting.
 pub(super) fn cmd_config_show() -> Result<()> {
     let requested = settings::content_index_mode().as_str();
-    let resolved = settings::resolved_content_index_mode().as_str();
+    let effective = content_index_detail();
     let ram = settings::total_memory_bytes()
         .map(format_bytes)
         .unwrap_or_else(|| "unknown".to_string());
@@ -99,10 +99,8 @@ pub(super) fn cmd_config_show() -> Result<()> {
     );
     println!("{} {profile}", bold("Effective profile:"));
     println!(
-        "{} requested={}, effective={}",
+        "{} requested={requested}, effective={effective}",
         bold("Content index mode:"),
-        requested,
-        resolved,
     );
     println!(
         "{} {}",
@@ -131,6 +129,30 @@ pub(super) fn cmd_config_show() -> Result<()> {
     );
     print_unknown_choices();
     Ok(())
+}
+
+/// The posting detail the content index on disk holds, which `auto` keeps
+/// whatever this shell's memory would choose; when there is none to reuse,
+/// the detail a new one would get.
+fn content_index_detail() -> String {
+    let dir = config::content_index_dir();
+    if !dir.join("meta.json").exists() {
+        return new_content_index_detail();
+    }
+    match index::open_read_only(&dir) {
+        Ok(content_index) => match index::stored_content_mode(&content_index) {
+            Some(mode) => format!("{}, from the content index on disk", mode.as_str()),
+            None => new_content_index_detail(),
+        },
+        Err(error) => format!("unknown, the content index is unreadable: {error:#}"),
+    }
+}
+
+fn new_content_index_detail() -> String {
+    format!(
+        "{} for a new content index",
+        settings::resolved_content_index_mode().as_str()
+    )
 }
 
 pub(super) fn format_bytes(bytes: u64) -> String {
