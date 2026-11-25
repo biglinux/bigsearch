@@ -492,8 +492,8 @@ fn versions_by_spelling(matrix: &PathMatrix) {
 }
 
 /// A folder moved and a link put in its place while the daemon runs: the
-/// rows follow the folder, so the link's spelling lists them where it leads
-/// and a restore through it proceeds.
+/// rows follow the folder, so the link's spelling lists them where it leads,
+/// and after an editor's save there a restore through the link proceeds.
 fn moved_folder_linked(matrix: &PathMatrix) {
     let kept = matrix.ids("moved");
     assert_eq!(kept.len(), 1, "{kept:?}");
@@ -502,6 +502,9 @@ fn moved_folder_linked(matrix: &PathMatrix) {
         "the rows did not follow the folder: {:?}",
         matrix.ids("moved-to")
     );
+    let saved = matrix.docs.join("moved-to/a.txt.saving");
+    std::fs::write(&saved, "moved saved by an editor").unwrap();
+    std::fs::rename(&saved, matrix.file("moved-to")).unwrap();
     assert_answers(
         &matrix.sock,
         &[(path_cmd("save_version", &matrix.file("moved")), None)],
