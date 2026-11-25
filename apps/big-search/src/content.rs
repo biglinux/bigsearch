@@ -370,7 +370,7 @@ pub(crate) fn index_content_limited_with_writer(
 }
 
 /// One extraction worker: drains the shared queue at background priority and
-/// sends one result per file it could stat.
+/// sends one result per file it could stat and another process does not hold busy.
 fn run_extraction_worker(
     queue: &Mutex<std::vec::IntoIter<PathBuf>>,
     signatures: Option<&Mutex<ContentSignatures>>,
@@ -388,17 +388,23 @@ fn run_extraction_worker(
             continue;
         };
         let (mtime, size) = catalogue::meta_pair(&metadata);
-        // Only a regular file is read: a link would duplicate its target's
-        // body, and opening a FIFO blocks this worker until a writer comes.
-        if !metadata.is_file() {
-            let _ = tx.send(ContentResult {
-                path,
-                mtime,
-                size,
-                body: None,
-            });
-            continue;
-        }
+        // Only a regular file is read: a link would duplicate its target's body.
+        // The descriptor is held through the extraction: while it is open no
+        // other process can take a write lease, so no reader below skips the file.
+        let _lease_bar = match extract::open_regular_with(&path, libc::O_NOFOLLOW) {
+            Ok(file) => file,
+            // No result: the file stays pending and a later pass reads it.
+            Err(extract::Unopened::Busy) => continue,
+            Err(extract::Unopened::Refused) => {
+                let _ = tx.send(ContentResult {
+                    path,
+                    mtime,
+                    size,
+                    body: None,
+                });
+                continue;
+            }
+        };
         if let Some(signatures) = signatures
             && matches!(
                 signatures

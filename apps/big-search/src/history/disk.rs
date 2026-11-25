@@ -98,7 +98,8 @@ pub(crate) fn clone_file(source: &Path, destination: &Path) -> std::result::Resu
     let before = std::fs::symlink_metadata(source).map_err(|_| Refusal::File)?;
     // `O_NOFOLLOW`: a link is not a document, and following one would keep a
     // version of whatever it points at, filters and all.
-    let file = crate::extract::open_regular_with(source, libc::O_NOFOLLOW).ok_or(Refusal::File)?;
+    let file = crate::extract::open_regular_with(source, libc::O_NOFOLLOW)
+        .map_err(|_unopened| Refusal::File)?;
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|error| classify(&error))?;
     }

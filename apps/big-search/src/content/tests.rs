@@ -363,6 +363,35 @@ fn extraction_passes_over_fifo() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A file another process holds a write lease on is left pending, not recorded
+/// unread: the pass after the lease is gone indexes it.
+#[test]
+fn leased_file_waits_for_next_pass() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-lease");
+    let shared = base.join("shared.md");
+    let _env = [
+        EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
+        EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap()),
+    ];
+    std::fs::write(&shared, b"leased body").unwrap();
+    let index = crate::index::open_content_or_create(&base.join("idx")).unwrap();
+
+    let mut holder = crate::test_env::hold_write_lease(&shared);
+    let under_lease = index_content_limited(&index, vec![shared.clone()], None);
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    assert_eq!(under_lease.unwrap(), 0);
+    assert_eq!(
+        index_content_limited(&index, vec![shared], None).unwrap(),
+        1
+    );
+    let hits = crate::query::search_content(&index.reader().unwrap(), "leased", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn content_knobs_resolve_overrides() {
     let _lock = ENV_LOCK.lock().unwrap();

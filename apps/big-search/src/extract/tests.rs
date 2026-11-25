@@ -33,7 +33,7 @@ fn readers_pass_over_fifo() {
             .unwrap();
         assert_eq!(text, "beta", "{}", opened.display());
     }
-    assert!(open_regular_with(&link, libc::O_NOFOLLOW).is_none());
+    assert!(open_regular_with(&link, libc::O_NOFOLLOW).is_err());
     assert!(open_regular(&dir).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -41,33 +41,11 @@ fn readers_pass_over_fifo() {
 /// A write lease held by another process (a Samba oplock, an NFS delegation)
 /// skips the file at once instead of waiting `lease-break-time` for its break.
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    reason = "the lease holder is a Python child: taking a lease in-process needs unsafe fcntl"
-)]
 fn readers_pass_over_write_lease() {
-    use std::io::BufRead as _;
-    const HOLD_LEASE: &str = "import fcntl, os, signal, sys
-signal.signal(signal.SIGIO, signal.SIG_IGN)
-fcntl.fcntl(os.open(sys.argv[1], os.O_RDWR), fcntl.F_SETLEASE, fcntl.F_WRLCK)
-print('leased', flush=True)
-sys.stdin.read()";
     let dir = temporary_extract_dir("lease");
     let path = dir.join("shared.txt");
     std::fs::write(&path, "beta").unwrap();
-    let mut holder = std::process::Command::new("python3")
-        .args(["-I", "-c", HOLD_LEASE])
-        .arg(&path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut ready = String::new();
-    std::io::BufReader::new(holder.stdout.take().unwrap())
-        .read_line(&mut ready)
-        .unwrap();
-    assert_eq!(ready, "leased\n", "the holder could not take the lease");
+    let mut holder = crate::test_env::hold_write_lease(&path);
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = done_tx.send(open_regular(&path).is_none());

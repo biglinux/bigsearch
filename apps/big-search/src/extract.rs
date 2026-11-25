@@ -13,7 +13,24 @@ use std::path::Path;
 /// readers' one way to a file's bytes. A `stat` taken before cannot see a FIFO
 /// renamed into place since, and a plain open of one waits for a writer.
 pub(crate) fn open_regular(path: &Path) -> Option<std::fs::File> {
-    open_regular_with(path, 0)
+    open_regular_with(path, 0).ok()
+}
+
+/// Why [`open_regular_with`] gave no file.
+pub(crate) enum Unopened {
+    /// Not a regular file, or not readable: read it again once it changes.
+    Refused,
+    /// Under another process's write lease, or no descriptor free: a later pass may read it.
+    Busy,
+}
+
+impl From<std::io::Error> for Unopened {
+    fn from(error: std::io::Error) -> Self {
+        match error.raw_os_error() {
+            Some(libc::EWOULDBLOCK | libc::EMFILE | libc::ENFILE) => Self::Busy,
+            _ => Self::Refused,
+        }
+    }
 }
 
 /// Set once a reopen has found no `/proc/self/fd`.
@@ -21,39 +38,36 @@ static PROC_FD_MISSING_REPORTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// [`open_regular`] with `flags` added to the first open, such as `O_NOFOLLOW`.
-pub(crate) fn open_regular_with(path: &Path, flags: libc::c_int) -> Option<std::fs::File> {
+pub(crate) fn open_regular_with(
+    path: &Path,
+    flags: libc::c_int,
+) -> Result<std::fs::File, Unopened> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    // An `O_PATH` open runs no FIFO or device open and breaks no lease; reopening
-    // through it keeps the inode the type check saw. A non-blocking reopen skips
-    // a file under another process's write lease (a Samba oplock, an NFS
-    // delegation) instead of waiting for its break, and while it is open no write
-    // lease can be taken, so the blocking one returned waits on none.
+    // `O_PATH` runs no FIFO or device open. The non-blocking reopen fails at once
+    // under a write lease and, while open, bars one, so the blocking reopen beside
+    // it cannot wait.
     let handle = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(flags | libc::O_PATH)
-        .open(path)
-        .ok()?;
-    if !handle.metadata().ok()?.is_file() {
-        return None;
+        .open(path)?;
+    if !handle.metadata()?.is_file() {
+        return Err(Unopened::Refused);
     }
     let reopen_path = format!("/proc/self/fd/{}", handle.as_raw_fd());
-    let opened = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(&reopen_path)
-        .and_then(|_lease_guard| std::fs::File::open(&reopen_path));
-    match opened {
-        Ok(file) => Some(file),
-        Err(error) => {
+        .and_then(|_lease_guard| std::fs::File::open(&reopen_path))
+        .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound
                 && !PROC_FD_MISSING_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed)
             {
                 log::warn!("documents are skipped unread: /proc/self/fd is unavailable ({error})");
             }
-            None
-        }
-    }
+            error.into()
+        })
 }
 
 /// Adaptive cap on extracted text per file, sized by the machine's memory to
