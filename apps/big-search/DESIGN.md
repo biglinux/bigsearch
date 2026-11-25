@@ -642,12 +642,21 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   over another's; with nothing there it proceeds. `forget_versions` also
   erases the rows kept for the file where the path lands under any other
   key, unless the rows found under the path as spelled are another file's.
-  The watcher moves the rows of a renamed folder's documents with it, erasing
-  rows a deleted document left below the destination (a folder is renamed
-  only onto an empty one), never keeps a version of a file reached through a
-  folder replaced by a link, and checks a reindex again before it reads. A
-  saved file takes the rows kept for it under paths that no longer hold it
-  as a real path, so one file has one row; a hard link keeps its own.
+  The watcher moves the rows of a renamed folder's documents with it and
+  erases every other row below the destination: a folder is renamed only
+  onto an empty one, so they are deleted documents' (or those of a document
+  moved away while the service was stopped). It never keeps a version of a
+  file reached through a folder replaced by a link, and checks a reindex
+  again before it reads. A saved file takes the rows kept for it under paths
+  that no longer hold it as a real path, so one file has one row; a hard
+  link keeps its own. The row at a saved file's path is its own, since an
+  editor's save is a new file at the same path, unless that row records
+  another file and the saved one has rows of its own: then it arrived there
+  while the service was stopped (`mv r s; mv t r`), and the row it displaces
+  is parked, with no path, until a file with its identity takes it or it
+  expires as a missing document's does. A document moved away while the
+  service was stopped and saved before the service saw it leaves its rows
+  at the path it left, for the next file to arrive there with none.
 - Extraction subprocesses get argv arrays, never `sh -c`; a failure or a
   timeout skips the file and is logged, and never stops the daemon.
 - The socket lives in `$XDG_RUNTIME_DIR`, mode `0600`, `AF_UNIX` only, same UID.

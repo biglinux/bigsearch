@@ -57,6 +57,7 @@ fn versions_survive_replacing_saves() {
     folder_rename_carries_the_history(&mut history, &home);
     forget_after_a_move_while_stopped(&mut history, &home);
     folder_moved_onto_a_vanished_one(&mut history, &home);
+    rename_chain_while_stopped(&mut history, &home);
     linked_folder_never_kept(&mut history, &home);
     non_documents_never_kept(&mut history, &home);
 }
@@ -280,17 +281,17 @@ fn forget_after_a_move_while_stopped(history: &mut History, home: &Path) {
 }
 
 /// Guards: persisted data: `rm -r velha; mv nova velha` leaves the deleted
-/// document's versions nowhere: they are not offered as the moved one's.
+/// documents' versions nowhere, whether or not a moved document takes the
+/// name: they are not offered as the moved one's or as a new one's.
 fn folder_moved_onto_a_vanished_one(history: &mut History, home: &Path) {
     let docs = home.join("Documentos");
     let vanished = docs.join("velha/e.odt");
-    kept_twice(history, &vanished);
-    let objects: Vec<PathBuf> = history
-        .versions(&[&vanished])
-        .expect("versions")
-        .into_iter()
-        .map(|version| version.object)
-        .collect();
+    let unmatched = docs.join("velha/f.odt");
+    let mut objects = Vec::new();
+    for document in [&vanished, &unmatched] {
+        kept_twice(history, document);
+        objects.extend(listed_objects(history, document));
+    }
     std::fs::remove_dir_all(docs.join("velha")).expect("delete the folder");
     kept_twice(history, &docs.join("nova/e.odt"));
     std::fs::rename(docs.join("nova"), docs.join("velha")).expect("move the folder");
@@ -301,6 +302,44 @@ fn folder_moved_onto_a_vanished_one(history: &mut History, home: &Path) {
     for object in objects {
         assert!(!object.exists(), "{} was left behind", object.display());
     }
+    std::fs::write(&unmatched, "nova").expect("write");
+    history
+        .save_version(&unmatched, Reason::Saved)
+        .expect("save");
+    assert!(
+        history
+            .versions(&[&unmatched])
+            .expect("versions")
+            .is_empty()
+    );
+}
+
+/// The objects of the versions listed for `path`.
+fn listed_objects(history: &History, path: &Path) -> Vec<PathBuf> {
+    history
+        .versions(&[path])
+        .expect("versions")
+        .into_iter()
+        .map(|version| version.object)
+        .collect()
+}
+
+/// Guards: persisted data: `mv r s; mv t r` while the service was stopped
+/// leaves each document its own versions when the pass over the catalogue
+/// reaches `r` first, where the rows of both documents meet.
+fn rename_chain_while_stopped(history: &mut History, home: &Path) {
+    let docs = home.join("Documentos/cadeia");
+    let (r, s, t) = (docs.join("r.odt"), docs.join("s.odt"), docs.join("t.odt"));
+    kept_twice(history, &r);
+    kept_twice(history, &t);
+    let (of_r, of_t) = (listed_objects(history, &r), listed_objects(history, &t));
+    std::fs::rename(&r, &s).expect("move r");
+    std::fs::rename(&t, &r).expect("move t");
+    for document in [&r, &s] {
+        history.save_version(document, Reason::Saved).expect("save");
+    }
+    assert_eq!(listed_objects(history, &s), of_r);
+    assert_eq!(listed_objects(history, &r), of_t);
 }
 
 /// Guards: persisted data: a save heard before a folder on the way was

@@ -51,7 +51,7 @@ use disk::disk_capacity;
 use eligibility::{eligible_metadata, eligible_name, git_work_tree};
 use store::{
     file_id_for_path, first_stored, follow_renames, is_live_session, join_rows, now_secs,
-    object_name, open_store, paths_under, prepare_store, rows_of_file,
+    object_name, open_store, park, prepare_store, rows_of_file, rows_under,
 };
 
 /// Why a version was written.
@@ -132,7 +132,8 @@ fn not_kept_error(why: &'static str) -> anyhow::Error {
 }
 
 /// What tells one file from another: `(dev, ino)`, and the birth time where
-/// the filesystem records one (see [`History::upsert_file`]).
+/// the filesystem records one, since XFS hands a deleted document's inode
+/// number to the next new file.
 fn identity(metadata: &std::fs::Metadata) -> (i64, i64, Option<i64>) {
     let born = metadata
         .created()
@@ -350,9 +351,9 @@ impl History {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        let mut moves: Vec<(PathBuf, PathBuf)> = paths_under(conn, from)?
+        let mut moves: Vec<(PathBuf, PathBuf)> = rows_under(conn, from)?
             .into_iter()
-            .filter_map(|kept| {
+            .filter_map(|(_, kept)| {
                 let moved = to.join(kept.strip_prefix(from).ok()?);
                 Some((kept, moved))
             })
@@ -364,13 +365,14 @@ impl History {
         // unlink, and following it there would file the history
         // under a name nobody can type, out of reach of the request to forget it.
         moves.retain(|(_, moved)| eligible_name(moved).is_ok());
-        // rename(2) moves a folder only onto an empty one, so a row below the
-        // destination is a vanished document's: erased as its expiry would
-        // erase it, never joined to the moved document's.
-        let mut vanished = Vec::new();
-        for (_, moved) in moves.iter().filter(|(kept, _)| kept != from) {
-            vanished.extend(file_id_for_path(conn, moved)?);
-        }
+        // rename(2) moves a folder only onto an empty one, and nothing lies
+        // below a file, so every row below the destination is a vanished
+        // document's: erased as its expiry would erase it, never handed to a
+        // document that arrives there.
+        let vanished: Vec<i64> = rows_under(conn, to)?
+            .into_iter()
+            .map(|(file_id, _)| file_id)
+            .collect();
         self.erase_rows(conn, &vanished)?;
         follow_renames(
             conn,
@@ -685,30 +687,33 @@ impl History {
     }
 
     /// Find or create the catalogue row for this document, and join to it the
-    /// rows kept for the same file under paths it has left.
-    ///
-    /// Two rules, in order. The path comes first because that is what an atomic
-    /// save looks like: same name, brand-new inode. Identity comes second: a
-    /// row recorded for this file under another path is the file moved while
-    /// nothing watched, unless that path holds it as a real path. That is a
-    /// hard link, which keeps its own row; otherwise two hard links to one
-    /// inode would take turns renaming each other's history. Identity includes the
-    /// birth time where the filesystem records one: XFS hands a deleted
-    /// document's inode number to the next new file, which must not inherit
-    /// that document's versions. A row without one (written before it was
-    /// recorded, or on a filesystem without it) matches on `(dev, ino)` alone.
+    /// rows kept for the same file under keys that do not hold it as a real
+    /// path: the path's own row, unless it records another file and this one
+    /// has rows of its own (DESIGN.md, section 11).
     fn upsert_file(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<i64> {
         let conn = self.conn.as_ref().expect("checked by the caller");
         let key = path.to_string_lossy().into_owned();
         let file = identity(metadata);
         let (dev, ino, born) = file;
-        let left: Vec<i64> = rows_of_file(conn, file)?
-            .into_iter()
-            .filter(|(_, previous)| *previous != key && !holds(Path::new(previous), file))
-            .map(|(id, _)| id)
+        let of_the_file = rows_of_file(conn, file)?;
+        let left: Vec<i64> = of_the_file
+            .iter()
+            .filter(|(_, previous)| match previous {
+                Some(previous) => *previous != key && !holds(Path::new(previous), file),
+                None => true,
+            })
+            .map(|(id, _)| *id)
             .collect();
         let transaction = conn.unchecked_transaction()?;
-        let id = if let Some(id) = file_id_for_path(conn, path)? {
+        let mut at_path = file_id_for_path(conn, path)?;
+        if let Some(id) = at_path
+            && !left.is_empty()
+            && !of_the_file.iter().any(|(row, _)| *row == id)
+        {
+            park(conn, id)?;
+            at_path = None;
+        }
+        let id = if let Some(id) = at_path {
             // Only on a change: an UPDATE that rewrites the same values still
             // writes the page to the WAL, and every save passes through here.
             conn.execute(

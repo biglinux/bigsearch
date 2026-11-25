@@ -18,7 +18,8 @@ use super::{Reason, SharedHistory, Support, Unavailable};
 /// How long a file is kept in the catalogue after its path disappears.
 const MISSING_GRACE_SECONDS: i64 = 7 * 24 * 60 * 60;
 
-/// Forget documents whose file has been gone long enough.
+/// Forget documents whose file has been gone long enough, a parked row's
+/// (no key) included.
 ///
 /// The store is locked to read the catalogue and to write the outcome, not
 /// while the filesystem is asked about every document: the worker runs at idle
@@ -26,7 +27,7 @@ const MISSING_GRACE_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// A row renamed or saved in between stops matching what was checked and is
 /// left for the next sweep.
 fn expire_missing(history: &SharedHistory) -> Result<()> {
-    let files: Vec<(i64, String, Option<i64>)> = {
+    let files: Vec<(i64, Option<String>, Option<i64>)> = {
         let store = history.lock().expect("versions store lock");
         let Some(conn) = &store.conn else {
             return Ok(());
@@ -38,26 +39,23 @@ fn expire_missing(history: &SharedHistory) -> Result<()> {
     let checked: Vec<_> = files
         .into_iter()
         .map(|(id, path, missing_since)| {
-            let exists = Path::new(&path).exists();
+            let exists = path.as_deref().is_some_and(|path| Path::new(path).exists());
             (id, path, missing_since, exists)
         })
         .collect();
 
     let now = now_secs();
-    let mut store = history.lock().expect("versions store lock");
+    let store = history.lock().expect("versions store lock");
     let Some(conn) = &store.conn else {
         return Ok(());
     };
-    let mut expired: Vec<String> = Vec::new();
+    let mut expired = Vec::new();
     for (id, path, missing_since, exists) in checked {
-        if note_presence(conn, id, &path, missing_since, exists, now)? {
-            expired.push(path);
+        if note_presence(conn, id, path.as_deref(), missing_since, exists, now)? {
+            expired.push(id);
         }
     }
-    for path in expired {
-        store.forget(&[Path::new(&path)], None)?;
-    }
-    Ok(())
+    store.erase_rows(conn, &expired)
 }
 
 /// Record whether the file at `path` exists: a document back in place stops
@@ -66,7 +64,7 @@ fn expire_missing(history: &SharedHistory) -> Result<()> {
 fn note_presence(
     conn: &rusqlite::Connection,
     id: i64,
-    path: &str,
+    path: Option<&str>,
     missing_since: Option<i64>,
     exists: bool,
     now: i64,
@@ -74,14 +72,14 @@ fn note_presence(
     match (exists, missing_since) {
         (true, Some(_)) => {
             conn.execute(
-                "UPDATE files SET missing_since = NULL WHERE id = ?1 AND current_path = ?2",
+                "UPDATE files SET missing_since = NULL WHERE id = ?1 AND current_path IS ?2",
                 params![id, path],
             )?;
         }
         (false, None) => {
             conn.execute(
                 "UPDATE files SET missing_since = ?3
-                  WHERE id = ?1 AND current_path = ?2 AND missing_since IS NULL",
+                  WHERE id = ?1 AND current_path IS ?2 AND missing_since IS NULL",
                 params![id, path, now],
             )?;
         }
@@ -89,7 +87,7 @@ fn note_presence(
             let unchanged: Option<i64> = conn
                 .query_row(
                     "SELECT id FROM files
-                      WHERE id = ?1 AND current_path = ?2 AND missing_since = ?3",
+                      WHERE id = ?1 AND current_path IS ?2 AND missing_since = ?3",
                     params![id, path, since],
                     |row| row.get(0),
                 )
@@ -489,7 +487,8 @@ mod tests {
     use crate::history::tests::store_with;
 
     /// A document gone past the grace period is forgotten; one that came back
-    /// stops counting as missing; one just gone starts its grace period.
+    /// stops counting as missing; one just gone starts its grace period. A
+    /// row with no key is gone like any other.
     #[test]
     fn missing_documents_expire_after_the_grace() {
         let dir = crate::test_env::scratch_dir("bs-history-missing");
@@ -498,9 +497,15 @@ mod tests {
         let conn = open_store(&dir.join("history.sqlite")).unwrap();
         let long_ago = now_secs() - MISSING_GRACE_SECONDS - 1;
         for (id, path, missing_since) in [
-            (1, present.to_string_lossy().into_owned(), Some(long_ago)),
-            (2, "/gone/old.md".to_string(), Some(long_ago)),
-            (3, "/gone/new.md".to_string(), None),
+            (
+                1,
+                Some(present.to_string_lossy().into_owned()),
+                Some(long_ago),
+            ),
+            (2, Some("/gone/old.md".to_string()), Some(long_ago)),
+            (3, Some("/gone/new.md".to_string()), None),
+            (4, None, Some(long_ago)),
+            (5, None, Some(now_secs())),
         ] {
             conn.execute(
                 "INSERT INTO files(id, current_path, created_at, missing_since)
@@ -524,9 +529,10 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows.len(), 3, "{rows:?}");
         assert_eq!(rows[0], (1, None));
         assert!(rows[1].0 == 3 && rows[1].1.is_some(), "{rows:?}");
+        assert_eq!(rows[2].0, 5, "{rows:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

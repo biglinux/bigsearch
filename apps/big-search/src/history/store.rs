@@ -1,8 +1,9 @@
 //! The store on disk: its directory, the SQLite schema, catalogue rows looked
 //! up by path, and the names of the objects versions are copied to.
 //!
-//! `files` holds one row per document, keyed by its UTF-8 path; `versions`
-//! holds one row per kept copy, pointing at an object under `objects/`.
+//! `files` holds one row per document, keyed by its UTF-8 path, or by none
+//! while its document is not known to be anywhere; `versions` holds one row
+//! per kept copy, pointing at an object under `objects/`.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,27 +36,30 @@ pub(super) fn prepare_store(objects: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The columns of `files`.
+const FILES_COLUMNS: &str = "(
+    id INTEGER PRIMARY KEY,
+    current_path TEXT UNIQUE,
+    dev INTEGER,
+    ino INTEGER,
+    created_at INTEGER NOT NULL,
+    missing_since INTEGER,
+    born INTEGER
+)";
+
 pub(super) fn open_store(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(path)?;
     conn.busy_timeout(std::time::Duration::from_secs(1))?;
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
         PRAGMA journal_size_limit = 1048576;
         PRAGMA foreign_keys = ON;
-        CREATE TABLE IF NOT EXISTS files (
-            id INTEGER PRIMARY KEY,
-            current_path TEXT NOT NULL UNIQUE,
-            dev INTEGER,
-            ino INTEGER,
-            created_at INTEGER NOT NULL,
-            missing_since INTEGER,
-            born INTEGER
-        );
+        CREATE TABLE IF NOT EXISTS files {FILES_COLUMNS};
         CREATE INDEX IF NOT EXISTS idx_files_dev_ino ON files(dev, ino);
         CREATE TABLE IF NOT EXISTS versions (
             id INTEGER PRIMARY KEY,
@@ -70,8 +74,8 @@ pub(super) fn open_store(path: &Path) -> Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_versions_file ON versions(file_id, saved_at DESC);
         CREATE INDEX IF NOT EXISTS idx_versions_age ON versions(saved_at);
-        ",
-    )?;
+        "
+    ))?;
     // Stores created before the birth time was recorded.
     let has_born: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name = 'born')",
@@ -81,7 +85,45 @@ pub(super) fn open_store(path: &Path) -> Result<Connection> {
     if !has_born {
         conn.execute_batch("ALTER TABLE files ADD COLUMN born INTEGER")?;
     }
+    // Stores created before a row could be parked without a key. SQLite
+    // lifts a column's not-null constraint only by rebuilding the table, with
+    // foreign keys off, which it ignores inside a transaction.
+    let key_required: bool = conn.query_row(
+        "SELECT \"notnull\" FROM pragma_table_info('files') WHERE name = 'current_path'",
+        [],
+        |row| row.get(0),
+    )?;
+    if key_required {
+        conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+        let transaction = conn.unchecked_transaction()?;
+        let rebuilt = transaction
+            .execute_batch(&format!(
+                "
+                CREATE TABLE files_rebuilt {FILES_COLUMNS};
+                INSERT INTO files_rebuilt(id, current_path, dev, ino, created_at, missing_since, born)
+                    SELECT id, current_path, dev, ino, created_at, missing_since, born FROM files;
+                DROP TABLE files;
+                ALTER TABLE files_rebuilt RENAME TO files;
+                CREATE INDEX idx_files_dev_ino ON files(dev, ino);
+                "
+            ))
+            .and_then(|()| transaction.commit());
+        conn.execute_batch("PRAGMA foreign_keys = ON")?;
+        rebuilt.context("rebuild the versions store's table of documents")?;
+    }
     Ok(conn)
+}
+
+/// Take `file_id`'s key away and count its document missing from now, if it
+/// was not already: it is not known to be anywhere until a file with its
+/// identity claims it ([`rows_of_file`]) or the missing sweep expires it.
+pub(super) fn park(conn: &Connection, file_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE files SET current_path = NULL, missing_since = COALESCE(missing_since, ?2)
+          WHERE id = ?1",
+        params![file_id, now_secs()],
+    )?;
+    Ok(())
 }
 
 /// Move each `from`'s catalogue row to its `to`, in one transaction.
@@ -134,28 +176,30 @@ pub(super) fn join_rows(conn: &Connection, into: i64, rows: &[i64]) -> Result<()
     Ok(())
 }
 
-/// The keys of the rows below the folder `folder`.
-pub(super) fn paths_under(conn: &Connection, folder: &Path) -> Result<Vec<PathBuf>> {
+/// The rows below the folder `folder`, with their keys.
+pub(super) fn rows_under(conn: &Connection, folder: &Path) -> Result<Vec<(i64, PathBuf)>> {
     let Some(key) = folder.to_str() else {
         return Ok(Vec::new());
     };
     // `0` follows `/` in byte order, so the range is every key starting
     // `folder/`, read from the unique index on the key.
-    conn.prepare("SELECT current_path FROM files WHERE current_path > ?1 AND current_path < ?2")?
-        .query_map(params![format!("{key}/"), format!("{key}0")], |row| {
-            row.get::<_, String>(0).map(PathBuf::from)
-        })?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(Into::into)
+    conn.prepare(
+        "SELECT id, current_path FROM files WHERE current_path > ?1 AND current_path < ?2",
+    )?
+    .query_map(params![format!("{key}/"), format!("{key}0")], |row| {
+        Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?)))
+    })?
+    .collect::<rusqlite::Result<_>>()
+    .map_err(Into::into)
 }
 
 /// The rows recorded for the file with this `(dev, ino, born)`, with their
-/// keys, newest first. A row or a file without a birth time matches on
-/// `(dev, ino)` alone.
+/// keys (none for a parked row), newest first. A row or a file without a
+/// birth time matches on `(dev, ino)` alone.
 pub(super) fn rows_of_file(
     conn: &Connection,
     (dev, ino, born): (i64, i64, Option<i64>),
-) -> Result<Vec<(i64, String)>> {
+) -> Result<Vec<(i64, Option<String>)>> {
     conn.prepare(
         "SELECT id, current_path FROM files
           WHERE dev = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)

@@ -475,3 +475,84 @@ fn adoption_into_non_utf8_refused() {
     assert!(store.adopt_spelling(&alias, &real).is_err());
     assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
 }
+
+/// The store as it was created while every row needed a key, with one
+/// document and one version.
+const STORE_WITH_REQUIRED_KEYS: &str = "
+    CREATE TABLE files (
+        id INTEGER PRIMARY KEY,
+        current_path TEXT NOT NULL UNIQUE,
+        dev INTEGER,
+        ino INTEGER,
+        created_at INTEGER NOT NULL,
+        missing_since INTEGER,
+        born INTEGER
+    );
+    CREATE INDEX idx_files_dev_ino ON files(dev, ino);
+    CREATE TABLE versions (
+        id INTEGER PRIMARY KEY,
+        file_id INTEGER NOT NULL REFERENCES files(id),
+        saved_at INTEGER NOT NULL,
+        mtime_s INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        size INTEGER NOT NULL,
+        object TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        was_named TEXT
+    );
+    INSERT INTO files(id, current_path, dev, ino, created_at, missing_since, born)
+    VALUES (4, '/d/a.md', 1, 2, 3, NULL, 5);
+    INSERT INTO versions(file_id, saved_at, mtime_s, mtime_ns, size, object, reason)
+    VALUES (4, 6, 7, 8, 9, 'ab/cd', 'saved');
+";
+
+/// Guards: persisted format: a store whose rows all needed a key opens with
+/// its rows, versions and indexes kept, and takes a row with none.
+#[test]
+fn store_with_required_keys_migrated() {
+    let dir = crate::test_env::scratch_dir("bs-history-migrate");
+    let db = dir.join("history.sqlite");
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(STORE_WITH_REQUIRED_KEYS)
+        .unwrap();
+
+    let conn = open_store(&db).unwrap();
+    let row: (String, i64, i64, i64, Option<i64>, i64) = conn
+        .query_row(
+            "SELECT current_path, dev, ino, created_at, missing_since, born FROM files WHERE id = 4",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("/d/a.md".to_string(), 1, 2, 3, None, 5));
+    assert_eq!(
+        version_owners(&conn),
+        [("/d/a.md".to_string(), "ab/cd".to_string())]
+    );
+    let index: Option<String> = conn
+        .query_row(
+            "SELECT name FROM pragma_index_list('files') WHERE name = 'idx_files_dev_ino'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert!(index.is_some(), "the identity index is gone");
+    conn.execute(
+        "INSERT INTO files(id, current_path, created_at) VALUES (5, NULL, 0)",
+        [],
+    )
+    .unwrap();
+    let dangling: Option<i64> = conn
+        .query_row("SELECT 1 FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .unwrap();
+    assert_eq!(dangling, None);
+    assert!(
+        conn.execute("DELETE FROM files WHERE id = 4", []).is_err(),
+        "versions still refer to their row"
+    );
+}
