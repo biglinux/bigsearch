@@ -364,19 +364,9 @@ struct Signals {
 
 /// Classify how much this service would be in the way.
 ///
-/// CPU time is not the question: the indexer yields to the daemon's queries,
-/// and against other programs the unit takes the share its normal weight gives
-/// it, which DESIGN.md section 7 accepts to keep searches fast on a busy
-/// machine; its own CPU stall only says others are busy. What that share does
-/// not cover is a shared core: on an SMT CPU a worker on the sibling thread of
-/// a busy program's core slows it however low its priority. The scheduler
-/// gives each busy program a core of its own while it can, so the free cores
-/// are the cores minus the CPUs the others keep busy; with fewer free cores
-/// than workers, some worker shares one.
-///
-/// Memory is system-wide, because page cache this service fills stalls
-/// everyone else, and so is the disk: most disk schedulers ignore I/O priority.
-/// Running on battery counts as busy: the charge is theirs.
+/// The unit's weight settles its CPU share; what it misses is an SMT sibling,
+/// slowed by a worker at any priority, and memory, disk and battery, whose cost
+/// falls on every program (DESIGN.md section 7).
 fn classify_load(signals: Signals) -> Load {
     let Signals {
         own_io,
