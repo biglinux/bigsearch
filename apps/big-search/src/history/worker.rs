@@ -542,6 +542,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Guards: recovery: a step that panics holding the store costs that step
+    /// alone; the worker's next step still reaches the store.
+    #[test]
+    fn worker_outlives_panicking_step() {
+        let dir = crate::test_env::scratch_dir("bs-history-step-panic");
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        let history = SharedHistory::new(store_with(conn, &dir));
+        run_step(|| {
+            let _store = history.lock();
+            panic!("a step panicked holding the store");
+        });
+        let mut swept = false;
+        run_step(|| {
+            expire_missing(&history).unwrap();
+            swept = true;
+        });
+        assert!(swept);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn partial_batch_keeps_unvisited_paths() {
         let mut pending = Pending::new();

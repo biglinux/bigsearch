@@ -125,9 +125,10 @@ impl SharedHistory {
         Self(Arc::new(Mutex::new(history)))
     }
 
-    /// The store, also after a thread panicked holding it: SQLite rolls back
-    /// the transaction a panic drops, and every other step is one statement
-    /// or a flag the next step sets again.
+    /// The store, also after a thread panicked holding it. A panic leaves what
+    /// a crash at that point would: SQLite rolls back the transaction it drops,
+    /// rows whose objects were already removed wait for the next start's sweep,
+    /// and the flags are set again by the next step.
     pub fn lock(&self) -> MutexGuard<'_, History> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
