@@ -17,6 +17,7 @@ mod scratch;
 use daemon::*;
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[test]
 fn pause_resume_rebuild_cycle() {
@@ -329,17 +330,18 @@ struct PathMatrix {
     docs: PathBuf,
     outside: PathBuf,
     sock: PathBuf,
+    data: PathBuf,
     /// Stopped before `base` is removed, or it writes its data folder again.
     daemon: Option<KillOnDrop>,
-    _run: scratch::ScratchDir,
+    run: scratch::ScratchDir,
 }
 
 impl PathMatrix {
-    fn start() -> Self {
+    fn start(name: &str) -> Self {
         // A disk that can share blocks: `/tmp` is usually tmpfs, which keeps no
         // versions. The socket stays there, under the length limit of its path.
-        let base = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("client-path-matrix-{}", std::process::id()));
+        let base =
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let home = base.join("home");
         let xdg_storage_home = base.join("data");
@@ -359,30 +361,58 @@ impl PathMatrix {
         std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
         std::fs::write(&rules, "!target/\n!**/target/**\n").unwrap();
         let run = scratch::scratch_dir("bs-matrix-run");
-        let sock = run.join("biglinux/indexd.sock");
-        let daemon = KillOnDrop(
-            env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
-                .spawn()
-                .unwrap(),
-        );
-        assert!(wait_socket(&sock), "daemon never bound socket");
-        // Watching, so the rearrangement is heard.
-        assert!(
-            settles(
-                || send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"status\"}")
-                    .contains("\"activity\":\"idle\"")
-            ),
-            "the daemon never finished its start"
-        );
-        Self {
+        let mut matrix = Self {
+            sock: run.join("biglinux/indexd.sock"),
             base,
             home,
             docs,
             outside,
-            sock,
-            daemon: Some(daemon),
-            _run: run,
-        }
+            data: xdg_storage_home,
+            daemon: None,
+            run,
+        };
+        matrix.daemon = Some(matrix.spawn());
+        matrix
+    }
+
+    /// Start the daemon and wait until it watches, so a rearrangement is heard.
+    fn spawn(&self) -> KillOnDrop {
+        let daemon = KillOnDrop(
+            env_cmd(&["daemon"], &self.home, &self.data, &self.run)
+                .spawn()
+                .unwrap(),
+        );
+        assert!(wait_socket(&self.sock), "daemon never bound socket");
+        assert!(
+            settles(
+                || send_daemon_request(&self.sock, "{\"v\":2,\"cmd\":\"status\"}")
+                    .contains("\"activity\":\"idle\"")
+            ),
+            "the daemon never finished its start"
+        );
+        daemon
+    }
+
+    /// Stop the daemon as the service manager does, with SIGTERM, and start
+    /// it again.
+    fn restart(&mut self) {
+        let mut daemon = self.daemon.take().unwrap();
+        let pid = libc::pid_t::try_from(daemon.0.id()).unwrap();
+        // SAFETY: `kill` takes no pointers, and the child is not reaped yet,
+        // so its pid names no other process.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = daemon.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "the daemon did not stop");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(status.success(), "the stop ended with {status}");
+        // An exit leaves the socket file, which `spawn` waits to see.
+        let _ = std::fs::remove_file(&self.sock);
+        self.daemon = Some(self.spawn());
     }
 
     fn file(&self, folder: &str) -> PathBuf {
@@ -451,7 +481,7 @@ impl Drop for PathMatrix {
 /// and nothing outside a source is read.
 #[test]
 fn client_path_matrix() {
-    let matrix = PathMatrix::start();
+    let matrix = PathMatrix::start("client-path-matrix");
     if !matrix.keeps_versions() {
         return;
     }
@@ -466,6 +496,32 @@ fn client_path_matrix() {
     origin_requests(&matrix);
     let other = forget_by_spelling(&matrix);
     source_root_replaced(&matrix, &other);
+}
+
+/// Guards: persisted data: a save heard just before the service manager stops
+/// the daemon leaves the document its versions. Killed with the save not yet
+/// noted, the row recorded the replaced file, and the next start parked it as
+/// a file that arrived while nothing watched.
+#[test]
+fn save_before_stop_kept() {
+    let mut matrix = PathMatrix::start("save-before-stop");
+    if !matrix.keeps_versions() {
+        return;
+    }
+    matrix.keep_one("real", "real edited");
+    let kept = matrix.ids("real");
+    assert!(!kept.is_empty(), "nothing listed before the stop");
+    // What an editor does: a new file renamed over the document.
+    let file = matrix.file("real");
+    let saved = file.with_extension("tmp-save");
+    std::fs::write(&saved, "real saved").unwrap();
+    std::fs::rename(&saved, &file).unwrap();
+    matrix.restart();
+    let listed = matrix.ids("real");
+    assert!(
+        kept.iter().all(|id| listed.contains(id)),
+        "listed {kept:?} before the stop, {listed:?} after"
+    );
 }
 
 /// The versions listed through each spelling.

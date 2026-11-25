@@ -284,6 +284,7 @@ pub(super) fn cmd_daemon() -> Result<()> {
         pending_content: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         unwatched_dirs: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
+    stop_on_signal(control.commands.clone())?;
     // One versions store shared by the watcher (writes) and IPC (answers).
     let history = big_search::history::SharedHistory::new(big_search::history::History::open(
         &big_search_config::read().history,
@@ -326,6 +327,46 @@ pub(super) fn cmd_daemon() -> Result<()> {
 /// Exit status asking systemd for a restart (`RestartForceExitStatus=`).
 const EXIT_RESTART: i32 = 75;
 
+/// How long a stop waits for the watcher, which may be held by a walk or the
+/// start's sync for far longer.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Stop on SIGTERM, which the service manager sends, or SIGINT. Without it a
+/// save heard in the last moments before a stop would never reach the
+/// versions worker, and the next start would take the file for one that
+/// arrived while nothing watched.
+fn stop_on_signal(commands: std::sync::mpsc::Sender<watch::WatchMessage>) -> Result<()> {
+    let mut signals = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+    ])
+    .context("handle SIGTERM and SIGINT")?;
+    std::thread::Builder::new()
+        .name("stop".into())
+        .spawn(move || {
+            if let Some(signal) = signals.forever().next() {
+                log::info!("stopping on signal {signal}");
+                stop(&commands, 0);
+            }
+        })
+        .context("start the stop thread")?;
+    Ok(())
+}
+
+/// Ask the watcher to apply what it heard and end the process with `status`;
+/// end it here after [`STOP_WAIT`] if the watcher has not.
+fn stop(commands: &std::sync::mpsc::Sender<watch::WatchMessage>, status: i32) -> ! {
+    // A watcher that is gone has already ended the process.
+    let _ = commands.send(watch::WatchMessage::Stop(status));
+    std::thread::sleep(STOP_WAIT);
+    log::warn!("the watcher did not stop within {STOP_WAIT:?}; exiting without it");
+    #[expect(
+        clippy::exit,
+        reason = "the service manager stops or restarts the unit with this status"
+    )]
+    std::process::exit(status)
+}
+
 /// Follow the mount table. A disk mounted or unmounted inside a source asks the
 /// watcher for a rescan, since inotify reports neither. A source that comes or
 /// goes (a removable disk plugged in) changes the roots the daemon started
@@ -351,13 +392,9 @@ fn spawn_mount_watch(
             loop {
                 if available() != started {
                     log::info!(
-                        "a source came or went; exiting with status {EXIT_RESTART} for the service manager to start it again"
+                        "a source came or went; stopping with status {EXIT_RESTART} for the service manager to start it again"
                     );
-                    #[expect(
-                        clippy::exit,
-                        reason = "systemd restarts the unit with the new sources"
-                    )]
-                    std::process::exit(EXIT_RESTART);
+                    stop(&commands, EXIT_RESTART);
                 }
                 if source_mounts_changed(&before, &now, &started) {
                     log::info!("a disk was mounted or unmounted in or above a source; rescanning");
@@ -435,7 +472,7 @@ fn spawn_watcher(
             // Startup sync + first backfill batch allocate bulk writer arenas;
             // return the freed pages before settling into the resident loop.
             throttle::release_idle_memory();
-            if let Err(e) = watch::run(
+            match watch::run(
                 watch_index,
                 watch_content_index,
                 watch::WatchScope {
@@ -456,7 +493,15 @@ fn spawn_watcher(
                 rx,
                 watch_history,
             ) {
-                log::error!("watcher stopped: {e:#}");
+                Ok(status) => {
+                    log::info!("stopped; exiting with status {status}");
+                    #[expect(
+                        clippy::exit,
+                        reason = "the stop the watcher took ends the daemon, without the exit guard"
+                    )]
+                    std::process::exit(status);
+                }
+                Err(e) => log::error!("watcher stopped: {e:#}"),
             }
         })?;
     Ok(())

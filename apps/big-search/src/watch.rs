@@ -134,10 +134,14 @@ pub enum WatchControlCommand {
     WarmContent,
 }
 
-/// What the watcher loop consumes: a filesystem event or a control command.
+/// What the watcher loop consumes: a filesystem event, a control command or
+/// a stop.
 pub enum WatchMessage {
     Fs(notify::Result<notify::Event>),
     ControlCommand(WatchControlCommand),
+    /// End [`run`], which returns this exit status, once the events heard
+    /// before the stop are applied and the versions worker has noted them.
+    Stop(i32),
 }
 
 struct ContentIndexWrite<'a> {
@@ -145,10 +149,11 @@ struct ContentIndexWrite<'a> {
     writer: &'a mut Option<IndexWriter>,
 }
 
-/// Watch `roots` and keep `index` (and the `state` cache) in sync until the channel
-/// closes. `paused` mirrors the runtime state for the IPC `status` reply. `tx`/`rx`
-/// are the shared `WatchMessage` channel: `tx` is cloned into the inotify callback, and the
-/// IPC thread holds another clone to deliver control commands. Blocking.
+/// Watch `roots` and keep `index` (and the `state` cache) in sync until a
+/// [`WatchMessage::Stop`], and return its exit status. `paused` mirrors the runtime
+/// state for the IPC `status` reply. `tx`/`rx` are the shared `WatchMessage` channel:
+/// `tx` is cloned into the inotify callback, and the IPC thread holds another clone
+/// to deliver control commands. Blocking.
 ///
 /// # Errors
 ///
@@ -163,7 +168,7 @@ pub fn run(
     tx: Sender<WatchMessage>,
     rx: Receiver<WatchMessage>,
     history: crate::history::SharedHistory,
-) -> Result<()> {
+) -> Result<i32> {
     let f = fields(&index)?;
     let content_fields = content_fields(&content_index)?;
     // Resident for the daemon's whole life, so size it at tantivy's minimum arena
@@ -177,7 +182,7 @@ pub fn run(
 
     let check_sources_at = matches!(scope.dirs, StartDirs::Saved(..))
         .then(|| Instant::now() + saved_start_check_delay());
-    let history_tx = spawn_history_worker(&history);
+    let (history_tx, history_worker) = spawn_history_worker(&history);
     let (mut watches, queued, overflowed) =
         start_inotify(tx, &runtime, scope.watch_list, scope.fingerprint)?;
     let catch_up = watch_initial_dirs(&mut watches, scope.roots, scope.dirs, scope.started);
@@ -196,9 +201,10 @@ pub fn run(
     content_backfill.request();
     runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
 
-    WatchLoop {
+    let status = WatchLoop {
         check_sources_at,
         content_backfill,
+        stop_status: None,
         history_pass_done: false,
         history_cursor: None,
         history_tx,
@@ -218,7 +224,15 @@ pub fn run(
         content_index,
         index,
     }
-    .run_until_closed()
+    .run_until_stopped()?;
+    // The loop took the worker's queue with it: the worker notes each change
+    // still queued, then returns.
+    if let Some(worker) = history_worker
+        && worker.join().is_err()
+    {
+        log::error!("the versions worker panicked while stopping");
+    }
+    Ok(status)
 }
 
 /// Start inotify. Returns the watches, the count of events the callback has
@@ -287,10 +301,13 @@ fn open_origin_writer() -> origin::OriginWriter {
 ///
 /// Called before any watch: what changed while the service was stopped is
 /// settled here before a change is heard, and the start's walk catches the
-/// rest.
+/// rest. The worker returns once the sender is dropped and the queue drained.
 fn spawn_history_worker(
     history: &crate::history::SharedHistory,
-) -> Sender<crate::history::HistoryEvent> {
+) -> (
+    Sender<crate::history::HistoryEvent>,
+    Option<std::thread::JoinHandle<()>>,
+) {
     if let Err(error) = crate::history::check_kept_paths(history) {
         log::warn!("could not check the kept documents: {error:#}");
     }
@@ -299,10 +316,14 @@ fn spawn_history_worker(
     let spawned = std::thread::Builder::new()
         .name("history".into())
         .spawn(move || crate::history::run_worker(&history_store, history_rx));
-    if let Err(e) = spawned {
-        log::error!("no versions are kept: the history thread did not start: {e}");
-    }
-    history_tx
+    let worker = match spawned {
+        Ok(worker) => Some(worker),
+        Err(e) => {
+            log::error!("no versions are kept: the history thread did not start: {e}");
+            None
+        }
+    };
+    (history_tx, worker)
 }
 
 /// What the watcher loop owns between messages.
@@ -311,6 +332,8 @@ struct WatchLoop<'a> {
     /// ([`saved_start_check_delay`]).
     check_sources_at: Option<Instant>,
     content_backfill: ContentBackfill,
+    /// The exit status of the [`WatchMessage::Stop`] taken, which ends the loop.
+    stop_status: Option<i32>,
     history_pass_done: bool,
     /// Where the pass over the catalogue has got to. It covers what no event
     /// could: the bursts that overflowed the kernel's queue, and saves made
@@ -338,18 +361,20 @@ struct WatchLoop<'a> {
 }
 
 impl WatchLoop<'_> {
-    fn run_until_closed(mut self) -> Result<()> {
-        while let Some(message) = self.next_message()? {
+    fn run_until_stopped(mut self) -> Result<i32> {
+        loop {
+            let message = self.next_message()?;
             self.handle(message)?;
+            if let Some(status) = self.stop_status {
+                return Ok(status);
+            }
         }
-        Ok(())
     }
 
     /// Wait for the next message, doing idle work (a content backfill batch,
     /// a page of the versions pass) each time the wait runs out, and the walk
-    /// a start from the saved list owes once its time comes. `None` once the
-    /// channel is closed.
-    fn next_message(&mut self) -> Result<Option<WatchMessage>> {
+    /// a start from the saved list owes once its time comes.
+    fn next_message(&mut self) -> Result<WatchMessage> {
         loop {
             if self.check_due() {
                 self.check_sources_at = None;
@@ -384,8 +409,10 @@ impl WatchLoop<'_> {
                 None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             match received {
-                Ok(message) => return Ok(Some(message)),
-                Err(RecvTimeoutError::Disconnected) => return Ok(None),
+                Ok(message) => return Ok(message),
+                Err(RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("every sender of the watcher's messages is gone")
+                }
                 // The wait ran out for the walk, not for idle work.
                 Err(RecvTimeoutError::Timeout) if self.check_due() => {}
                 Err(RecvTimeoutError::Timeout) if backfill => self.idle_backfill_turn(),
@@ -475,6 +502,10 @@ impl WatchLoop<'_> {
                 return self.walk_sources();
             }
             WatchMessage::ControlCommand(command) => return self.apply_control(command),
+            WatchMessage::Stop(status) => {
+                self.stop_status = Some(status);
+                return self.apply_last_burst();
+            }
             WatchMessage::Fs(watcher_result) => {
                 self.queued.fetch_sub(1, Ordering::Relaxed);
                 watcher_result
@@ -484,6 +515,19 @@ impl WatchLoop<'_> {
             return Ok(()); // dropped while paused; Resume reconciles what was missed
         }
         self.index_burst(first)
+    }
+
+    /// Apply what the inotify thread passes on within one more [`DEBOUNCE`]
+    /// after a stop, so a save made just before it still reaches the versions
+    /// worker. A request that arrives meanwhile is dropped.
+    fn apply_last_burst(&mut self) -> Result<()> {
+        if self.runtime.paused.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut batch = WatchBatch::new();
+        let mut rescan = false;
+        let _ = self.coalesce_burst(&mut batch, &mut rescan);
+        self.apply_batch(batch, rescan)
     }
 
     fn reindex_path(&mut self, path: PathBuf) -> Result<()> {
@@ -564,24 +608,20 @@ impl WatchLoop<'_> {
             .store(ACTIVITY_INDEXING, Ordering::Relaxed);
         let mut batch = WatchBatch::new();
         let mut rescan = ingest(&mut batch, first);
-        let deferred_control_command = self.coalesce_burst(&mut batch, &mut rescan);
+        let deferred = self.coalesce_burst(&mut batch, &mut rescan);
         self.apply_batch(batch, rescan)?;
         self.runtime
             .activity
             .store(ACTIVITY_IDLE, Ordering::Relaxed);
-        if let Some(command) = deferred_control_command {
-            self.handle(WatchMessage::ControlCommand(command))?;
+        if let Some(message) = deferred {
+            self.handle(message)?;
         }
         Ok(())
     }
 
-    /// Coalesce a burst; a control command breaks the window and runs after the
-    /// batch commits (no reordering of fs work, no lost command).
-    fn coalesce_burst(
-        &self,
-        batch: &mut WatchBatch,
-        rescan: &mut bool,
-    ) -> Option<WatchControlCommand> {
+    /// Coalesce a burst; a control command or a stop breaks the window and runs
+    /// after the batch commits (no reordering of fs work, no lost command).
+    fn coalesce_burst(&self, batch: &mut WatchBatch, rescan: &mut bool) -> Option<WatchMessage> {
         let deadline = Instant::now() + DEBOUNCE;
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match self.rx.recv_timeout(remaining) {
@@ -589,7 +629,7 @@ impl WatchLoop<'_> {
                     self.queued.fetch_sub(1, Ordering::Relaxed);
                     *rescan |= ingest(batch, event_result);
                 }
-                Ok(WatchMessage::ControlCommand(command)) => return Some(command),
+                Ok(message) => return Some(message),
                 Err(_) => break,
             }
         }

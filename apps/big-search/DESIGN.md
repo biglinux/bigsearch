@@ -557,6 +557,14 @@ in or above a source starts a rescan, and a source that comes or goes (a removab
 disk plugged in) changes the roots the daemon started with, so it exits with
 status 75 and the unit starts it again (`RestartForceExitStatus=75`).
 
+That exit and a stop (SIGTERM from the service manager, or SIGINT) wait for the
+watcher: after the events already queued, it gathers what the kernel reports
+for one more debounce window, applies it, and lets the versions worker note
+every save it was sent, so a document saved just before a logout keeps its
+versions where a kill would leave them parked at the next start. A walk or the
+start's sync can hold the watcher longer, so the daemon exits after 5 s
+without it.
+
 The settings are conservative for old machines: `cache_size=-2048` (2 MiB),
 file-backed temporary storage (`SQLITE_TMPDIR` points at the data folder), and
 a 64 MiB mmap window.
