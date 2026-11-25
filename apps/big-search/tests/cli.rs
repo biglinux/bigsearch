@@ -12,6 +12,7 @@
     reason = "integration test spawns the built big-search binary under test"
 )]
 
+mod daemon;
 mod scratch;
 
 use std::fs;
@@ -21,15 +22,7 @@ use std::process::Command;
 /// The built binary with an isolated HOME/XDG env, so it never touches the real
 /// index.
 fn big_search(home: &Path, xdg_storage_home: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_big-search"));
-    command
-        .args(args)
-        .env("RUST_LOG", "off")
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", xdg_storage_home)
-        .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", xdg_storage_home.join("run"));
-    command
+    daemon::env_cmd(args, home, xdg_storage_home, &xdg_storage_home.join("run"))
 }
 
 /// Run [`big_search`]. Returns trimmed stdout; panics on a non-zero exit.

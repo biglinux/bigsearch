@@ -42,6 +42,11 @@ pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
 /// - nice 19 for kernels that refuse `SCHED_IDLE`, and idle I/O priority, which
 ///   the BFQ disk scheduler honors.
 pub fn lower_priority() {
+    // A test daemon at idle priority gets no CPU on a loaded machine and
+    // misses every wait its test sets.
+    if crate::settings::test_seam("BIG_SEARCH_KEEP_PRIORITY").is_some() {
+        return;
+    }
     let attr = SchedAttr {
         size: std::mem::size_of::<SchedAttr>() as u32,
         sched_policy: libc::SCHED_IDLE as u32,

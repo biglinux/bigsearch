@@ -11,6 +11,7 @@
     reason = "integration test spawns the built big-search binary under test"
 )]
 
+mod daemon;
 mod scratch;
 
 use std::io::{BufRead, BufReader, Write};
@@ -30,15 +31,8 @@ impl Drop for KillOnDrop {
 }
 
 fn env_cmd(args: &[&str], home: &Path, xdg_storage_home: &Path, run: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_big-search"));
-    command
-        .args(args)
-        .env("RUST_LOG", "off")
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", xdg_storage_home)
-        .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", run)
-        .env("BIG_SEARCH_ORIGIN_WATCH", "0");
+    let mut command = daemon::env_cmd(args, home, xdg_storage_home, run);
+    command.env("BIG_SEARCH_ORIGIN_WATCH", "0");
     command
 }
 

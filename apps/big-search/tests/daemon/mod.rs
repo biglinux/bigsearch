@@ -30,7 +30,8 @@ pub fn env_cmd(args: &[&str], home: &Path, xdg_storage_home: &Path, run: &Path) 
         .env("HOME", home)
         .env("XDG_DATA_HOME", xdg_storage_home)
         .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", run);
+        .env("XDG_RUNTIME_DIR", run)
+        .env("BIG_SEARCH_KEEP_PRIORITY", "1");
     c
 }
 
