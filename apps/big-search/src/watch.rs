@@ -10,6 +10,8 @@ mod content_backfill;
 mod event_batch;
 mod reconcile;
 mod start;
+#[cfg(test)]
+mod tests;
 mod watches;
 
 use crate::catalogue::State;
@@ -519,14 +521,18 @@ impl WatchLoop<'_> {
 
     /// Apply what the inotify thread passes on within one more [`DEBOUNCE`]
     /// after a stop, so a save made just before it still reaches the versions
-    /// worker. A request that arrives meanwhile is dropped.
+    /// worker. A request or another stop that arrives meanwhile is dropped.
     fn apply_last_burst(&mut self) -> Result<()> {
         if self.runtime.paused.load(Ordering::Relaxed) {
             return Ok(());
         }
         let mut batch = WatchBatch::new();
         let mut rescan = false;
-        let _ = self.coalesce_burst(&mut batch, &mut rescan);
+        let deadline = Instant::now() + DEBOUNCE;
+        while self
+            .coalesce_burst(deadline, &mut batch, &mut rescan)
+            .is_some()
+        {}
         self.apply_batch(batch, rescan)
     }
 
@@ -608,7 +614,7 @@ impl WatchLoop<'_> {
             .store(ACTIVITY_INDEXING, Ordering::Relaxed);
         let mut batch = WatchBatch::new();
         let mut rescan = ingest(&mut batch, first);
-        let deferred = self.coalesce_burst(&mut batch, &mut rescan);
+        let deferred = self.coalesce_burst(Instant::now() + DEBOUNCE, &mut batch, &mut rescan);
         self.apply_batch(batch, rescan)?;
         self.runtime
             .activity
@@ -619,10 +625,14 @@ impl WatchLoop<'_> {
         Ok(())
     }
 
-    /// Coalesce a burst; a control command or a stop breaks the window and runs
-    /// after the batch commits (no reordering of fs work, no lost command).
-    fn coalesce_burst(&self, batch: &mut WatchBatch, rescan: &mut bool) -> Option<WatchMessage> {
-        let deadline = Instant::now() + DEBOUNCE;
+    /// Coalesce a burst until `deadline`. A control command or a stop ends it
+    /// early and is returned, for the caller to run after the batch commits.
+    fn coalesce_burst(
+        &self,
+        deadline: Instant,
+        batch: &mut WatchBatch,
+        rescan: &mut bool,
+    ) -> Option<WatchMessage> {
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match self.rx.recv_timeout(remaining) {
                 Ok(WatchMessage::Fs(event_result)) => {
