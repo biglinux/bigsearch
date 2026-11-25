@@ -81,27 +81,12 @@ impl State {
     }
 
     /// Start empty (used for a forced full rebuild): the first persist replaces
-    /// every row of `namespace`.
-    ///
-    /// # Panics
-    ///
-    /// When neither the database at `db_path` nor an in-memory SQLite database
-    /// can be opened.
+    /// every row of `namespace`. Falls back as [`State::load`] does.
     pub fn empty(db_path: &Path, namespace: &str) -> Self {
-        let conn = open_state_db(db_path).unwrap_or_else(|_| {
-            let conn = Connection::open_in_memory().expect("in-memory sqlite state opens");
-            tune_connection_for_low_memory(&conn);
-            init_schema(&conn).expect("in-memory sqlite state schema initializes");
-            conn
-        });
         State {
-            db_path: db_path.to_path_buf(),
-            namespace: namespace.to_owned(),
-            conn,
-            pending: HashMap::new(),
-            removed_trees: Vec::new(),
             clear_before_persist: true,
             dirty: true,
+            ..State::load(db_path, namespace)
         }
     }
 
@@ -899,8 +884,8 @@ fn open_state_db(db_path: &Path) -> Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(db_path).with_context(|| format!("open {}", db_path.display()))?;
-    // The daemon's scan pass holds the write lock for its whole walk; a CLI
-    // command opening the same database waits for it rather than failing.
+    // Opening writes (init_schema), so an open while a scan pass holds the
+    // write lock waits up to 5 s, then fails into the in-memory fallback.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     tune_connection_for_low_memory(&conn);
     init_schema(&conn)?;
