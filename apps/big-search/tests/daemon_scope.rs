@@ -290,6 +290,19 @@ fn reindex_of_parent_evicts_ignored_subtree() {
         await_content_result(&home, &xdg_storage_home, &run, "innerworddeep", "inner.txt"),
         "the first walk did not index the subfolder"
     );
+    // The watcher's first content pass sweeps orphans whatever happened: let
+    // it run, so only the reindex's own deletion can ask for the next sweep.
+    std::fs::write(repo.join("settled.txt"), "settledwordpass").unwrap();
+    assert!(
+        await_content_result(
+            &home,
+            &xdg_storage_home,
+            &run,
+            "settledwordpass",
+            "settled.txt"
+        ),
+        "the watcher's content pass did not run"
+    );
     assert!(
         settles(|| catalogue_rows(&xdg_storage_home, "watch", &generated) == 11),
         "the first walk did not list the subfolders"
