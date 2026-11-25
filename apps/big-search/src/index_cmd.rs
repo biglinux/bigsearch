@@ -450,7 +450,7 @@ fn spawn_watcher(
     available: Vec<&'static settings::Source>,
 ) -> Result<()> {
     // notify's reader thread takes its creator's class: started on a lowered
-    // thread, it reads the kernel's queue on CPU time nobody else wants.
+    // thread, it reads the kernel's queue in the indexer's idle class.
     let roots = available.iter().map(|source| source.path.clone()).collect();
     let commands = control.commands.clone();
     let inotify = throttle::spawn_lowered(|| watch::start_inotify(commands, roots))

@@ -28,9 +28,10 @@ Environment=RUST_LOG=info,tantivy=warn,symphonia_core=error,symphonia_format_iso
 # MemoryHigh reclaims page cache first; MemoryMax is the safety net. The
 # extraction pool's bounded queue keeps anonymous memory low.
 # The cpu controller is handed to the daemon, which runs in <unit>/main and puts
-# its indexing threads in a threaded child group with cpu.idle: indexing takes
-# only CPU time nobody else wants, searching keeps a normal program's share. A
-# thread's SCHED_IDLE alone counts only inside its cgroup (DESIGN.md, section 7).
+# its indexing threads in a threaded child group with cpu.idle: indexing yields
+# to the daemon's searches. Against other programs the unit as a whole competes
+# at its normal CPU weight, since a lower one slows searches on a busy machine;
+# SCHED_IDLE and cpu.idle count only inside the unit (DESIGN.md, section 7).
 Delegate=cpu
 DelegateSubgroup=main
 IOAccounting=yes

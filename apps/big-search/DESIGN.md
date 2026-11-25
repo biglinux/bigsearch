@@ -72,8 +72,8 @@ runtime.
    big-search CLI, settings page, other BigLinux programs
 ```
 
-A query never waits for extraction, and indexing runs on CPU time nobody else
-wants (section 7).
+A query never waits for extraction, and indexing yields the CPU to queries
+(section 7).
 
 | Module | Owns |
 |---|---|
@@ -333,7 +333,7 @@ hidden and gitignored churn never wakes the daemon.
   folders (`MAX_FOLDERS`), or when the kernel's own queue overflows, the batch
   is dropped and the watcher rescans every root; the log tells the two apart.
 - The inotify thread runs in the indexer's idle class (section 7), so intake
-  costs no CPU a program wants; under sustained load the kernel's queue may
+  yields the CPU to queries; under sustained load the kernel's queue may
   overflow into that rescan.
 
 ## 6. Extraction
@@ -444,23 +444,38 @@ Measured on an i5-13400 (6 P and 4 E cores, SMT, `intel_cpufreq` with
 |---|---|
 | nice 19, unit `CPUWeight=20` | 27 % |
 | `SCHED_IDLE`, unit `CPUWeight=20` | 32 % |
-| unit `CPUWeight=idle`, or the indexer's own `cpu.idle` group | about 0 to 1 % |
+| unit `CPUWeight=idle` | about 0 to 1 % |
+| the indexer's own `cpu.idle` group, unit at its normal weight | 46 % |
 | on the core's SMT sibling, any policy | 42 to 50 % |
 
-A thread's policy only counts inside its cgroup, so the unit's weight decides
-against other programs. Making the whole unit idle costs the searches: with 16
-saturated CPUs a 5000-hit query took 412 to 831 ms instead of 109 to 162 ms. So
-the indexer gets a group of its own, in cgroup v2's threaded mode, which lets
-the threads of one process sit in different groups. The unit delegates the cpu
-controller (`Delegate=cpu`, `DelegateSubgroup=main`, and
-`ProtectControlGroups=private` so the daemon writes only inside its own
-namespace); the process and the query threads stay in `main`, and
-`throttle::prepare_idle_cgroup` makes `main/index` threaded with `cpu.idle`, or
-the lowest `cpu.weight` before Linux 5.15. With it, on 16 saturated CPUs, the
-same queries take what they take on an idle machine (77 to 83 ms by name, 14 to
-15 ms by content), and `pdftotext` starts in `main/index`. Started without
-delegation, from a terminal, the daemon leaves cgroups alone and the thread
-policies still apply.
+A thread's policy only counts inside its cgroup, and a group's `cpu.idle` only
+against its siblings, so the unit's weight decides against other programs.
+Making the whole unit idle costs the searches: with 16 saturated CPUs a 5000-hit
+query took 412 to 831 ms instead of 109 to 162 ms. So the indexer gets a group
+of its own, in cgroup v2's threaded mode, which lets the threads of one process
+sit in different groups. The unit delegates the cpu controller (`Delegate=cpu`,
+`DelegateSubgroup=main`, and `ProtectControlGroups=private` so the daemon writes
+only inside its own namespace); the process and the query threads stay in
+`main`, and `throttle::prepare_idle_cgroup` makes `main/index` threaded with
+`cpu.idle`, or the lowest `cpu.weight` before Linux 5.15. With it, on 16
+saturated CPUs, the same queries take what they take on an idle machine (77 to
+83 ms by name, 14 to 15 ms by content), and `pdftotext` starts in `main/index`.
+Started without delegation, from a terminal, the daemon leaves cgroups alone and
+the thread policies still apply.
+
+So indexing yields to the daemon's own queries, and the unit as a whole,
+indexing included, competes with other programs at its normal CPU weight. A
+lower unit weight costs the searches more than it gives back. Measured on a
+4-core notebook with 8 CPU loops in another unit and 20,000 new files to index:
+
+| Unit weight | Indexed in | Search median, max |
+|---|---|---|
+| normal | 11 to 12 s, about 7 % of the machine | 14 to 25 ms, 327 to 549 ms |
+| `CPUWeight=20` | 32 s | 22 ms, 2848 ms |
+| `CPUWeight=idle` | 202 files in 600 s | 186 ms, 15360 ms |
+
+Without load the files were indexed in 3.6 to 4.8 s and searches took 5 to
+8 ms.
 
 On every stop systemd logs "Failed to kill control group …, ignoring: Operation
 not supported": the kernel refuses `cgroup.kill` and process listing in a
@@ -473,7 +488,7 @@ hardware (`throttle::topology`: physical cores and SMT over the CPUs the process
 may use); the scheduler gives each busy program a core of its own while it can,
 so the free cores are the cores minus the CPUs the others kept busy during the
 batch. Measured on machines simulated with `taskset` on P-core pairs, a CPU loop
-in a program's place and two workers flat out in an idle cgroup:
+in a program's place and two workers flat out in a `cpu.idle` cgroup beside it:
 
 | Machine | Program loses |
 |---|---|
@@ -482,12 +497,14 @@ in a program's place and two workers flat out in an idle cgroup:
 | SMT, one free core short | 23 to 28 % |
 | SMT, no free core | 42 to 49 % at 100 % duty, 17 to 24 % at 50 %, 2 to 12 % at 20 % |
 
-So without SMT the CPU never makes the backfill wait. With SMT it runs at a
-20 % duty cycle when the free cores are fewer than its workers, and rests 30 s
-when none is free. Memory pressure, its own and others' I/O pressure (most disk
-schedulers ignore I/O priority) and battery slow it on any machine; the duty
-cycle is 80 % on a calm machine, then 50 %, 20 % and a 30 s rest. Its own CPU
-stall is not a signal: at idle priority it only says that others are busy.
+So without SMT the CPU never makes the backfill wait: a worker sharing a CPU
+with a program in another unit takes only the unit's share of it, as above. With
+SMT it runs at a 20 % duty cycle when the free cores are fewer than its workers,
+and rests 30 s when none is free. Memory pressure, its own and others' I/O
+pressure (most disk schedulers ignore I/O priority) and battery slow it on any
+machine; the duty cycle is 80 % on a calm machine, then 50 %, 20 % and a 30 s
+rest. Its own CPU stall is not a signal: at idle priority it only says that
+others are busy.
 
 The duty cycle follows the CPU time the service used in a batch, not the
 batch's wall time: at idle priority on a busy machine a 250-file batch took

@@ -28,13 +28,13 @@ pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
 /// still gets the others.
 ///
 /// - The indexer's cgroup ([`prepare_idle_cgroup`]), when the daemon has one:
-///   it runs on CPU time nobody else wants, against every other program, while
-///   the query thread keeps a normal program's share.
-/// - `SCHED_IDLE`: the thread runs on CPU time nobody else wants, and a normal
-///   task that wakes preempts it at once. A thread's policy only counts inside
-///   its cgroup, though: without the indexer's cgroup it only puts the indexer
-///   behind the query thread, and a program sharing a core with the indexer
-///   still loses a large share of it.
+///   it runs only on CPU time the query threads leave. Against other programs
+///   the unit as a whole, indexing included, competes at its own CPU weight.
+/// - `SCHED_IDLE`: a normal task of the same cgroup that wakes preempts the
+///   thread at once. A thread's policy only counts inside its cgroup, so
+///   without the indexer's cgroup it still puts the indexer behind the query
+///   threads, and a program sharing a core with the indexer loses a large
+///   share of it either way.
 /// - The utilization clamp (`INDEXER_UTIL_MAX`), on the thread and on the
 ///   indexer's cgroup, holds the clock down where the frequency driver follows
 ///   the scheduler (`schedutil`); drivers that pick frequencies in hardware
@@ -159,10 +159,10 @@ struct IdleCgroup {
 
 static IDLE_CGROUP: std::sync::OnceLock<IdleCgroup> = std::sync::OnceLock::new();
 
-/// Make the indexer a cgroup of its own that runs only on CPU time nobody else
-/// wants, so searching keeps a normal program's share while indexing takes
-/// what is left. Returns how, for the log; `None` leaves every thread where
-/// it is.
+/// Make the indexer a cgroup of its own that runs only on CPU time the query
+/// threads leave. `cpu.idle` ranks a group only against its siblings: against
+/// other programs the unit, indexing included, competes at its own CPU weight.
+/// Returns how, for the log; `None` leaves every thread where it is.
 ///
 /// Only under systemd delegation: the unit's `Delegate=cpu` and
 /// `DelegateSubgroup=main` put the daemon in `<unit>.service/main`, a group
@@ -364,15 +364,15 @@ struct Signals {
 
 /// Classify how much this service would be in the way.
 ///
-/// CPU time is not the question: the indexer only runs on CPU time nobody else
-/// wants (`SCHED_IDLE`, its `cpu.idle` cgroup), and a program that wakes takes
-/// its CPU back at once, so its own CPU stall only says others are busy, and on
-/// a CPU without SMT that harms nobody. What still harms is a shared core: on
-/// an SMT CPU a worker on the sibling thread of a busy program's core slows it
-/// however low its priority. The scheduler gives each busy program a core of
-/// its own while it can, so the free cores are the cores minus the CPUs the
-/// others keep busy; with fewer free cores than workers, some worker shares
-/// one.
+/// CPU time is not the question: the indexer yields to the daemon's queries,
+/// and against other programs the unit takes the share its normal weight gives
+/// it, which DESIGN.md section 7 accepts to keep searches fast on a busy
+/// machine; its own CPU stall only says others are busy. What that share does
+/// not cover is a shared core: on an SMT CPU a worker on the sibling thread of
+/// a busy program's core slows it however low its priority. The scheduler
+/// gives each busy program a core of its own while it can, so the free cores
+/// are the cores minus the CPUs the others keep busy; with fewer free cores
+/// than workers, some worker shares one.
 ///
 /// Memory is system-wide, because page cache this service fills stalls
 /// everyone else, and so is the disk: most disk schedulers ignore I/O priority.
@@ -459,9 +459,9 @@ fn pause_after(work: Duration, load: Load) -> Duration {
 ///
 /// The duty cycle is kept on the CPU time the service used in the batch, not
 /// on the batch's wall time: at idle priority on a busy machine most of that
-/// time is spent waiting for a CPU nobody else wants, which harms nobody, and
-/// resting four times as long as that waiting would turn a half-minute batch
-/// into a two-minute pause.
+/// time is spent waiting for a CPU, which harms nobody, and resting four times
+/// as long as that waiting would turn a half-minute batch into a two-minute
+/// pause.
 pub fn backfill_pace(work: Duration) -> (Load, Duration) {
     let cgroup = own_cgroup_dir();
     let own = |name: &str| {
@@ -694,8 +694,8 @@ mod tests {
         assert_eq!(classify_load(with(2.5, idle)), Load::Busy);
         // Every core busy: each worker would share one.
         assert_eq!(classify_load(with(4.0, idle)), Load::Heavy);
-        // Without SMT a busy machine is no reason to wait: the idle class
-        // already hands every CPU back the moment someone wants it.
+        // Without SMT a busy machine is no reason to wait: a worker takes no
+        // more of a program's CPU than the unit's weight gives it.
         let no_smt = Signals { smt: false, ..idle };
         assert_eq!(classify_load(with(4.0, no_smt)), Load::Calm);
         // One SMT core and one worker: background noise already shares it.
