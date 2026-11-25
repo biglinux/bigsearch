@@ -98,11 +98,7 @@ pub(crate) fn clone_file(source: &Path, destination: &Path) -> std::result::Resu
     let before = std::fs::symlink_metadata(source).map_err(|_| Refusal::File)?;
     // `O_NOFOLLOW`: a link is not a document, and following one would keep a
     // version of whatever it points at, filters and all.
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(source)
-        .map_err(|_| Refusal::File)?;
+    let file = crate::extract::open_regular_with(source, libc::O_NOFOLLOW).ok_or(Refusal::File)?;
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|error| classify(&error))?;
     }
@@ -176,6 +172,27 @@ mod tests {
         assert!(matches!(of(libc::EDQUOT), Refusal::OutOfSpace));
         assert!(matches!(of(libc::EINVAL), Refusal::File));
         assert!(matches!(of(libc::EPERM), Refusal::File));
+    }
+
+    /// A FIFO renamed in after the worker's check is refused at once: an open
+    /// waiting for a writer would hold the versions worker, and on restore the
+    /// history lock.
+    #[test]
+    fn clone_refuses_fifo_without_waiting() {
+        let dir = crate::test_env::scratch_dir("history-clone-fifo");
+        let fifo = dir.join("a.odt");
+        crate::test_env::make_fifo(&fifo);
+        let destination = dir.join("versions").join("a");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let target = destination.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(matches!(clone_file(&fifo, &target), Err(Refusal::File)));
+        });
+        let refused = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("clone_file waits on the FIFO");
+        assert!(refused);
+        assert!(!destination.exists());
     }
 
     #[test]

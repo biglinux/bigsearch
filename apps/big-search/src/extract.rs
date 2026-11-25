@@ -13,13 +13,19 @@ use std::path::Path;
 /// readers' one way to a file's bytes. A `stat` taken before cannot see a FIFO
 /// renamed into place since, and a plain open of one waits for a writer.
 pub(crate) fn open_regular(path: &Path) -> Option<std::fs::File> {
+    open_regular_with(path, 0)
+}
+
+/// [`open_regular`] with `flags` added to the open, such as `O_NOFOLLOW`.
+pub(crate) fn open_regular_with(path: &Path, flags: libc::c_int) -> Option<std::fs::File> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     // `O_NONBLOCK` makes the open of a FIFO return at once. It is cleared
     // before any read, since open(2) does not promise regular files ignore it.
+    // ast-grep-ignore: document-open-regular (the owner of the rule's open)
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(flags | libc::O_NONBLOCK)
         .open(path)
         .ok()?;
     if !file.metadata().ok()?.is_file() {
