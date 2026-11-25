@@ -57,7 +57,9 @@ fn versions_survive_replacing_saves() {
     folder_rename_carries_the_history(&mut history, &home);
     forget_after_a_move_while_stopped(&mut history, &home);
     folder_moved_onto_a_vanished_one(&mut history, &home);
+    folder_moved_onto_a_moved_ones_name(&mut history, &home);
     rename_chain_while_stopped(&mut history, &home);
+    parked_versions_forgotten(&mut history, &home);
     linked_folder_never_kept(&mut history, &home);
     non_documents_never_kept(&mut history, &home);
 }
@@ -280,9 +282,9 @@ fn forget_after_a_move_while_stopped(history: &mut History, home: &Path) {
     assert!(history.versions(&[&before]).expect("versions").is_empty());
 }
 
-/// Guards: persisted data: `rm -r velha; mv nova velha` leaves the deleted
-/// documents' versions nowhere, whether or not a moved document takes the
-/// name: they are not offered as the moved one's or as a new one's.
+/// Guards: persisted data: `rm -r velha; mv nova velha` offers the deleted
+/// documents' versions neither as the moved one's nor as a new one's, and
+/// forgetting their paths erases them.
 fn folder_moved_onto_a_vanished_one(history: &mut History, home: &Path) {
     let docs = home.join("Documentos");
     let vanished = docs.join("velha/e.odt");
@@ -299,9 +301,6 @@ fn folder_moved_onto_a_vanished_one(history: &mut History, home: &Path) {
         .note_rename(&docs.join("nova"), &docs.join("velha"))
         .expect("note the rename");
     assert_eq!(history.versions(&[&vanished]).expect("versions").len(), 1);
-    for object in objects {
-        assert!(!object.exists(), "{} was left behind", object.display());
-    }
     std::fs::write(&unmatched, "nova").expect("write");
     history
         .save_version(&unmatched, Reason::Saved)
@@ -312,6 +311,32 @@ fn folder_moved_onto_a_vanished_one(history: &mut History, home: &Path) {
             .expect("versions")
             .is_empty()
     );
+    for document in [&vanished, &unmatched] {
+        history.forget(&[document], Some(document)).expect("forget");
+    }
+    for object in objects {
+        assert!(!object.exists(), "{} was left behind", object.display());
+    }
+}
+
+/// Guards: persisted data: `mv b c; mkdir b` while the service was stopped,
+/// then `mv a b` heard before the pass after the start reaches `c`, leaves
+/// the document now in `c` its versions.
+fn folder_moved_onto_a_moved_ones_name(history: &mut History, home: &Path) {
+    let docs = home.join("Documentos");
+    let document = docs.join("destino/x.odt");
+    kept_twice(history, &document);
+    let kept = listed_objects(history, &document);
+    std::fs::rename(docs.join("destino"), docs.join("guardada")).expect("move the folder");
+    std::fs::create_dir(docs.join("destino")).expect("create its namesake");
+    std::fs::create_dir(docs.join("origem")).expect("create a folder");
+    std::fs::rename(docs.join("origem"), docs.join("destino")).expect("move onto the namesake");
+    history
+        .note_rename(&docs.join("origem"), &docs.join("destino"))
+        .expect("note the rename");
+    let moved = docs.join("guardada/x.odt");
+    history.save_version(&moved, Reason::Saved).expect("save");
+    assert_eq!(listed_objects(history, &moved), kept);
 }
 
 /// The objects of the versions listed for `path`.
@@ -340,6 +365,28 @@ fn rename_chain_while_stopped(history: &mut History, home: &Path) {
     }
     assert_eq!(listed_objects(history, &s), of_r);
     assert_eq!(listed_objects(history, &r), of_t);
+}
+
+/// Guards: privacy action: `mv r s; mv t r` and a save of `s` while the
+/// service was stopped leave `r`'s versions with no document to claim them;
+/// forgetting `r` erases them.
+fn parked_versions_forgotten(history: &mut History, home: &Path) {
+    let docs = home.join("Documentos/estacionada");
+    let (r, s, t) = (docs.join("r.odt"), docs.join("s.odt"), docs.join("t.odt"));
+    kept_twice(history, &r);
+    kept_twice(history, &t);
+    let of_r = listed_objects(history, &r);
+    std::fs::rename(&r, &s).expect("move r");
+    std::fs::rename(&t, &r).expect("move t");
+    write_by_replacing(&s, "editada");
+    for document in [&r, &s] {
+        history.save_version(document, Reason::Saved).expect("save");
+    }
+    assert!(listed_objects(history, &s).is_empty());
+    history.forget(&[&r], Some(&r)).expect("forget");
+    for object in of_r {
+        assert!(!object.exists(), "{} was left behind", object.display());
+    }
 }
 
 /// Guards: persisted data: a save heard before a folder on the way was

@@ -47,11 +47,11 @@ pub(crate) use disk::{Refusal, clone_file};
 pub use eligibility::may_be_a_document;
 pub use worker::{HistoryEvent, Pending, run_worker};
 
-use disk::disk_capacity;
+use disk::{disk_capacity, filesystem_id};
 use eligibility::{eligible_metadata, eligible_name, git_work_tree};
 use store::{
     file_id_for_path, first_stored, follow_renames, is_live_session, join_rows, now_secs,
-    object_name, open_store, park, prepare_store, rows_of_file, rows_under,
+    object_name, open_store, park, parked_from, prepare_store, rows_of_file, rows_under,
 };
 
 /// Why a version was written.
@@ -131,22 +131,28 @@ fn not_kept_error(why: &'static str) -> anyhow::Error {
     anyhow::Error::msg(why).context("the current state was not kept")
 }
 
-/// What tells one file from another: `(dev, ino)`, and the birth time where
-/// the filesystem records one, since XFS hands a deleted document's inode
-/// number to the next new file.
-fn identity(metadata: &std::fs::Metadata) -> (i64, i64, Option<i64>) {
+/// What tells one file from another: its filesystem ([`filesystem_id`]),
+/// its inode number, and the birth time where the filesystem records one,
+/// since XFS hands a deleted document's inode number to the next new file.
+fn identity(path: &Path, metadata: &std::fs::Metadata) -> io::Result<(i64, i64, Option<i64>)> {
     let born = metadata
         .created()
         .ok()
         .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
         .and_then(|since| i64::try_from(since.as_nanos()).ok());
-    (metadata.dev() as i64, metadata.ino() as i64, born)
+    Ok((
+        filesystem_id(path, metadata.dev())?,
+        metadata.ino() as i64,
+        born,
+    ))
 }
 
 /// Whether `key` names the file with this identity as a real path: a key
 /// through a folder replaced by a link reaches it by way of another path.
 fn holds(key: &Path, file: (i64, i64, Option<i64>)) -> bool {
-    std::fs::symlink_metadata(key).is_ok_and(|metadata| identity(&metadata) == file)
+    std::fs::symlink_metadata(key)
+        .and_then(|metadata| identity(key, &metadata))
+        .is_ok_and(|identity| identity == file)
         && key
             .parent()
             .is_some_and(|folder| std::fs::canonicalize(folder).is_ok_and(|real| real == folder))
@@ -277,7 +283,8 @@ impl History {
     /// The document is the first of `spellings` that has a stored row, and
     /// with `file_at`, every row kept for the file there under another path
     /// (its folder moved while the service was stopped), unless that stored
-    /// row is another file's kept under another path than `file_at`.
+    /// row is another file's kept under another path than `file_at`; with
+    /// each, the rows parked from its path.
     ///
     /// # Errors
     ///
@@ -297,10 +304,16 @@ impl History {
         };
         let stored = first_stored(conn, spellings)?;
         let mut file_ids: Vec<i64> = stored.iter().map(|(file_id, _)| *file_id).collect();
+        let mut displaced_from: Vec<&Path> = match stored {
+            Some((_, path)) => vec![path],
+            None => spellings.iter().map(AsRef::as_ref).collect(),
+        };
         if let Some(file_at) = file_at
             && let Ok(metadata) = std::fs::symlink_metadata(file_at)
         {
-            let of_the_file: Vec<i64> = rows_of_file(conn, identity(&metadata))?
+            let file = identity(file_at, &metadata)
+                .with_context(|| format!("read {}", file_at.display()))?;
+            let of_the_file: Vec<i64> = rows_of_file(conn, file)?
                 .into_iter()
                 .map(|(file_id, _)| file_id)
                 .collect();
@@ -310,8 +323,10 @@ impl History {
                 .is_some_and(|(file_id, path)| path != file_at && !of_the_file.contains(&file_id));
             if !another_files {
                 file_ids.extend(of_the_file);
+                displaced_from.push(file_at);
             }
         }
+        file_ids.extend(parked_from(conn, &displaced_from)?);
         file_ids.sort_unstable();
         file_ids.dedup();
         self.erase_rows(conn, &file_ids)
@@ -366,14 +381,14 @@ impl History {
         // under a name nobody can type, out of reach of the request to forget it.
         moves.retain(|(_, moved)| eligible_name(moved).is_ok());
         // rename(2) moves a folder only onto an empty one, and nothing lies
-        // below a file, so every row below the destination is a vanished
-        // document's: erased as its expiry would erase it, never handed to a
-        // document that arrives there.
-        let vanished: Vec<i64> = rows_under(conn, to)?
-            .into_iter()
-            .map(|(file_id, _)| file_id)
-            .collect();
-        self.erase_rows(conn, &vanished)?;
+        // below a file, so every row below the destination is a document's
+        // that left it, deleted or moved while the service was stopped:
+        // parked for its file to claim, never handed to one arriving there.
+        let parked = conn.unchecked_transaction()?;
+        for (file_id, _) in rows_under(conn, to)? {
+            park(conn, file_id)?;
+        }
+        parked.commit()?;
         follow_renames(
             conn,
             moves
@@ -417,7 +432,9 @@ impl History {
                 return Err(error).with_context(|| format!("read {}", resolved.display()));
             }
         };
-        let same = rows_of_file(conn, identity(&metadata))?
+        let file = identity(resolved, &metadata)
+            .with_context(|| format!("read {}", resolved.display()))?;
+        let same = rows_of_file(conn, file)?
             .iter()
             .any(|(id, _)| *id == file_id);
         // A different inode is another document, or the same one after an
@@ -693,8 +710,8 @@ impl History {
     fn upsert_file(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<i64> {
         let conn = self.conn.as_ref().expect("checked by the caller");
         let key = path.to_string_lossy().into_owned();
-        let file = identity(metadata);
-        let (dev, ino, born) = file;
+        let file = identity(path, metadata).with_context(|| format!("read {}", path.display()))?;
+        let (fs, ino, born) = file;
         let of_the_file = rows_of_file(conn, file)?;
         let left: Vec<i64> = of_the_file
             .iter()
@@ -717,23 +734,25 @@ impl History {
             // Only on a change: an UPDATE that rewrites the same values still
             // writes the page to the WAL, and every save passes through here.
             conn.execute(
-                "UPDATE files SET dev = ?2, ino = ?3, born = ?4, missing_since = NULL
-                  WHERE id = ?1 AND (dev IS NOT ?2 OR ino IS NOT ?3 OR born IS NOT ?4
+                "UPDATE files SET fs = ?2, ino = ?3, born = ?4, missing_since = NULL
+                  WHERE id = ?1 AND (fs IS NOT ?2 OR ino IS NOT ?3 OR born IS NOT ?4
                                      OR missing_since IS NOT NULL)",
-                params![id, dev, ino, born],
+                params![id, fs, ino, born],
             )?;
             id
         } else if let Some(&id) = left.first() {
             conn.execute(
-                "UPDATE files SET current_path = ?2, born = ?3, missing_since = NULL WHERE id = ?1",
+                "UPDATE files SET current_path = ?2, born = ?3, missing_since = NULL,
+                                  parked_from = NULL
+                  WHERE id = ?1",
                 params![id, key, born],
             )?;
             id
         } else {
             conn.execute(
-                "INSERT INTO files(current_path, dev, ino, born, created_at)
+                "INSERT INTO files(current_path, fs, ino, born, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![key, dev, ino, born, now_secs()],
+                params![key, fs, ino, born, now_secs()],
             )?;
             conn.last_insert_rowid()
         };

@@ -74,12 +74,13 @@ fn reused_inode_starts_a_new_history() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as i64;
+    let (fs, ino, _) = identity(&notes, &metadata).unwrap();
     let deleted = |born: i64| {
         conn.execute("DELETE FROM files", []).unwrap();
         conn.execute(
-            "INSERT INTO files(id, current_path, dev, ino, born, created_at)
+            "INSERT INTO files(id, current_path, fs, ino, born, created_at)
              VALUES (7, '/gone/report.odt', ?1, ?2, ?3, 0)",
-            params![metadata.dev() as i64, metadata.ino() as i64, born],
+            params![fs, ino, born],
         )
         .unwrap();
     };
@@ -254,11 +255,11 @@ fn alias_fixture(name: &str) -> (crate::test_env::ScratchDir, History, PathBuf, 
 
 /// Row `id` under `path`, with `file`'s identity and one version `object-{id}`.
 fn kept_under(conn: &Connection, path: &Path, id: i64, file: &Path) {
-    let (dev, ino, born) = identity(&std::fs::symlink_metadata(file).unwrap());
+    let (fs, ino, born) = identity(file, &std::fs::symlink_metadata(file).unwrap()).unwrap();
     conn.execute(
-        "INSERT INTO files(id, current_path, dev, ino, born, created_at)
+        "INSERT INTO files(id, current_path, fs, ino, born, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-        params![id, path.to_str().unwrap(), dev, ino, born],
+        params![id, path.to_str().unwrap(), fs, ino, born],
     )
     .unwrap();
     conn.execute(
@@ -314,33 +315,33 @@ fn replaced_file_spelling_refused() {
     assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
 }
 
-/// Each part of the recorded identity decides: another device or another
+/// Each part of the recorded identity decides: another filesystem or another
 /// birth time is another file, and a row without a birth time matches on
-/// `(dev, ino)` alone.
+/// `(fs, ino)` alone.
 #[test]
 fn adoption_checks_each_identity_part() {
     let (_dir, store, real, alias) = alias_fixture("bs-history-adopt-parts");
     let conn = store.conn.as_ref().unwrap();
-    let (dev, ino, born) = identity(&std::fs::symlink_metadata(&real).unwrap());
+    let (fs, ino, born) = identity(&real, &std::fs::symlink_metadata(&real).unwrap()).unwrap();
     let born = born.expect("this filesystem records birth times");
-    for (row_dev, row_born, adopted) in [
-        (dev + 1, Some(born), false),
-        (dev, Some(born + 1), false),
-        (dev, None, true),
+    for (row_fs, row_born, adopted) in [
+        (fs + 1, Some(born), false),
+        (fs, Some(born + 1), false),
+        (fs, None, true),
     ] {
         conn.execute("DELETE FROM versions", []).unwrap();
         conn.execute("DELETE FROM files", []).unwrap();
         conn.execute(
-            "INSERT INTO files(id, current_path, dev, ino, born, created_at)
+            "INSERT INTO files(id, current_path, fs, ino, born, created_at)
              VALUES (1, ?1, ?2, ?3, ?4, 0)",
-            params![alias.to_str().unwrap(), row_dev, ino, row_born],
+            params![alias.to_str().unwrap(), row_fs, ino, row_born],
         )
         .unwrap();
         let outcome = store.adopt_spelling(&alias, &real);
         assert_eq!(
             outcome.is_ok(),
             adopted,
-            "{row_dev} {row_born:?}: {outcome:?}"
+            "{row_fs} {row_born:?}: {outcome:?}"
         );
         let key = if adopted { &real } else { &alias };
         assert_eq!(file_id_for_path(conn, key).unwrap(), Some(1));
@@ -476,9 +477,9 @@ fn adoption_into_non_utf8_refused() {
     assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
 }
 
-/// The store as it was created while every row needed a key, with one
-/// document and one version.
-const STORE_WITH_REQUIRED_KEYS: &str = "
+/// The store as it was created while rows recorded `st_dev` and every row
+/// needed a key, with one document and one version.
+const STORE_RECORDING_DEVICES: &str = "
     CREATE TABLE files (
         id INTEGER PRIMARY KEY,
         current_path TEXT NOT NULL UNIQUE,
@@ -506,39 +507,95 @@ const STORE_WITH_REQUIRED_KEYS: &str = "
     VALUES (4, 6, 7, 8, 9, 'ab/cd', 'saved');
 ";
 
-/// Guards: persisted format: a store whose rows all needed a key opens with
-/// its rows, versions and indexes kept, and takes a row with none.
+/// A migrated row: key, filesystem, inode, created, missing since, born,
+/// parked from.
+type MigratedRow = (
+    Option<String>,
+    Option<i64>,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
+
+/// [`STORE_RECORDING_DEVICES`] at `db`, with a second document kept at
+/// `kept_here`.
+fn write_store_recording_devices(db: &Path, kept_here: &Path) {
+    let old = Connection::open(db).unwrap();
+    old.execute_batch(STORE_RECORDING_DEVICES).unwrap();
+    old.execute(
+        "INSERT INTO files(id, current_path, dev, ino, created_at) VALUES (6, ?1, 1, 2, 3)",
+        params![kept_here.to_str().unwrap()],
+    )
+    .unwrap();
+}
+
+/// The rows of a migrated store, in id order.
+fn migrated_rows(conn: &Connection) -> Vec<MigratedRow> {
+    conn.prepare(
+        "SELECT current_path, fs, ino, created_at, missing_since, born, parked_from
+           FROM files ORDER BY id",
+    )
+    .unwrap()
+    .query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+/// Guards: persisted format: a store whose rows recorded `st_dev` and all
+/// needed a key opens with its rows, versions and indexes kept, each keyed
+/// row given its folder's filesystem (none when the folder is gone), and
+/// takes a row with none.
 #[test]
-fn store_with_required_keys_migrated() {
+fn store_recording_devices_migrated() {
     let dir = crate::test_env::scratch_dir("bs-history-migrate");
     let db = dir.join("history.sqlite");
-    Connection::open(&db)
-        .unwrap()
-        .execute_batch(STORE_WITH_REQUIRED_KEYS)
-        .unwrap();
+    let kept_here = dir.join("b.md");
+    write_store_recording_devices(&db, &kept_here);
 
     let conn = open_store(&db).unwrap();
-    let row: (String, i64, i64, i64, Option<i64>, i64) = conn
-        .query_row(
-            "SELECT current_path, dev, ino, created_at, missing_since, born FROM files WHERE id = 4",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-        )
-        .unwrap();
-    assert_eq!(row, ("/d/a.md".to_string(), 1, 2, 3, None, 5));
+    let rows = migrated_rows(&conn);
+    let here = filesystem_id(&dir, std::fs::metadata(&dir).unwrap().dev()).unwrap();
+    assert_eq!(
+        rows,
+        [
+            (Some("/d/a.md".to_string()), None, 2, 3, None, Some(5), None),
+            (
+                kept_here.to_str().map(str::to_string),
+                Some(here),
+                2,
+                3,
+                None,
+                None,
+                None
+            ),
+        ]
+    );
     assert_eq!(
         version_owners(&conn),
         [("/d/a.md".to_string(), "ab/cd".to_string())]
     );
     let index: Option<String> = conn
         .query_row(
-            "SELECT name FROM pragma_index_list('files') WHERE name = 'idx_files_dev_ino'",
+            "SELECT name FROM pragma_index_list('files') WHERE name = 'idx_files_fs_ino'",
             [],
             |row| row.get(0),
         )
         .optional()
         .unwrap();
-    assert!(index.is_some(), "the identity index is gone");
+    assert!(index.is_some(), "the identity index is missing");
     conn.execute(
         "INSERT INTO files(id, current_path, created_at) VALUES (5, NULL, 0)",
         [],
@@ -555,4 +612,34 @@ fn store_with_required_keys_migrated() {
         conn.execute("DELETE FROM files WHERE id = 4", []).is_err(),
         "versions still refer to their row"
     );
+}
+
+/// The filesystem in a file's identity is the `f_fsid` coreutils reports
+/// (its two words printed in the other order), or the device number where
+/// the filesystem reports none.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "coreutils is the oracle, outside this crate"
+)]
+fn identity_names_the_filesystem() {
+    let dir = crate::test_env::scratch_dir("bs-history-fsid");
+    let file = dir.join("a.odt");
+    std::fs::write(&file, "kept").unwrap();
+    let metadata = std::fs::symlink_metadata(&file).unwrap();
+    let (fs, _, _) = identity(&file, &metadata).unwrap();
+    let output = std::process::Command::new("stat")
+        .args(["--file-system", "--format=%i"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let printed =
+        u64::from_str_radix(String::from_utf8(output.stdout).unwrap().trim(), 16).unwrap();
+    let expected = if printed == 0 {
+        metadata.dev()
+    } else {
+        printed.rotate_left(32)
+    };
+    assert_eq!(fs.cast_unsigned(), expected);
 }

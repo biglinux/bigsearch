@@ -50,18 +50,7 @@ pub(super) struct DiskCapacity {
 }
 
 pub(super) fn disk_capacity(path: &Path) -> io::Result<DiskCapacity> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-    // SAFETY: `stats` is a correctly sized output buffer and `c_path` a valid
-    // NUL-terminated string for the duration of the call.
-    let stats = unsafe {
-        let mut stats = std::mem::zeroed::<libc::statvfs>();
-        if libc::statvfs(c_path.as_ptr(), &raw mut stats) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        stats
-    };
+    let stats = statvfs(path)?;
     // POSIX counts blocks in fragments; a filesystem reporting none uses f_bsize.
     let fragment = if stats.f_frsize > 0 {
         stats.f_frsize
@@ -72,6 +61,32 @@ pub(super) fn disk_capacity(path: &Path) -> io::Result<DiskCapacity> {
         available_bytes: stats.f_bavail.saturating_mul(fragment),
         total_bytes: stats.f_blocks.saturating_mul(fragment),
     })
+}
+
+/// The filesystem holding `path`: `f_fsid`, which ext4 and btrfs derive from
+/// its UUID (btrfs with the subvolume, whose `st_dev` changes at each mount),
+/// or `dev` where the filesystem reports none (FUSE, NFS).
+pub(super) fn filesystem_id(path: &Path, dev: u64) -> io::Result<i64> {
+    let fsid = match statvfs(path)?.f_fsid {
+        0 => dev,
+        fsid => fsid,
+    };
+    Ok(fsid.cast_signed())
+}
+
+fn statvfs(path: &Path) -> io::Result<libc::statvfs> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    // SAFETY: `stats` is a correctly sized output buffer and `c_path` a valid
+    // NUL-terminated string for the duration of the call.
+    unsafe {
+        let mut stats = std::mem::zeroed::<libc::statvfs>();
+        if libc::statvfs(c_path.as_ptr(), &raw mut stats) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(stats)
+    }
 }
 
 /// Clone `source` into `destination`, sharing its blocks.

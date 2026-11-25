@@ -5,7 +5,8 @@
 //! any order, checked after each step against what the versions store
 //! promises: one file has one history row, a forgotten file leaves no version
 //! under any key, no object outlives its version, and the versions listed for
-//! a document were taken of it or of a document that is gone.
+//! a document were taken of it or of a document that is gone, and a living
+//! document keeps a version once it had one, until it is forgotten.
 //!
 //! Where a path's row is all that ties a file to a history, the store keeps
 //! that row for whatever file arrives there with no rows of its own (an
@@ -18,7 +19,8 @@
 //! unsupported on a disk that cannot share blocks.
 #![cfg(not(miri))]
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -94,32 +96,55 @@ fn survey(folder: &Path, tree: &mut Tree) {
     }
 }
 
-/// `(dev, ino, born)` as the store records a file.
+/// `(fs, ino, born)` as the store records a file: the filesystem is its
+/// `f_fsid` (`statvfs(3)`), or the device number where it reports none.
 fn identity(path: &Path) -> (i64, i64, Option<i64>) {
+    use std::os::unix::ffi::OsStrExt;
     let metadata = std::fs::symlink_metadata(path).expect("stat a document");
     let born = metadata
         .created()
         .ok()
         .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
         .and_then(|since| i64::try_from(since.as_nanos()).ok());
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL");
+    // SAFETY: `stats` is a correctly sized output buffer and `c_path` a valid
+    // NUL-terminated string for the duration of the call.
+    let fsid = unsafe {
+        let mut stats = std::mem::zeroed::<libc::statvfs>();
+        assert_eq!(libc::statvfs(c_path.as_ptr(), &raw mut stats), 0, "statvfs");
+        stats.f_fsid
+    };
+    let fs = if fsid == 0 { metadata.dev() } else { fsid };
     (
-        i64::try_from(metadata.dev()).expect("device number"),
+        fs.cast_signed(),
         i64::try_from(metadata.ino()).expect("inode number"),
         born,
     )
 }
 
 /// The ids of the rows recorded for the file with this identity.
-fn rows_of(conn: &Connection, (dev, ino, born): (i64, i64, Option<i64>)) -> Vec<i64> {
+fn rows_of(conn: &Connection, (fs, ino, born): (i64, i64, Option<i64>)) -> Vec<i64> {
     conn.prepare(
         "SELECT id FROM files
-          WHERE dev = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)",
+          WHERE fs = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)",
     )
     .expect("prepare")
-    .query_map(params![dev, ino, born], |row| row.get(0))
+    .query_map(params![fs, ino, born], |row| row.get(0))
     .expect("query")
     .map(|id| id.expect("row id"))
     .collect()
+}
+
+/// The ids of the parked rows taken from `path`.
+fn parked_from(conn: &Connection, path: &Path) -> Vec<i64> {
+    conn.prepare("SELECT id FROM files WHERE parked_from = ?1")
+        .expect("prepare")
+        .query_map(params![path.to_str().expect("UTF-8 path")], |row| {
+            row.get(0)
+        })
+        .expect("query")
+        .map(|id| id.expect("row id"))
+        .collect()
 }
 
 fn row_at(conn: &Connection, path: &Path) -> Option<i64> {
@@ -170,6 +195,8 @@ struct World {
     lineages: u32,
     /// The lineage of the document each object was taken of.
     taken: HashMap<String, u32>,
+    /// Lineages with a version kept since a forget last erased theirs.
+    kept: HashSet<u32>,
     /// Writes so far, which sets each write's length: no two states of
     /// different writes look alike to the catalogue's `(mtime, size)`.
     writes: usize,
@@ -199,6 +226,7 @@ impl World {
             lineage: HashMap::new(),
             lineages: 0,
             taken: HashMap::new(),
+            kept: HashSet::new(),
             writes: 0,
             catch_up: Vec::new(),
         }
@@ -220,6 +248,7 @@ impl World {
         self.step = 0;
         self.lineage.clear();
         self.taken.clear();
+        self.kept.clear();
         self.writes = 0;
         self.catch_up.clear();
         let probe = self.docs.join("probe.odt");
@@ -342,8 +371,19 @@ impl World {
     fn attribute(&mut self, path: &Path) {
         let lineage = *self.lineage.get(path).expect("a living document");
         for object in objects(&self.store, None) {
-            self.taken.entry(object).or_insert(lineage);
+            if let Entry::Vacant(untaken) = self.taken.entry(object) {
+                untaken.insert(lineage);
+                self.kept.insert(lineage);
+            }
         }
+    }
+
+    /// The lineages some version in the store was taken of.
+    fn lineages_kept(&self) -> HashSet<u32> {
+        objects(&self.store, None)
+            .iter()
+            .filter_map(|object| self.taken.get(object).copied())
+            .collect()
     }
 
     /// What the watcher's save leads to while the service runs.
@@ -447,10 +487,24 @@ impl World {
             document.display(),
             if heard { "" } else { " unheard" }
         ));
+        // A save nobody heard gives the file a new identity, which rows kept
+        // under a path it left do not record.
+        if (!heard || self.history.is_none()) && !self.row_holds(&document, lineage) {
+            self.kept.retain(|&kept| Some(kept) != lineage);
+        }
         self.write(&document);
         if heard {
             self.saved(&document);
         }
+    }
+
+    /// Whether the row at `path` holds a version of `lineage`.
+    fn row_holds(&self, path: &Path, lineage: Option<u32>) -> bool {
+        row_at(&self.store, path).is_some_and(|id| {
+            objects(&self.store, Some(id))
+                .iter()
+                .any(|object| self.taken.get(object).copied() == lineage)
+        })
     }
 
     /// `mv from to`, sometimes with a link left where the folder was.
@@ -471,7 +525,7 @@ impl World {
         if !free || to.starts_with(&from) {
             return;
         }
-        // The service erases the rows below a folder's destination; without
+        // The service parks the rows below a folder's destination; without
         // it, the documents arrive where rows may wait.
         if self.history.is_none()
             && tree.documents.iter().any(|document| {
@@ -489,21 +543,24 @@ impl World {
             to.display(),
             if link { " and link" } else { "" }
         ));
-        // A folder lands only where nothing is: rows below it are a vanished
-        // document's, which the service erases.
-        let vanished: Vec<String> = keys(&self.store)
-            .iter()
-            .filter(|key| key.starts_with(&to) && **key != to)
-            .filter_map(|key| row_at(&self.store, key))
-            .flat_map(|id| objects(&self.store, Some(id)))
+        // A folder lands only where nothing is: rows below it are those of
+        // documents that left, which the service parks for them to claim.
+        let left: Vec<(i64, PathBuf)> = keys(&self.store)
+            .into_iter()
+            .filter(|key| key.starts_with(&to) && *key != to)
+            .filter_map(|key| Some((row_at(&self.store, &key)?, key)))
             .collect();
         std::fs::rename(&from, &to).expect("move a folder");
         self.carry(&from, &to);
         if let Some(history) = &self.history {
             history.note_rename(&from, &to).expect("follow the rename");
-            let kept = objects(&self.store, None);
-            if vanished.iter().any(|object| kept.contains(object)) {
-                self.fail("a version below the folder's destination survived its move");
+            for (id, key) in &left {
+                if !parked_from(&self.store, key).contains(id) {
+                    self.fail(&format!(
+                        "the row below the destination at {} was not parked",
+                        key.display()
+                    ));
+                }
             }
         }
         if link {
@@ -598,7 +655,8 @@ impl World {
     /// A forget request, as the service answers it, through a living
     /// document's spelling, a key the store holds or a dangling link: rows of
     /// the first spelling with one, and every row of the file the path leads
-    /// to, unless that first row is another file's kept under another path.
+    /// to, unless that first row is another file's kept under another path;
+    /// with each, the rows parked from its path.
     fn forget(&mut self, tree: &Tree) {
         if self.history.is_none() {
             return;
@@ -626,27 +684,66 @@ impl World {
             Some(path) != resolved.as_ref()
                 && !file.is_some_and(|file| rows_of(conn, file).contains(id))
         });
+        let mut displaced_from: Vec<PathBuf> = match &stored {
+            Some((_, path)) => vec![path.clone()],
+            None => spellings.clone(),
+        };
+        if file.is_some() && !another_files {
+            displaced_from.extend(resolved.clone());
+        }
+        let lineages_before = self.lineages_kept();
         self.history
             .as_mut()
             .expect("running")
             .forget(&spellings, resolved.as_deref())
             .expect("forget");
-
+        self.note_forgotten(
+            &lineages_before,
+            resolved.as_deref().filter(|_| !another_files),
+        );
         if let Some((id, _)) = stored
-            && has_row(conn, id)
+            && has_row(&self.store, id)
         {
             self.fail("the row versions were listed from survived its forget");
+        }
+        let file_forgotten = file.filter(|_| !another_files);
+        self.check_forgotten(&displaced_from, file_forgotten, resolved.as_deref());
+    }
+
+    /// Expect no version of the lineages a forget erased: those it took the
+    /// last version of, and `document`'s, which may keep some only under a
+    /// path it left.
+    fn note_forgotten(&mut self, kept_before: &HashSet<u32>, document: Option<&Path>) {
+        let mut forgotten: Vec<u32> = kept_before
+            .difference(&self.lineages_kept())
+            .copied()
+            .collect();
+        forgotten.extend(document.and_then(|path| self.lineage.get(path)));
+        self.kept.retain(|lineage| !forgotten.contains(lineage));
+    }
+
+    /// After a forget: no row parked from `displaced_from`, and with the
+    /// forgotten `file`, none of its rows and none at `resolved`.
+    fn check_forgotten(
+        &self,
+        displaced_from: &[PathBuf],
+        file: Option<(i64, i64, Option<i64>)>,
+        resolved: Option<&Path>,
+    ) {
+        let conn = &self.store;
+        if displaced_from
+            .iter()
+            .any(|path| !parked_from(conn, path).is_empty())
+        {
+            self.fail("a row parked from the forgotten path survived");
         }
         let Some(file) = file else {
             return;
         };
-        if another_files {
-            return;
-        }
         if !rows_of(conn, file).is_empty() {
             self.fail("a row of the forgotten file survived");
         }
-        if resolved.is_some_and(|resolved| row_at(conn, &resolved).is_some()) {
+        if resolved.is_some_and(|resolved| row_at(conn, resolved).is_some()) {
             self.fail("the row at the forgotten file's path survived");
         }
     }
@@ -750,6 +847,7 @@ impl World {
         let documents = self.tree().documents;
         self.check_store(&documents);
         self.check_lineage(&documents);
+        self.check_preserved(&documents);
     }
 
     /// One row per file, and the objects on disk are those versions name.
@@ -785,6 +883,37 @@ impl World {
             self.fail(&format!(
                 "objects on disk {on_disk:?}, referenced {referenced:?}"
             ));
+        }
+    }
+
+    /// Each living document that had a version since its last forget still
+    /// has one in the store, and once the pass after a start has reached it,
+    /// in the row at its path or in one recorded for its file, which its next
+    /// save takes.
+    fn check_preserved(&self, documents: &[PathBuf]) {
+        let in_store = self.lineages_kept();
+        let settled = self.history.is_some() && self.catch_up.is_empty();
+        for document in documents {
+            let lineage = self.lineage[document];
+            if !self.kept.contains(&lineage) {
+                continue;
+            }
+            if !in_store.contains(&lineage) {
+                self.fail(&format!("{} lost every version it had", document.display()));
+            }
+            let of_the_file = rows_of(&self.store, identity(document))
+                .into_iter()
+                .any(|id| {
+                    objects(&self.store, Some(id))
+                        .iter()
+                        .any(|object| self.taken.get(object) == Some(&lineage))
+                });
+            if settled && !self.row_holds(document, Some(lineage)) && !of_the_file {
+                self.fail(&format!(
+                    "{} has none of its versions where its next save finds them",
+                    document.display()
+                ));
+            }
         }
     }
 

@@ -5,6 +5,8 @@
 //! while its document is not known to be anywhere; `versions` holds one row
 //! per kept copy, pointing at an object under `objects/`.
 
+use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,15 +38,17 @@ pub(super) fn prepare_store(objects: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The columns of `files`.
+/// The columns of `files`. `fs`, `ino` and `born` are the document's identity
+/// (`super::identity`); `parked_from` is the key a parked row was taken from.
 const FILES_COLUMNS: &str = "(
     id INTEGER PRIMARY KEY,
     current_path TEXT UNIQUE,
-    dev INTEGER,
+    fs INTEGER,
     ino INTEGER,
     created_at INTEGER NOT NULL,
     missing_since INTEGER,
-    born INTEGER
+    born INTEGER,
+    parked_from TEXT
 )";
 
 pub(super) fn open_store(path: &Path) -> Result<Connection> {
@@ -60,7 +64,6 @@ pub(super) fn open_store(path: &Path) -> Result<Connection> {
         PRAGMA journal_size_limit = 1048576;
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS files {FILES_COLUMNS};
-        CREATE INDEX IF NOT EXISTS idx_files_dev_ino ON files(dev, ino);
         CREATE TABLE IF NOT EXISTS versions (
             id INTEGER PRIMARY KEY,
             file_id INTEGER NOT NULL REFERENCES files(id),
@@ -85,45 +88,98 @@ pub(super) fn open_store(path: &Path) -> Result<Connection> {
     if !has_born {
         conn.execute_batch("ALTER TABLE files ADD COLUMN born INTEGER")?;
     }
-    // Stores created before a row could be parked without a key. SQLite
-    // lifts a column's not-null constraint only by rebuilding the table, with
-    // foreign keys off, which it ignores inside a transaction.
-    let key_required: bool = conn.query_row(
-        "SELECT \"notnull\" FROM pragma_table_info('files') WHERE name = 'current_path'",
+    // Stores whose rows recorded `st_dev`, which btrfs draws anew at each
+    // mount, and needed a key. SQLite lifts a column's not-null constraint
+    // only by rebuilding the table, with foreign keys off, which it ignores
+    // inside a transaction.
+    let records_dev: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name = 'dev')",
         [],
         |row| row.get(0),
     )?;
-    if key_required {
+    if records_dev {
+        let filesystems = filesystems_of_keys(&conn)?;
         conn.execute_batch("PRAGMA foreign_keys = OFF")?;
-        let transaction = conn.unchecked_transaction()?;
-        let rebuilt = transaction
-            .execute_batch(&format!(
-                "
-                CREATE TABLE files_rebuilt {FILES_COLUMNS};
-                INSERT INTO files_rebuilt(id, current_path, dev, ino, created_at, missing_since, born)
-                    SELECT id, current_path, dev, ino, created_at, missing_since, born FROM files;
-                DROP TABLE files;
-                ALTER TABLE files_rebuilt RENAME TO files;
-                CREATE INDEX idx_files_dev_ino ON files(dev, ino);
-                "
-            ))
-            .and_then(|()| transaction.commit());
+        let rebuilt = rebuild_files(&conn, &filesystems);
         conn.execute_batch("PRAGMA foreign_keys = ON")?;
         rebuilt.context("rebuild the versions store's table of documents")?;
     }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_files_fs_ino ON files(fs, ino)")?;
     Ok(conn)
 }
 
-/// Take `file_id`'s key away and count its document missing from now, if it
-/// was not already: it is not known to be anywhere until a file with its
-/// identity claims it ([`rows_of_file`]) or the missing sweep expires it.
+/// The filesystem of each keyed row's folder, by row id: where its document
+/// was kept. A folder that is gone or cannot be read leaves its rows none,
+/// to be found by key alone.
+fn filesystems_of_keys(conn: &Connection) -> Result<Vec<(i64, i64)>> {
+    let keys: Vec<(i64, String)> = conn
+        .prepare("SELECT id, current_path FROM files WHERE current_path IS NOT NULL")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut by_folder: HashMap<PathBuf, Option<i64>> = HashMap::new();
+    let mut filesystems = Vec::new();
+    for (id, key) in keys {
+        let Some(folder) = Path::new(&key).parent() else {
+            continue;
+        };
+        let fs = *by_folder.entry(folder.to_path_buf()).or_insert_with(|| {
+            std::fs::metadata(folder)
+                .and_then(|metadata| super::disk::filesystem_id(folder, metadata.dev()))
+                .ok()
+        });
+        if let Some(fs) = fs {
+            filesystems.push((id, fs));
+        }
+    }
+    Ok(filesystems)
+}
+
+/// Rebuild `files` in the current columns, each row's filesystem from
+/// `filesystems`, in one transaction.
+fn rebuild_files(conn: &Connection, filesystems: &[(i64, i64)]) -> Result<()> {
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute_batch(&format!(
+        "
+        CREATE TABLE files_rebuilt {FILES_COLUMNS};
+        INSERT INTO files_rebuilt(id, current_path, ino, created_at, missing_since, born)
+            SELECT id, current_path, ino, created_at, missing_since, born FROM files;
+        "
+    ))?;
+    {
+        let mut identify = transaction.prepare("UPDATE files_rebuilt SET fs = ?2 WHERE id = ?1")?;
+        for (id, fs) in filesystems {
+            identify.execute(params![id, fs])?;
+        }
+    }
+    transaction.execute_batch("DROP TABLE files; ALTER TABLE files_rebuilt RENAME TO files;")?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Take `file_id`'s key away, keeping it as the place the row was parked
+/// from, and count its document missing from now, if it was not already: it
+/// is not known to be anywhere until a file with its identity claims it
+/// ([`rows_of_file`]) or the missing sweep expires it.
 pub(super) fn park(conn: &Connection, file_id: i64) -> Result<()> {
     conn.execute(
-        "UPDATE files SET current_path = NULL, missing_since = COALESCE(missing_since, ?2)
+        "UPDATE files SET parked_from = current_path, current_path = NULL,
+                          missing_since = COALESCE(missing_since, ?2)
           WHERE id = ?1",
         params![file_id, now_secs()],
     )?;
     Ok(())
+}
+
+/// The parked rows taken from any of `keys`.
+pub(super) fn parked_from(conn: &Connection, keys: &[&Path]) -> Result<Vec<i64>> {
+    let mut statement = conn.prepare("SELECT id FROM files WHERE parked_from = ?1")?;
+    let mut parked = Vec::new();
+    for key in keys.iter().filter_map(|key| key.to_str()) {
+        for id in statement.query_map(params![key], |row| row.get(0))? {
+            parked.push(id?);
+        }
+    }
+    Ok(parked)
 }
 
 /// Move each `from`'s catalogue row to its `to`, in one transaction.
@@ -193,21 +249,19 @@ pub(super) fn rows_under(conn: &Connection, folder: &Path) -> Result<Vec<(i64, P
     .map_err(Into::into)
 }
 
-/// The rows recorded for the file with this `(dev, ino, born)`, with their
+/// The rows recorded for the file with this `(fs, ino, born)`, with their
 /// keys (none for a parked row), newest first. A row or a file without a
-/// birth time matches on `(dev, ino)` alone.
+/// birth time matches on `(fs, ino)` alone.
 pub(super) fn rows_of_file(
     conn: &Connection,
-    (dev, ino, born): (i64, i64, Option<i64>),
+    (fs, ino, born): (i64, i64, Option<i64>),
 ) -> Result<Vec<(i64, Option<String>)>> {
     conn.prepare(
         "SELECT id, current_path FROM files
-          WHERE dev = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)
+          WHERE fs = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)
           ORDER BY created_at DESC",
     )?
-    .query_map(params![dev, ino, born], |row| {
-        Ok((row.get(0)?, row.get(1)?))
-    })?
+    .query_map(params![fs, ino, born], |row| Ok((row.get(0)?, row.get(1)?)))?
     .collect::<rusqlite::Result<_>>()
     .map_err(Into::into)
 }

@@ -636,16 +636,17 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   real path when written, and a symlink put in its place since leads to
   another document. For that reason `save_version` through a path with rows
   kept under it that lands elsewhere decides by file identity: when the file
-  where it lands is the one the rows were kept for (`dev`, `ino`, birth
+  where it lands is the one the rows were kept for (filesystem, `ino`, birth
   time), the rows move to where it lands; when nothing shows it is, it is
   refused, since the restore that follows could write one document's version
   over another's; with nothing there it proceeds. `forget_versions` also
   erases the rows kept for the file where the path lands under any other
   key, unless the rows found under the path as spelled are another file's.
   The watcher moves the rows of a renamed folder's documents with it and
-  erases every other row below the destination: a folder is renamed only
-  onto an empty one, so they are deleted documents' (or those of a document
-  moved away while the service was stopped). It never keeps a version of a
+  parks every other row below the destination: a folder is renamed only
+  onto an empty one, so they are deleted documents', or those of documents
+  moved away while the service was stopped, which take them back by
+  identity. It never keeps a version of a
   file reached through a folder replaced by a link, and checks a reindex
   again before it reads. A saved file takes the rows kept for it under paths
   that no longer hold it as a real path, so one file has one row; a hard
@@ -654,7 +655,11 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   another file and the saved one has rows of its own: then it arrived there
   while the service was stopped (`mv r s; mv t r`), and the row it displaces
   is parked, with no path, until a file with its identity takes it or it
-  expires as a missing document's does. A document moved away while the
+  expires as a missing document's does. `forget_versions` through the path
+  a row was parked from erases it too: nothing else reaches it once its
+  document was saved before the service saw it. A file's filesystem is its
+  `f_fsid`, not `st_dev`, which btrfs draws anew for a subvolume at each
+  mount (`st_dev` only where a filesystem reports no `f_fsid`). A document moved away while the
   service was stopped and saved before the service saw it leaves its rows
   at the path it left, for the next file to arrive there with none.
 - Extraction subprocesses get argv arrays, never `sh -c`; a failure or a
