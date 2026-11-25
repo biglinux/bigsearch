@@ -46,6 +46,16 @@ pub const ACTIVITY_IDLE: u8 = 0;
 pub const ACTIVITY_INDEXING: u8 = 1;
 pub const ACTIVITY_BACKFILLING: u8 = 2;
 
+/// How long after a start from the saved folder list the sources are walked
+/// once, for what changed while the daemon was stopped and moved no folder: a
+/// file rewritten in place, an edited `.gitignore`. The walk waits out the
+/// busiest minute of a session's start.
+fn saved_start_check_delay() -> Duration {
+    crate::settings::test_seam("BIG_SEARCH_SAVED_START_CHECK_MS")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(Duration::from_secs(60), Duration::from_millis)
+}
+
 pub fn activity_label(paused: bool, activity: u8) -> &'static str {
     if paused {
         "paused"
@@ -165,6 +175,8 @@ pub fn run(
     // uses, so the two cannot disagree about what belongs in the index.
     let path_scope = scan::Scope::compile();
 
+    let check_sources_at = matches!(scope.dirs, StartDirs::Saved(..))
+        .then(|| Instant::now() + saved_start_check_delay());
     let (mut watches, queued, overflowed) =
         start_inotify(tx, &runtime, scope.watch_list, scope.fingerprint)?;
     let catch_up = watch_initial_dirs(&mut watches, scope.roots, scope.dirs, scope.started);
@@ -185,6 +197,7 @@ pub fn run(
     runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
 
     WatchLoop {
+        check_sources_at,
         content_backfill,
         history_pass_done: false,
         history_cursor: None,
@@ -287,6 +300,9 @@ fn spawn_history_worker(
 
 /// What the watcher loop owns between messages.
 struct WatchLoop<'a> {
+    /// When a start from the saved list walks the sources once
+    /// ([`saved_start_check_delay`]).
+    check_sources_at: Option<Instant>,
     content_backfill: ContentBackfill,
     history_pass_done: bool,
     /// Where the pass over the catalogue has got to. It covers what no event
@@ -316,50 +332,67 @@ struct WatchLoop<'a> {
 
 impl WatchLoop<'_> {
     fn run_until_closed(mut self) -> Result<()> {
-        while let Some(message) = self.next_message() {
+        while let Some(message) = self.next_message()? {
             self.handle(message)?;
         }
         Ok(())
     }
 
     /// Wait for the next message, doing idle work (a content backfill batch,
-    /// a page of the versions pass) each time the wait runs out. `None` once
-    /// the channel is closed.
-    fn next_message(&mut self) -> Option<WatchMessage> {
+    /// a page of the versions pass) each time the wait runs out, and the walk
+    /// a start from the saved list owes once its time comes. `None` once the
+    /// channel is closed.
+    fn next_message(&mut self) -> Result<Option<WatchMessage>> {
         loop {
-            if self
-                .content_backfill
-                .should_run_when_idle(&self.runtime.paused)
-            {
-                match self
-                    .rx
-                    .recv_timeout(self.content_backfill.wait_before_batch())
-                {
-                    Ok(message) => return Some(message),
-                    Err(RecvTimeoutError::Timeout) => self.idle_backfill_turn(),
-                    Err(RecvTimeoutError::Disconnected) => return None,
-                }
-            } else if self.history_pass_done || self.runtime.paused.load(Ordering::Relaxed) {
-                // Paused stops the versions pass too; Resume picks it up.
-                return self.rx.recv().ok();
-            } else {
-                // The pass over the catalogue also runs when there is no indexing
-                // left to do, which is most of the time: blocking on the channel
-                // would make the first version of anything wait for the next file
-                // to change.
-                match self.rx.recv_timeout(HISTORY_PASS_TICK) {
-                    Ok(message) => return Some(message),
-                    Err(RecvTimeoutError::Timeout) => {
-                        self.history_pass_done = send_history_page(
-                            &self.state,
-                            &self.history_tx,
-                            &mut self.history_cursor,
-                        );
-                    }
-                    Err(RecvTimeoutError::Disconnected) => return None,
+            if self.check_due() {
+                self.check_sources_at = None;
+                // A paused watcher drops events; `resume` walks.
+                if !self.runtime.paused.load(Ordering::Relaxed) {
+                    log::info!("checking the sources for changes made while stopped");
+                    self.walk_sources()?;
                 }
             }
+            let backfill = self
+                .content_backfill
+                .should_run_when_idle(&self.runtime.paused);
+            // The pass over the catalogue also runs when there is no indexing
+            // left to do, which is most of the time: blocking on the channel
+            // would make the first version of anything wait for the next file
+            // to change. Paused stops it too; Resume picks it up.
+            let history_page = !backfill
+                && !self.history_pass_done
+                && !self.runtime.paused.load(Ordering::Relaxed);
+            let idle_wait = if backfill {
+                Some(self.content_backfill.wait_before_batch())
+            } else if history_page {
+                Some(HISTORY_PASS_TICK)
+            } else {
+                None
+            };
+            let check_wait = self
+                .check_sources_at
+                .map(|at| at.saturating_duration_since(Instant::now()));
+            let received = match idle_wait.into_iter().chain(check_wait).min() {
+                Some(wait) => self.rx.recv_timeout(wait),
+                None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match received {
+                Ok(message) => return Ok(Some(message)),
+                Err(RecvTimeoutError::Disconnected) => return Ok(None),
+                // The wait ran out for the walk, not for idle work.
+                Err(RecvTimeoutError::Timeout) if self.check_due() => {}
+                Err(RecvTimeoutError::Timeout) if backfill => self.idle_backfill_turn(),
+                Err(RecvTimeoutError::Timeout) if history_page => {
+                    self.history_pass_done =
+                        send_history_page(&self.state, &self.history_tx, &mut self.history_cursor);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
         }
+    }
+
+    fn check_due(&self) -> bool {
+        self.check_sources_at.is_some_and(|at| at <= Instant::now())
     }
 
     /// Nothing arrived before the next backfill batch was due: one page of the
@@ -615,6 +648,8 @@ impl WatchLoop<'_> {
     fn rescan_sources(&mut self, outcome: &mut scan::ReconcileOutcome) -> Result<SystemTime> {
         let started = SystemTime::now();
         self.watches.walk_begins()?;
+        // This walk is the one a start from the saved list owes.
+        self.check_sources_at = None;
         // The versions worker cannot trust what it heard either, so its pass
         // over the catalogue starts again from the top.
         self.history_pass_done = false;

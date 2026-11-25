@@ -545,7 +545,10 @@ The catch-up then compares:
 
 A file rewritten in place changes no folder, an edited `.gitignore` or `.ignore`
 inside a source changes no fingerprint, and joining a group changes no folder:
-all three wait for the next walk, `big-search rescan`.
+all three wait for the walk such a start runs once, a minute after it, at the
+watcher's background priority, or for `big-search rescan`. Like a rescan, that
+walk drops the run record until it ends, so a stop during it makes the next
+start walk.
 
 Mounts change no folder either. The daemon holds `/proc/self/mountinfo` open and
 wakes only when the kernel flags a change on it: a disk mounted or unmounted
@@ -618,9 +621,9 @@ or `0`, `false`, `no` or `off`, in any case; any other value is ignored.
 | `BIG_SEARCH_BENCH` | prints timings from `reindex` |
 
 Debug builds and tests also read `BIG_SEARCH_CATALOG_CONTENT_BATCH`,
-`BIG_SEARCH_DAEMON_CONTENT_BATCH`, `BIG_SEARCH_DAEMON_CONTENT_BATCH_MB` and
-`BIG_SEARCH_DAEMON_CONTENT_IDLE_MS`, which shrink batches and waits; a release
-build ignores them.
+`BIG_SEARCH_DAEMON_CONTENT_BATCH`, `BIG_SEARCH_DAEMON_CONTENT_BATCH_MB`,
+`BIG_SEARCH_DAEMON_CONTENT_IDLE_MS` and `BIG_SEARCH_SAVED_START_CHECK_MS`,
+which shrink batches and waits; a release build ignores them.
 
 ## 10. Dependencies
 

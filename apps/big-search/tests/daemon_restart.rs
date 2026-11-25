@@ -20,8 +20,8 @@ use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
 /// A restart watches the saved folders without walking: a file rewritten in
-/// place while the daemon was stopped changes no folder and waits for
-/// `rescan`.
+/// place while the daemon was stopped changes no folder and waits for the walk
+/// a minute after the start, or `rescan`.
 #[test]
 fn restart_watches_without_walking() {
     let sandbox = Sandbox::new("bs-restart");
@@ -49,6 +49,49 @@ fn restart_watches_without_walking() {
         settles(|| sandbox.catalogued_size(&first) == Some(8)),
         "rescan did not read the file rewritten while stopped"
     );
+    let _ = std::fs::remove_dir_all(&sandbox.base);
+}
+
+/// The walk after a start from the saved list reads what changed while the
+/// daemon was stopped and moved no folder: a file rewritten in place, and a
+/// `.gitignore` rewritten in place to leave a folder out.
+#[test]
+fn saved_start_walks_once_idle() {
+    let sandbox = Sandbox::new("bs-saved-check");
+    let first = sandbox.docs.join("first.txt");
+    let repo = sandbox.docs.join("repo");
+    let built = repo.join("generated/out.txt");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+    std::fs::write(&built, "beta").unwrap();
+    std::fs::write(repo.join(".gitignore"), "*.log\n").unwrap();
+    sandbox.age_folders();
+    let daemon = sandbox.start();
+    assert!(
+        settles(|| sandbox.catalogued_size(&built) == Some(4)),
+        "first start did not walk"
+    );
+    sandbox.stop(daemon);
+
+    std::fs::write(&first, "alphabet").unwrap();
+    std::fs::write(repo.join(".gitignore"), "generated/\n").unwrap();
+    let _daemon = KillOnDrop(
+        sandbox
+            .command(&["daemon"])
+            .env("BIG_SEARCH_SAVED_START_CHECK_MS", "200")
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sandbox.sock), "daemon never bound socket");
+    assert!(
+        settles(|| sandbox.catalogued_size(&first) == Some(8)),
+        "the file rewritten while stopped was not read again"
+    );
+    assert!(
+        settles(|| sandbox.catalogued_size(&built).is_none()),
+        "the folder the edited .gitignore leaves out is still catalogued"
+    );
+    assert_eq!(sandbox.name_hits("out"), 0);
     let _ = std::fs::remove_dir_all(&sandbox.base);
 }
 
