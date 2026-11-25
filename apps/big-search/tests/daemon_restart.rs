@@ -17,7 +17,7 @@ mod scratch;
 use daemon::*;
 use std::path::Path;
 use std::thread::sleep;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A restart watches the saved folders without walking: a file rewritten in
 /// place while the daemon was stopped changes no folder and waits for the walk
@@ -670,5 +670,55 @@ fn listed_uncataloged_folder_is_walked() {
     let _daemon = sandbox.start();
     sandbox.await_docs_watched();
     assert_eq!(sandbox.catalogued_size(&inner), Some(5));
+    let _ = std::fs::remove_dir_all(&sandbox.base);
+}
+
+/// Guards: privacy refusal: a start reads the browsers' download lists only
+/// once `[origin] browser_history` is on in the configuration file.
+#[test]
+fn browser_downloads_read_when_allowed() {
+    let sandbox = Sandbox::new("bs-browser-history");
+    let download = sandbox.docs.join("report.pdf");
+    std::fs::write(&download, "pdf").unwrap();
+    let profile = sandbox.data.join("cfg/chromium/Default");
+    std::fs::create_dir_all(&profile).unwrap();
+    // Chromium counts microseconds since 1601.
+    let finished = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 11_644_473_600)
+        * 1_000_000;
+    let history = rusqlite::Connection::open(profile.join("History")).unwrap();
+    history
+        .execute_batch(
+            "CREATE TABLE downloads (id INTEGER PRIMARY KEY, current_path TEXT,
+                 target_path TEXT, start_time INTEGER, end_time INTEGER, state INTEGER);
+             CREATE TABLE downloads_url_chains (id INTEGER, chain_index INTEGER, url TEXT);
+             INSERT INTO downloads_url_chains
+                 VALUES (1, 0, 'https://files.example.org/report.pdf?token=secret');",
+        )
+        .unwrap();
+    history
+        .execute(
+            "INSERT INTO downloads VALUES (1, ?1, ?1, ?2, ?2, 1)",
+            rusqlite::params![download.to_str().unwrap(), finished.cast_signed()],
+        )
+        .unwrap();
+    drop(history);
+    let config = sandbox.data.join("cfg/big-search/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let origin = || ask(&sandbox.sock, &path_cmd("origin", &download))["origin"].clone();
+
+    std::fs::write(&config, "[origin]\nbrowser_history = false\n").unwrap();
+    let daemon = sandbox.start();
+    assert!(sandbox.await_idle(), "the first start never finished");
+    assert!(origin().is_null(), "read while off: {}", origin());
+    sandbox.stop(daemon);
+
+    std::fs::write(&config, "[origin]\nbrowser_history = true\n").unwrap();
+    let _daemon = sandbox.start();
+    assert!(sandbox.await_idle(), "the second start never finished");
+    assert_eq!(origin()["source_domain"], "files.example.org");
     let _ = std::fs::remove_dir_all(&sandbox.base);
 }
