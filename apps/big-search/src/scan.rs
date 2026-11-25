@@ -6,36 +6,35 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::io::ErrorKind::{NotFound, PermissionDenied};
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
 mod scope;
-pub use scope::{
-    Scope, is_hidden, repo_ignored, seed_user_ignore, walk_ignored, write_effective_ignore,
-};
+pub use scope::{Scope, repo_ignored, seed_user_ignore, write_effective_ignore};
 
 const STATE_FLUSH_ROWS: usize = 2048;
 /// Paths read from each side per page when a pass compares the disk with the
 /// catalogue: bounded memory on a catalogue of millions.
 const SCAN_PAGE: usize = 2048;
 
-/// `ignore` walker: skip hidden entries, every folder's ignore files and the
-/// `scope` rules, which the walker applies after the folders' files so that
-/// none of those brings back what the rules leave out.
+/// `ignore` walker over what `scope` keeps: its own filters are off, so the
+/// walk, the watcher and a reindex read the same rules.
 /// Symlinks are never followed during the walk (`follow_links(false)`); symlinked
 /// directories the user placed at a scan root are instead resolved
 /// into separate roots by [`crate::scan_roots::resolve_roots_with_policy`], which avoids chasing the thousands
 /// of deep symlinks a tree contains (and the loops/duplication that brings).
 fn walker(root: &Path, scope: &Scope) -> ignore::Walk {
-    let scope = scope.clone();
+    // The walk is sequential; the lock only meets `filter_entry`'s `Sync`.
+    let filter = std::sync::Mutex::new(scope.walk_filter(root));
     let mut b = WalkBuilder::new(root);
-    b.hidden(true) // skip dotfiles/dirs: churny and never indexed
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(true)
+    b.standard_filters(false)
         .follow_links(false)
         .filter_entry(move |entry| {
-            !scope.excludes_entry(entry.path(), entry.file_type().is_some_and(|t| t.is_dir()))
+            filter.lock().unwrap_or_else(PoisonError::into_inner).keeps(
+                entry.path(),
+                entry.depth(),
+                entry.file_type().is_some_and(|t| t.is_dir()),
+            )
         });
     b.build()
 }
@@ -196,7 +195,12 @@ pub(crate) fn reconcile_subtree_inline(
     let mut outcome = ReconcileOutcome::default();
     // The walker exempts its own root from the ignore rules, so an excluded
     // directory would otherwise be indexed whole the moment it is created.
-    if scope.excluded(root, true) || (!state.contains(root) && walk_ignored(root, true)) {
+    let skipped = if state.contains(root) {
+        scope.excluded(root, true)
+    } else {
+        scope.walk_skips(root, true)
+    };
+    if skipped {
         return Ok(outcome);
     }
     for entry in walker(root, scope) {
@@ -710,14 +714,6 @@ mod tests {
         assert!(second.state_changed, "content work must still be scheduled");
 
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn hidden_detection() {
-        assert!(is_hidden(Path::new("/home/u/.cache/x")));
-        assert!(is_hidden(Path::new("/home/u/.config")));
-        assert!(!is_hidden(Path::new("/home/u/docs/file.txt")));
-        assert!(!is_hidden(Path::new("/home/u/Report.md")));
     }
 
     /// The `ignore` walker exempts its own root, so a `target/` created after

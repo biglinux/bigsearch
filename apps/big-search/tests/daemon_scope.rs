@@ -48,6 +48,41 @@ fn global_git_ignore_covers_events() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// The global git ignore file is anchored at the root of each work tree, as
+/// git reads it (gitignore(5)): its `/rootnote.md` leaves out the file at the
+/// root of the repository and not one in a folder below it.
+#[test]
+fn global_ignore_anchors_at_work_tree() {
+    let base = scratch::scratch_dir("bs-git-anchor");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    let repo = home.join("docs/repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    std::fs::write(repo.join("rootnote.md"), "a").unwrap();
+    std::fs::write(repo.join("sub/rootnote.md"), "b").unwrap();
+    std::fs::write(repo.join("marker.txt"), "c").unwrap();
+    std::fs::create_dir_all(xdg_storage_home.join("cfg/git")).unwrap();
+    std::fs::write(xdg_storage_home.join("cfg/git/ignore"), "/rootnote.md\n").unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    let sock = run.join("biglinux/indexd.sock");
+    let _daemon = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+    assert!(
+        settles(|| query_paths(&sock, "name", "marker", &home).0 == 1),
+        "the start walk did not index the repository"
+    );
+    let (found, paths) = query_paths(&sock, "name", "rootnote", &home);
+    assert_eq!(found, 1, "{paths:?}");
+    assert!(paths[0].ends_with("/repo/sub/rootnote.md"), "{paths:?}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A source inside a dot-folder indexes the files that appear in it: only what
 /// is hidden below the source is out of scope.
 #[test]
@@ -114,6 +149,62 @@ fn source_under_excluded_name_indexed() {
         "the watcher left out a new file of the source"
     );
     assert_eq!(query_paths(&sock, "name", "artifact", &home).0, 0);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// An ignore file above a source speaks only for what lies below it, as the
+/// walk reads it: a home kept as a dotfiles repository that ignores all but
+/// `.bashrc` leaves a source inside it whole, in the walk, the watcher and a
+/// forced reindex alike.
+#[test]
+fn ignore_file_above_source_spares_it() {
+    let base = scratch::scratch_dir("bs-rules-above");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    let docs = home.join("Documents");
+    std::fs::create_dir_all(home.join(".git")).unwrap();
+    std::fs::write(home.join(".gitignore"), "/*\n!/.bashrc\n").unwrap();
+    std::fs::create_dir_all(docs.join("sub")).unwrap();
+    std::fs::write(docs.join("first.txt"), "a").unwrap();
+    std::fs::write(docs.join("sub/second.txt"), "b").unwrap();
+    std::fs::create_dir_all(xdg_storage_home.join("cfg/big-search")).unwrap();
+    std::fs::write(
+        xdg_storage_home.join("cfg/big-search/config.toml"),
+        format!("[[source]]\npath = \"{}\"\n", docs.display()),
+    )
+    .unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    let sock = run.join("biglinux/indexd.sock");
+    let _daemon = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+    let found = |name: &str| query_paths(&sock, "name", name, &docs).0;
+    assert!(
+        settles(|| found("first") == 1 && found("second") == 1),
+        "the start walk left out the source"
+    );
+
+    std::fs::write(docs.join("third.txt"), "c").unwrap();
+    assert!(
+        settles(|| found("third") == 1),
+        "the watcher left out a new file of the source"
+    );
+    assert_answers(
+        &sock,
+        &[
+            (path_cmd("reindex", &docs.join("first.txt")), None),
+            (path_cmd("reindex", &docs.join("sub")), None),
+        ],
+    );
+    // The watcher takes the reindexes and the events in order.
+    std::fs::write(docs.join("marker.txt"), "d").unwrap();
+    assert!(settles(|| found("marker") == 1), "the watcher stopped");
+    assert_eq!(found("first"), 1, "the reindex evicted the file");
+    assert_eq!(found("second"), 1, "the reindex evicted the folder");
     let _ = std::fs::remove_dir_all(&base);
 }
 

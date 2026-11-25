@@ -289,14 +289,22 @@ store, 1.6 MB of stored paths, so it stays as is.
 ## 4. Scan
 
 `scan.rs` walks each root with the `ignore` crate's `WalkBuilder`, the walker
-behind `fd` and `rg`: hidden entries are skipped, `.ignore` files apply, every
-gitignore source applies inside a repository (the repository's, the global one,
-`.git/info/exclude`, parent folders), and the effective ignore file, the
-built-in defaults followed by the user's `~/.config/big-search/ignore` so the
-user's lines win, takes precedence: no folder's file brings back what it leaves
-out. Its rules are anchored at the source holding each entry, so a source
-nested in another reads `/Archive/` as its own `Archive`. The watcher asks the
-same rules about each path an event names (`scan::Scope`, `walk_ignored`).
+behind `fd` and `rg`, with its own filters off: one decision, `scan::Scope`,
+judges each entry, and the watcher and a forced reindex ask it about each
+folder from below the source holding a path down to the path, so no pass keeps
+what another leaves out. Hidden entries are skipped; the effective ignore file,
+the built-in defaults followed by the user's `~/.config/big-search/ignore` so
+the user's lines win, comes first, so no folder's file brings back what it
+leaves out; then the first ignore file with an opinion decides: the `.ignore`
+files of the folders above the entry, nearest first, then, inside a work tree,
+its `.gitignore` files, its `info/exclude` and the global excludes file, which
+git anchors at the root of the work tree. The effective rules are anchored at
+the source holding each entry, so a source nested in another reads
+`/Archive/` as its own `Archive`. A source itself is always in scope and
+nothing above it is tested: a `.gitignore` above a source speaks only for what
+lies below it. The walk reads each folder's files once on the way down; the
+watcher reads them only for a path new to the catalogue. The global excludes
+file is read once per run, as the effective rules are.
 Symlinks are never followed during the walk; a symlinked folder at the top of a
 root is resolved into a root of its own by `scan_roots::resolve_roots` according
 to the symlink policy, and network mounts, virtual mounts and operating-system

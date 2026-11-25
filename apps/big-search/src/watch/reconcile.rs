@@ -96,8 +96,11 @@ impl ReconcilePass<'_> {
         let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
         let recorded = state.recorded(path);
         let judged = recorded.filter(|_| !self.forced);
-        let out_of_scope = self.scope.excluded(path, is_dir)
-            || (judged.is_none() && scan::walk_ignored(path, is_dir));
+        let out_of_scope = if judged.is_none() {
+            self.scope.walk_skips(path, is_dir)
+        } else {
+            self.scope.excluded(path, is_dir)
+        };
         if out_of_scope && recorded.is_none() {
             return Ok(()); // out of scope and never catalogued: nothing to do
         }
