@@ -24,7 +24,7 @@
 //! for as long as the index is open, one thread per index: an idle daemon would
 //! wake four times a second to learn that nothing had changed.
 use notify::event::{EventKind, ModifyKind, RenameMode};
-use notify::{RecursiveMode, Watcher};
+use notify::{Config, EventKindMask, RecommendedWatcher, RecursiveMode, Watcher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -105,15 +105,22 @@ impl MetaWatch {
     fn start(root: &Path) -> Option<Self> {
         let callbacks = Arc::new(WatchCallbackList::default());
         let fired = callbacks.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        // Only the kinds that can publish a commit: notify's default adds
+        // IN_OPEN, and every reload opens files in this folder.
+        let config = Config::default().with_event_kinds(
+            EventKindMask::CREATE | EventKindMask::MODIFY_DATA | EventKindMask::MODIFY_NAME,
+        );
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
                 if event.is_ok_and(|event| is_meta_commit(&event)) {
                     // Same as tantivy's poller: wait for the reloads before the next event.
                     let _ = fired.broadcast().wait();
                 }
-            })
-            .map_err(|e| log::warn!("index watch unavailable, polling instead: {e}"))
-            .ok()?;
+            },
+            config,
+        )
+        .map_err(|e| log::warn!("index watch unavailable, polling instead: {e}"))
+        .ok()?;
         watcher
             .watch(root, RecursiveMode::NonRecursive)
             .map_err(|e| log::warn!("index watch unavailable, polling instead: {e}"))
