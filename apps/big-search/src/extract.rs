@@ -24,9 +24,11 @@ static PROC_FD_MISSING_REPORTED: std::sync::atomic::AtomicBool =
 pub(crate) fn open_regular_with(path: &Path, flags: libc::c_int) -> Option<std::fs::File> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    // An `O_PATH` open runs no FIFO or device open and takes no lease. The file
-    // is opened for reading through that descriptor, which pins the inode the
-    // type check saw, so a rename since cannot swap it.
+    // An `O_PATH` open runs no FIFO or device open and breaks no lease; reopening
+    // through it keeps the inode the type check saw. A non-blocking reopen skips
+    // a file under another process's write lease (a Samba oplock, an NFS
+    // delegation) instead of waiting for its break, and while it is open no write
+    // lease can be taken, so the blocking one returned waits on none.
     let handle = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(flags | libc::O_PATH)
@@ -35,7 +37,13 @@ pub(crate) fn open_regular_with(path: &Path, flags: libc::c_int) -> Option<std::
     if !handle.metadata().ok()?.is_file() {
         return None;
     }
-    match std::fs::File::open(format!("/proc/self/fd/{}", handle.as_raw_fd())) {
+    let reopen_path = format!("/proc/self/fd/{}", handle.as_raw_fd());
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&reopen_path)
+        .and_then(|_lease_guard| std::fs::File::open(&reopen_path));
+    match opened {
         Ok(file) => Some(file),
         Err(error) => {
             if error.kind() == std::io::ErrorKind::NotFound
