@@ -68,9 +68,14 @@ fn apply_deadlines(stream: &UnixStream, deadline: Duration) -> Result<(), Client
 /// refuse it for.
 #[must_use]
 pub fn default_socket() -> Option<PathBuf> {
-    // An empty or relative value is unset (XDG Base Directory spec): joining it
-    // would name a socket under the current folder. The daemon binds this path.
-    std::env::var_os("XDG_RUNTIME_DIR")
+    socket_in(std::env::var_os("XDG_RUNTIME_DIR"))
+}
+
+/// The socket under the runtime directory `runtime`. An empty or relative
+/// value is unset (XDG Base Directory spec): joining it would name a socket
+/// under the current folder. The daemon binds this path.
+fn socket_in(runtime: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    runtime
         .map(PathBuf::from)
         .filter(|runtime| runtime.is_absolute())
         .map(|runtime| runtime.join("biglinux").join("indexd.sock"))
@@ -541,6 +546,40 @@ fn exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guards: bound: a reply line up to the ceiling is read, one byte more is
+    /// refused instead of growing without end.
+    #[test]
+    fn reply_line_capped() {
+        let ceiling = usize::try_from(MAX_REPLY_BYTES).unwrap();
+        let mut at_cap = vec![b'a'; ceiling - 1];
+        at_cap.push(b'\n');
+        let mut line = String::new();
+        read_reply_line(&mut at_cap.as_slice(), &mut line).unwrap();
+        assert_eq!(line.len(), ceiling);
+
+        let mut past_cap = vec![b'a'; ceiling];
+        past_cap.push(b'\n');
+        let mut line = String::new();
+        let refused = read_reply_line(&mut past_cap.as_slice(), &mut line);
+        assert!(
+            matches!(&refused, Err(ClientError::Io(error)) if error.kind() == io::ErrorKind::InvalidData),
+            "{refused:?}"
+        );
+    }
+
+    /// Guards: security refusal: a runtime directory that is unset, empty or
+    /// relative names no socket, so none lands under the working folder.
+    #[test]
+    fn socket_needs_absolute_runtime() {
+        for runtime in [None, Some(""), Some("run/user/1000")] {
+            assert_eq!(socket_in(runtime.map(Into::into)), None, "{runtime:?}");
+        }
+        assert_eq!(
+            socket_in(Some("/run/user/1000".into())),
+            Some(PathBuf::from("/run/user/1000/biglinux/indexd.sock"))
+        );
+    }
 
     #[test]
     fn persistent_client_reuses_its_connection() {

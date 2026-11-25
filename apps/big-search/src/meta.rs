@@ -460,6 +460,24 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Guards: bound: the kind word and tags joined to a capped body keep the
+    /// whole text within the extraction cap.
+    #[test]
+    fn metadata_text_within_cap() {
+        use crate::test_env::{ENV_LOCK, EnvVarGuard};
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _cap = EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
+        let dir = crate::test_env::scratch_dir("bsmeta-cap");
+        let path = dir.join("script");
+        let mut script = b"#!/bin/sh\n".to_vec();
+        script.extend(b"echo x\n".repeat(300_000));
+        std::fs::write(&path, script).unwrap();
+        let text = metadata_text(&path, true).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(text.starts_with("document #!/bin/sh"), "{}", &text[..40]);
+        assert_eq!(text.len(), 1 << 20);
+    }
+
     #[test]
     fn sniffed_document_text_follows_content_policy() {
         let dir = crate::test_env::scratch_dir("bsmeta-policy");
