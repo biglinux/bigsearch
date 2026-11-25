@@ -491,7 +491,7 @@ impl State {
 
     /// Recorded `(path, mtime, size)` after `after`, sorted, pending changes
     /// included. Used by bounded catalogue passes instead of materializing the
-    /// full catalogue.
+    /// full catalogue: a page shorter than `limit` is the last one.
     ///
     /// # Errors
     ///
@@ -505,9 +505,13 @@ impl State {
             return Ok(Vec::new());
         }
         let after_text = after.unwrap_or_default();
-        let mut entries: Vec<(String, i64, u64)> = if self.clear_before_persist {
-            Vec::new()
-        } else {
+        // Stored rows a pending change overrides do not count toward the page,
+        // and a pending row past the last stored row read waits for its page:
+        // either would end the pass early or move the cursor past unread rows.
+        let mut entries: Vec<(String, i64, u64)> = Vec::new();
+        let mut stored_after = after_text.to_owned();
+        let mut stored_done = self.clear_before_persist;
+        while !stored_done && entries.len() < limit {
             let mut stmt = self
                 .conn
                 .prepare_cached(
@@ -520,7 +524,7 @@ impl State {
                 )
                 .context("prepare path batch query")?;
             let rows = stmt
-                .query_map(params![self.namespace, after_text, limit as i64], |row| {
+                .query_map(params![self.namespace, stored_after, limit as i64], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
@@ -528,14 +532,23 @@ impl State {
                     ))
                 })
                 .context("query path batch")?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+            let page = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            stored_done = page.len() < limit;
+            if let Some((last, _, _)) = page.last() {
+                stored_after.clone_from(last);
+            }
+            entries.extend(page.into_iter().filter(|(path, _, _)| {
+                !self.pending.contains_key(path) && !self.in_removed_tree(path)
+            }));
+        }
 
         for (path, change) in &self.pending {
             if !after_text.is_empty() && path.as_str() <= after_text {
                 continue;
             }
-            entries.retain(|(known, _, _)| known != path);
+            if !stored_done && path.as_str() > stored_after.as_str() {
+                continue;
+            }
             if let PendingChange::Set(mtime, size) = *change {
                 entries.push((path.clone(), mtime, size));
             }

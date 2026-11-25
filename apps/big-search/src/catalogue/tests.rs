@@ -226,6 +226,45 @@ fn entries_after_merges_pending_rows() {
 }
 
 #[test]
+fn entries_after_pages_pending_rows() {
+    let dir = crate::test_env::scratch_dir("bs-state-page-pending");
+    let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+    for path in ["/a", "/b", "/c", "/d/x", "/e"] {
+        state.set(Path::new(path), 1, 1);
+    }
+    state.persist().unwrap();
+    state.remove(Path::new("/a"));
+    state.remove_tree(Path::new("/d"));
+    state.set(Path::new("/z"), 2, 2);
+
+    // Pages of 2 walked by their last key, as the watcher and the CLI page.
+    let mut pages = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = state.entries_after(after.as_deref(), 2).unwrap();
+        let full = page.len() == 2;
+        after = page
+            .last()
+            .map(|(path, _, _)| path.to_string_lossy().into_owned());
+        pages.push(
+            page.into_iter()
+                .map(|(path, _, _)| path)
+                .collect::<Vec<_>>(),
+        );
+        if !full {
+            break;
+        }
+    }
+    let expected: Vec<Vec<PathBuf>> = [vec!["/b", "/c"], vec!["/e", "/z"], vec![]]
+        .into_iter()
+        .map(|page| page.into_iter().map(PathBuf::from).collect())
+        .collect();
+    assert_eq!(pages, expected);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn stale_entries_stream_pending_work() {
     let dir = crate::test_env::scratch_dir("bs-state-stale");
     let mut names = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
