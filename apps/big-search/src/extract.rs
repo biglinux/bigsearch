@@ -16,29 +16,36 @@ pub(crate) fn open_regular(path: &Path) -> Option<std::fs::File> {
     open_regular_with(path, 0)
 }
 
-/// [`open_regular`] with `flags` added to the open, such as `O_NOFOLLOW`.
+/// Set once a reopen has found no `/proc/self/fd`.
+static PROC_FD_MISSING_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// [`open_regular`] with `flags` added to the first open, such as `O_NOFOLLOW`.
 pub(crate) fn open_regular_with(path: &Path, flags: libc::c_int) -> Option<std::fs::File> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    // `O_NONBLOCK` makes the open of a FIFO return at once. It is cleared
-    // before any read, since open(2) does not promise regular files ignore it.
-    // ast-grep-ignore: document-open-regular (the owner of the rule's open)
-    let file = std::fs::OpenOptions::new()
+    // An `O_PATH` open runs no FIFO or device open and takes no lease. The file
+    // is opened for reading through that descriptor, which pins the inode the
+    // type check saw, so a rename since cannot swap it.
+    let handle = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(flags | libc::O_NONBLOCK)
+        .custom_flags(flags | libc::O_PATH)
         .open(path)
         .ok()?;
-    if !file.metadata().ok()?.is_file() {
+    if !handle.metadata().ok()?.is_file() {
         return None;
     }
-    let fd = file.as_raw_fd();
-    // SAFETY: `fd` is owned by `file`, open for the whole block; F_GETFL and
-    // F_SETFL pass only integers.
-    let blocking = unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) == 0
-    };
-    blocking.then_some(file)
+    match std::fs::File::open(format!("/proc/self/fd/{}", handle.as_raw_fd())) {
+        Ok(file) => Some(file),
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::NotFound
+                && !PROC_FD_MISSING_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                log::warn!("documents are skipped unread: /proc/self/fd is unavailable ({error})");
+            }
+            None
+        }
+    }
 }
 
 /// Adaptive cap on extracted text per file, sized by the machine's memory to

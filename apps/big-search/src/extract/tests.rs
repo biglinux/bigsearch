@@ -23,7 +23,17 @@ fn readers_pass_over_fifo() {
     }
     let file = dir.join("b.txt");
     std::fs::write(&file, "beta").unwrap();
-    assert!(open_regular(&file).is_some());
+    let link = dir.join("link.txt");
+    std::os::unix::fs::symlink(&file, &link).unwrap();
+    for opened in [&file, &link] {
+        let mut text = String::new();
+        open_regular(opened)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "beta", "{}", opened.display());
+    }
+    assert!(open_regular_with(&link, libc::O_NOFOLLOW).is_none());
     assert!(open_regular(&dir).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }

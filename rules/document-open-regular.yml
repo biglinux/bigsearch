@@ -16,14 +16,23 @@ files:
 ignores:
   - '**/tests.rs'
 rule:
-  any:
-    - pattern: File::open($PATH)
-    - pattern: std::fs::File::open($PATH)
-    - pattern: FileFormat::from_file($PATH)
-    - pattern: file_format::FileFormat::from_file($PATH)
-    - pattern: imagesize::size($PATH)
-    - all:
-        - pattern: $OPTIONS.open($PATH)
-        - has:
-            stopBy: end
-            pattern: $BUILDER.read(true)
+  all:
+    - any:
+        - pattern: File::open($PATH)
+        - pattern: std::fs::File::open($PATH)
+        - pattern: FileFormat::from_file($PATH)
+        - pattern: file_format::FileFormat::from_file($PATH)
+        - pattern: imagesize::size($PATH)
+        - all:
+            - pattern: $OPTIONS.open($PATH)
+            - has:
+                stopBy: end
+                pattern: $BUILDER.read(true)
+    # The owner's own opens.
+    - not:
+        inside:
+          stopBy: end
+          kind: function_item
+          has:
+            field: name
+            regex: ^open_regular_with$
