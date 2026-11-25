@@ -49,7 +49,7 @@ pub use eligibility::may_be_a_document;
 pub use worker::{HistoryEvent, Pending, check_kept_paths, run_worker};
 
 use disk::{disk_capacity, filesystem_id};
-use eligibility::{eligible_metadata, eligible_name, git_work_tree};
+use eligibility::{eligible_metadata, eligible_name, work_tree};
 use store::{
     file_id_for_path, first_stored, follow_renames, is_live_session, kept_at, now_secs,
     object_name, open_store, park, parked_from, prepare_store, rows_of_file, rows_under,
@@ -653,13 +653,13 @@ impl History {
         Ok(true)
     }
 
-    /// Whether git, not this store, looks after `path`, as far as the settings
-    /// say to leave it there.
+    /// Whether git or Jujutsu, not this store, looks after `path`, as far as
+    /// the settings say to leave it there.
     fn left_to_git(&self, path: &Path) -> bool {
         if !self.skip_git_repositories && !self.respect_gitignore {
             return false;
         }
-        git_work_tree(path).is_some()
+        work_tree(path).is_some()
             && (self.skip_git_repositories || crate::scan::repo_ignored(path, false))
     }
 

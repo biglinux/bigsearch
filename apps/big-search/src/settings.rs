@@ -690,7 +690,7 @@ symlink_policy = \"personal-local\" # personal-local | local-exact
 # keep_versions = 10      # most versions kept per document
 # keep_days = 30          # oldest version kept, in days
 # max_total_gib = 0       # disk the history may use. 0 = 1/20 of the disk, at most 10 GiB
-# skip_git_repositories = true # keep nothing inside a git work tree
+# skip_git_repositories = true # keep nothing inside a git or jj work tree
 # respect_gitignore = true     # when not skipped, still skip what .gitignore excludes
 ";
 

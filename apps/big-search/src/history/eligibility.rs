@@ -114,17 +114,17 @@ fn scope() -> &'static crate::scan::Scope {
     SCOPE.get_or_init(crate::scan::Scope::compile)
 }
 
-/// The nearest folder above `path` that holds a `.git`: a directory in an
-/// ordinary clone, a file in a linked worktree or a submodule.
+/// The nearest folder above `path` that is the root of a work tree
+/// ([`crate::scan::work_tree_root`]).
 ///
-/// The walk stops at the catalogued folder that owns `path`: a `.git` above it
-/// belongs to something the person did not ask to have searched.
-pub(super) fn git_work_tree(path: &Path) -> Option<&Path> {
+/// The walk stops at the catalogued folder that owns `path`: a repository
+/// above it belongs to something the person did not ask to have searched.
+pub(super) fn work_tree(path: &Path) -> Option<&Path> {
     let top = crate::settings::sources()
         .owner(path)
         .map(|source| source.path.as_path());
     for dir in path.ancestors().skip(1) {
-        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+        if crate::scan::work_tree_root(dir).is_some() {
             return Some(dir);
         }
         if Some(dir) == top {
@@ -139,7 +139,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn git_work_trees_and_ignores_found() {
+    fn work_trees_and_ignores_found() {
         let root = crate::test_env::scratch_dir("bs-history-git");
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join(".git/info")).unwrap();
@@ -151,15 +151,22 @@ mod tests {
         std::fs::create_dir_all(repo.join("sub")).unwrap();
         std::fs::write(repo.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
 
+        // A Jujutsu repository with no `.git` is one too.
+        std::fs::create_dir_all(root.join("jj/.jj")).unwrap();
+
         assert_eq!(
-            git_work_tree(&repo.join("docs/drafts/a.md")),
+            work_tree(&repo.join("docs/drafts/a.md")),
             Some(repo.as_path())
         );
         assert_eq!(
-            git_work_tree(&repo.join("sub/b.md")),
+            work_tree(&repo.join("sub/b.md")),
             Some(repo.join("sub").as_path())
         );
-        assert_eq!(git_work_tree(&root.join("loose.md")), None);
+        assert_eq!(
+            work_tree(&root.join("jj/c.md")),
+            Some(root.join("jj").as_path())
+        );
+        assert_eq!(work_tree(&root.join("loose.md")), None);
 
         let ignored = |relative: &str| crate::scan::repo_ignored(&repo.join(relative), false);
         assert!(ignored("build/report.md"));

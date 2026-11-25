@@ -10,6 +10,7 @@ use std::sync::PoisonError;
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
 mod scope;
+pub(crate) use scope::work_tree_root;
 pub use scope::{Scope, repo_ignored, seed_user_ignore, write_effective_ignore};
 
 const STATE_FLUSH_ROWS: usize = 2048;

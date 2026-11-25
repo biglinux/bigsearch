@@ -162,9 +162,10 @@ pub struct FileHistory {
     /// Most disk the whole history may hold, in GiB. `0` means "decide by the
     /// size of the disk": the smaller of a twentieth of it and 10 GiB.
     pub max_total_gib: u64,
-    /// Keep nothing inside a folder tree that holds a `.git`: git already keeps
-    /// every committed state there, and a branch switch rewrites thousands of
-    /// files that would each become a version.
+    /// Keep nothing inside a work tree, a folder tree that holds a `.git` or a
+    /// Jujutsu `.jj`: its history already keeps every committed state there,
+    /// and a branch switch rewrites thousands of files that would each become
+    /// a version.
     pub skip_git_repositories: bool,
     /// When git repositories are not skipped, still skip what their
     /// `.gitignore` files exclude, such as build output and generated files.

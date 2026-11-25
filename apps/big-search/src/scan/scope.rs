@@ -365,11 +365,8 @@ impl FolderFiles {
     /// The files that speak for the entries of `dir`, a folder these speak
     /// for; `None` when its own add nothing.
     fn enter(&self, dir: &Path) -> Option<Self> {
-        let dot_git = std::fs::symlink_metadata(dir.join(".git")).ok();
-        // A Jujutsu repository not colocated with git is a work tree too: its
-        // `.gitignore` files and the global excludes apply, with no exclude file.
-        let work_tree_root =
-            dot_git.is_some() || std::fs::symlink_metadata(dir.join(".jj")).is_ok();
+        let root = work_tree_root(dir);
+        let work_tree_root = root.is_some();
         let dot_ignore = read_ignore_file(dir, &dir.join(".ignore"));
         let gitignore = if work_tree_root || self.work_tree_len.is_some() {
             read_ignore_file(dir, &dir.join(".gitignore"))
@@ -387,8 +384,8 @@ impl FolderFiles {
             // A work tree inside another (a submodule, a nested clone) has
             // only its own git rules.
             files.gitignores.clear();
-            if let Some(dot_git) = dot_git {
-                let exclude = git_common_dir(dir, dot_git.is_file()).join("info/exclude");
+            if let Some(WorkTreeRoot::Git { dot_git_is_file }) = root {
+                let exclude = git_common_dir(dir, dot_git_is_file).join("info/exclude");
                 files.gitignores.extend(read_ignore_file(dir, &exclude));
             }
             files.work_tree_len = Some(below_offset(dir));
@@ -447,6 +444,29 @@ fn read_ignore_file(dir: &Path, file: &Path) -> Option<Arc<Gitignore>> {
 fn global_excludes() -> &'static Gitignore {
     static GLOBAL: OnceLock<Gitignore> = OnceLock::new();
     GLOBAL.get_or_init(|| GitignoreBuilder::new(".").build_global().0)
+}
+
+/// What makes a folder the root of a work tree.
+#[derive(Clone, Copy)]
+pub(crate) enum WorkTreeRoot {
+    /// A `.git` folder in an ordinary clone, a `.git` file in a linked
+    /// worktree or a submodule.
+    Git { dot_git_is_file: bool },
+    /// A Jujutsu repository not colocated with git: its `.gitignore` files and
+    /// the global excludes apply, with no exclude file.
+    Jujutsu,
+}
+
+/// Whether `dir` is the root of a work tree, and of which kind.
+pub(crate) fn work_tree_root(dir: &Path) -> Option<WorkTreeRoot> {
+    if let Ok(dot_git) = std::fs::symlink_metadata(dir.join(".git")) {
+        return Some(WorkTreeRoot::Git {
+            dot_git_is_file: dot_git.is_file(),
+        });
+    }
+    std::fs::symlink_metadata(dir.join(".jj"))
+        .is_ok()
+        .then_some(WorkTreeRoot::Jujutsu)
 }
 
 /// Where a work tree's repository keeps the files its worktrees share:
