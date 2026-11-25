@@ -629,6 +629,29 @@ mod tests {
         assert!(!plain);
     }
 
+    /// A Jujutsu repository with no `.git` is a work tree, as the `ignore`
+    /// crate's walker treats it.
+    #[test]
+    fn jj_repository_reads_its_gitignore() {
+        let base = scratch_dir("lsearch-scan-jj");
+        let repo = base.join("jjrepo");
+        std::fs::create_dir_all(repo.join(".jj")).unwrap();
+        std::fs::create_dir_all(repo.join("generated")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "generated/\n").unwrap();
+        std::fs::write(repo.join("generated/out.txt"), b"x").unwrap();
+        std::fs::write(repo.join("kept.txt"), b"x").unwrap();
+
+        let generated = repo_ignored(&repo.join("generated"), true);
+        let inside = repo_ignored(&repo.join("generated/out.txt"), false);
+        let kept = repo_ignored(&repo.join("kept.txt"), false);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            generated && inside,
+            "the jj repository's .gitignore was skipped"
+        );
+        assert!(!kept);
+    }
+
     #[test]
     fn repo_ignored_directory_is_skipped() {
         let base = scratch_dir("lsearch-scan-repo-ignore");

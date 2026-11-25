@@ -296,9 +296,10 @@ what another leaves out. Hidden entries are skipped; the effective ignore file,
 the built-in defaults followed by the user's `~/.config/big-search/ignore` so
 the user's lines win, comes first, so no folder's file brings back what it
 leaves out; then the first ignore file with an opinion decides: the `.ignore`
-files of the folders above the entry, nearest first, then, inside a work tree,
-its `.gitignore` files, its `info/exclude` and the global excludes file, which
-git anchors at the root of the work tree. The effective rules are anchored at
+files of the folders above the entry, nearest first, then, inside a work tree
+(a folder holding `.git`, or `.jj` for a Jujutsu repository), its `.gitignore`
+files, its `info/exclude` and the global excludes file, which git anchors at
+the root of the work tree. The effective rules are anchored at
 the source holding each entry, so a source nested in another reads
 `/Archive/` as its own `Archive`. A source itself is always in scope and
 nothing above it is tested: a `.gitignore` above a source speaks only for what

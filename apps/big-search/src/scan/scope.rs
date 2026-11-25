@@ -366,25 +366,31 @@ impl FolderFiles {
     /// for; `None` when its own add nothing.
     fn enter(&self, dir: &Path) -> Option<Self> {
         let dot_git = std::fs::symlink_metadata(dir.join(".git")).ok();
+        // A Jujutsu repository not colocated with git is a work tree too: its
+        // `.gitignore` files and the global excludes apply, with no exclude file.
+        let work_tree_root =
+            dot_git.is_some() || std::fs::symlink_metadata(dir.join(".jj")).is_ok();
         let dot_ignore = read_ignore_file(dir, &dir.join(".ignore"));
-        let gitignore = if dot_git.is_some() || self.work_tree_len.is_some() {
+        let gitignore = if work_tree_root || self.work_tree_len.is_some() {
             read_ignore_file(dir, &dir.join(".gitignore"))
         } else {
             None
         };
-        if dot_git.is_none() && dot_ignore.is_none() && gitignore.is_none() {
+        if !work_tree_root && dot_ignore.is_none() && gitignore.is_none() {
             return None;
         }
         let mut files = self.clone();
         if let Some(rules) = dot_ignore {
             files.dot_ignores.insert(0, rules);
         }
-        if let Some(dot_git) = dot_git {
+        if work_tree_root {
             // A work tree inside another (a submodule, a nested clone) has
             // only its own git rules.
             files.gitignores.clear();
-            let exclude = git_common_dir(dir, dot_git.is_file()).join("info/exclude");
-            files.gitignores.extend(read_ignore_file(dir, &exclude));
+            if let Some(dot_git) = dot_git {
+                let exclude = git_common_dir(dir, dot_git.is_file()).join("info/exclude");
+                files.gitignores.extend(read_ignore_file(dir, &exclude));
+            }
             files.work_tree_len = Some(below_offset(dir));
         }
         if let Some(rules) = gitignore {
