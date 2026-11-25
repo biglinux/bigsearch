@@ -2,8 +2,8 @@
 //! up by path, and the names of the objects versions are copied to.
 //!
 //! `files` holds one row per document, keyed by its UTF-8 path, or by none
-//! while its document is not known to be anywhere; `versions` holds one row
-//! per kept copy, pointing at an object under `objects/`.
+//! once parked; `versions` holds one row per kept copy, pointing at an object
+//! under `objects/`.
 
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
@@ -156,10 +156,10 @@ fn rebuild_files(conn: &Connection, filesystems: &[(i64, i64)]) -> Result<()> {
     Ok(())
 }
 
-/// Take `file_id`'s key away, keeping it as the place the row was parked
-/// from, and count its document missing from now, if it was not already: it
-/// is not known to be anywhere until a file with its identity claims it
-/// ([`rows_of_file`]) or the missing sweep expires it.
+/// Take `file_id`'s key away for good, keeping it as the place the row was
+/// parked from, and count its document missing from now, if it was not
+/// already: a forget through that place erases it, or the missing sweep
+/// expires it.
 pub(super) fn park(conn: &Connection, file_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE files SET parked_from = current_path, current_path = NULL,
@@ -187,7 +187,9 @@ pub(super) fn parked_from(conn: &Connection, keys: &[&Path]) -> Result<Vec<i64>>
 /// When `to` has a row of its own (`mv a.md b.md` over a document with
 /// history), its versions join `from`'s: they hold what the rename overwrote.
 /// Left alone, the unique path would refuse the move, and `from`'s row would
-/// expire with every version in it.
+/// expire with every version in it. A row whose document was found gone is
+/// parked instead: at `to` it held nothing the rename overwrote, and at
+/// `from` it moves only with its own file, not another one that arrived there.
 ///
 /// # Errors
 ///
@@ -199,17 +201,28 @@ pub(super) fn follow_renames<'a>(
 ) -> Result<()> {
     let transaction = conn.unchecked_transaction()?;
     for (from, to) in moves {
-        let Some(from_id) = file_id_for_path(conn, from)? else {
+        let Some(moved) = kept_at(conn, from)? else {
             continue;
         };
+        if moved.missing_since.is_some()
+            && !std::fs::symlink_metadata(to).is_ok_and(|metadata| moved.records(&metadata))
+        {
+            park(conn, moved.id)?;
+            continue;
+        }
+        let from_id = moved.id;
         let Some(key) = to.to_str() else {
             anyhow::bail!(
                 "{} is not UTF-8, which versions are kept under",
                 to.display()
             );
         };
-        if let Some(to_id) = file_id_for_path(conn, to)? {
-            join_rows(conn, from_id, &[to_id])?;
+        match kept_at(conn, to)? {
+            Some(overwritten) if overwritten.missing_since.is_some() => {
+                park(conn, overwritten.id)?;
+            }
+            Some(overwritten) => join_rows(conn, from_id, &[overwritten.id])?,
+            None => {}
         }
         conn.execute(
             "UPDATE files SET current_path = ?2, missing_since = NULL WHERE id = ?1",
@@ -249,21 +262,73 @@ pub(super) fn rows_under(conn: &Connection, folder: &Path) -> Result<Vec<(i64, P
     .map_err(Into::into)
 }
 
-/// The rows recorded for the file with this `(fs, ino, born)`, with their
-/// keys (none for a parked row), newest first. A row or a file without a
-/// birth time matches on `(fs, ino)` alone.
+/// The rows recorded for the file with this `(fs, ino, born)`, parked ones
+/// included. A row or a file without a birth time matches on `(fs, ino)` alone.
 pub(super) fn rows_of_file(
     conn: &Connection,
     (fs, ino, born): (i64, i64, Option<i64>),
-) -> Result<Vec<(i64, Option<String>)>> {
+) -> Result<Vec<i64>> {
     conn.prepare(
-        "SELECT id, current_path FROM files
-          WHERE fs = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)
-          ORDER BY created_at DESC",
+        "SELECT id FROM files
+          WHERE fs = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)",
     )?
-    .query_map(params![fs, ino, born], |row| Ok((row.get(0)?, row.get(1)?)))?
+    .query_map(params![fs, ino, born], |row| row.get(0))?
     .collect::<rusqlite::Result<_>>()
     .map_err(Into::into)
+}
+
+/// A row as the decision about the file at its key needs it.
+#[derive(PartialEq, Eq)]
+pub(super) struct Kept {
+    pub(super) id: i64,
+    ino: Option<i64>,
+    born: Option<i64>,
+    /// When the missing sweep found no file at the key, cleared by a save.
+    pub(super) missing_since: Option<i64>,
+}
+
+impl Kept {
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            ino: row.get("ino")?,
+            born: row.get("born")?,
+            missing_since: row.get("missing_since")?,
+        })
+    }
+
+    /// Whether the row records this file. At one path the inode number and
+    /// birth time tell files apart without the filesystem, whose `f_fsid` is
+    /// a device number on XFS and may change across boots. A row or a file
+    /// without a birth time matches on the inode number alone.
+    pub(super) fn records(&self, metadata: &std::fs::Metadata) -> bool {
+        let born = super::born(metadata);
+        self.ino == Some(metadata.ino().cast_signed())
+            && (self.born.is_none() || born.is_none() || self.born == born)
+    }
+}
+
+/// The row kept under `path`, if any; none for a path that is not UTF-8,
+/// as [`file_id_for_path`] explains.
+pub(super) fn kept_at(conn: &Connection, path: &Path) -> Result<Option<Kept>> {
+    let Some(key) = path.to_str() else {
+        return Ok(None);
+    };
+    Ok(conn
+        .query_row(
+            "SELECT id, ino, born, missing_since FROM files WHERE current_path = ?1",
+            params![key],
+            Kept::read,
+        )
+        .optional()?)
+}
+
+/// Every row with its key, none for a parked one.
+pub(super) fn all_rows(conn: &Connection) -> Result<Vec<(Option<String>, Kept)>> {
+    conn.prepare("SELECT id, current_path, ino, born, missing_since FROM files")?
+        .query_map([], |row| Ok((row.get("current_path")?, Kept::read(row)?)))?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(Into::into)
 }
 
 /// The row for `path`. Rows are keyed by UTF-8 text, so a path that is not

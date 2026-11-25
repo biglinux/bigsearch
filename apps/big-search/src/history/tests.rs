@@ -13,6 +13,7 @@ pub(super) fn store_with(conn: Connection, dir: &Path) -> History {
         budget_unchecked: false,
         skip_git_repositories: false,
         respect_gitignore: false,
+        started_at: 0,
     }
 }
 
@@ -58,37 +59,95 @@ fn rename_over_a_kept_document() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A new file given a deleted document's inode number starts its own
-/// history; a renamed document keeps its own.
+/// A row whose document was found gone takes part in no rename: one at the
+/// destination held nothing the rename overwrote, and one at the source
+/// moves only with its own file. Both are parked.
 #[test]
-fn reused_inode_starts_a_new_history() {
-    let dir = crate::test_env::scratch_dir("bs-history-inode");
-    let store = store_with(open_store(&dir.join("history.sqlite")).unwrap(), &dir);
-    let conn = store.conn.as_ref().unwrap();
+fn rename_with_a_missing_document() {
+    let dir = crate::test_env::scratch_dir("bs-history-rename-missing");
+    let conn = open_store(&dir.join("history.sqlite")).unwrap();
+    for (id, path, missing_since) in [
+        (1, "/d/a.md", None),
+        (2, "/d/b.md", Some(5)),
+        (3, "/d/c.md", Some(5)),
+    ] {
+        conn.execute(
+            "INSERT INTO files(id, current_path, created_at, missing_since) VALUES (?1, ?2, 0, ?3)",
+            params![id, path, missing_since],
+        )
+        .unwrap();
+    }
+    follow_renames(
+        &conn,
+        [
+            (Path::new("/d/a.md"), Path::new("/d/b.md")),
+            (Path::new("/d/c.md"), Path::new("/d/e.md")),
+        ],
+    )
+    .unwrap();
+    let rows: Vec<(i64, Option<String>, Option<String>)> = conn
+        .prepare("SELECT id, current_path, parked_from FROM files ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (1, Some("/d/b.md".to_string()), None),
+            (2, None, Some("/d/b.md".to_string())),
+            (3, None, Some("/d/c.md".to_string())),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The row at a saved document's path is its own when it records the file,
+/// or another file the service heard arrive (an editor's save); it is parked
+/// for one that arrived unheard: where its document was found gone, or born
+/// before the run began.
+#[test]
+fn path_row_kept_or_parked() {
+    let dir = crate::test_env::scratch_dir("bs-history-path-row");
+    let mut store = store_with(open_store(&dir.join("history.sqlite")).unwrap(), &dir);
     let notes = dir.join("notes.odt");
     std::fs::write(&notes, b"new").unwrap();
     let metadata = std::fs::metadata(&notes).unwrap();
-    let born = metadata
-        .created()
-        .unwrap()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as i64;
-    let (fs, ino, _) = identity(&notes, &metadata).unwrap();
-    let deleted = |born: i64| {
+    let (fs, ino, born) = identity(&notes, &metadata).unwrap();
+    let born = born.expect("this filesystem records birth times");
+    // (recorded inode, missing since, run started at, the row stays the path's)
+    for (row_ino, missing_since, started_at, kept) in [
+        (ino, None, 0, true),
+        (ino, Some(5), i64::MAX, true),
+        (ino + 1, None, 0, true),
+        (ino + 1, Some(5), 0, false),
+        (ino + 1, None, born + 1, false),
+    ] {
+        let conn = store.conn.as_ref().unwrap();
         conn.execute("DELETE FROM files", []).unwrap();
         conn.execute(
-            "INSERT INTO files(id, current_path, fs, ino, born, created_at)
-             VALUES (7, '/gone/report.odt', ?1, ?2, ?3, 0)",
-            params![fs, ino, born],
+            "INSERT INTO files(id, current_path, fs, ino, born, created_at, missing_since)
+             VALUES (7, ?1, ?2, ?3, ?4, 0, ?5)",
+            params![notes.to_str().unwrap(), fs, row_ino, born, missing_since],
         )
         .unwrap();
-    };
-
-    deleted(born - 1);
-    assert_ne!(store.upsert_file(&notes, &metadata).unwrap(), 7);
-    deleted(born);
-    assert_eq!(store.upsert_file(&notes, &metadata).unwrap(), 7);
+        store.started_at = started_at;
+        let id = store.upsert_file(&notes, &metadata).unwrap();
+        let conn = store.conn.as_ref().unwrap();
+        let parked_from: Option<String> = conn
+            .query_row("SELECT parked_from FROM files WHERE id = 7", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let case = format!("{row_ino} {missing_since:?} {started_at}");
+        assert_eq!(id == 7, kept, "{case}");
+        assert_eq!(
+            parked_from.is_none(),
+            kept,
+            "{case}: parked from {parked_from:?}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -270,82 +329,27 @@ fn kept_under(conn: &Connection, path: &Path, id: i64, file: &Path) {
     .unwrap();
 }
 
-/// Rows kept under a spelling that leads through a symlinked folder move to
-/// where it leads when they were kept for the file there, joining its own
-/// rows; they stay when nothing is there.
+/// A restore through a spelling with versions kept under it is refused,
+/// naming both paths, when it leads to a file; with no file there, or no
+/// versions under it, it proceeds. The rows stay where they are.
 #[test]
-fn spelling_adopted_by_identity() {
-    let (dir, store, real, alias) = alias_fixture("bs-history-adopt");
+fn restore_through_kept_spelling() {
+    let (dir, store, real, alias) = alias_fixture("bs-history-restore-spelling");
     let conn = store.conn.as_ref().unwrap();
     kept_under(conn, &alias, 1, &real);
-    kept_under(conn, &real, 2, &real);
-    store.adopt_spelling(&alias, &real).unwrap();
-    let real_key = real.to_str().unwrap().to_string();
-    assert_eq!(
-        version_owners(conn),
-        [
-            (real_key.clone(), "object-1".to_string()),
-            (real_key, "object-2".to_string()),
-        ]
-    );
-
-    let missing = dir.join("alias/missing.txt");
-    kept_under(conn, &missing, 3, &real);
-    store
-        .adopt_spelling(&missing, &dir.join("real/missing.txt"))
-        .unwrap();
-    assert_eq!(file_id_for_path(conn, &missing).unwrap(), Some(3));
-}
-
-/// After an editor's save gave the file there a new inode, nothing tells it
-/// from another file: the restore is refused naming both paths, and the rows
-/// stay.
-#[test]
-fn replaced_file_spelling_refused() {
-    let (_dir, store, real, alias) = alias_fixture("bs-history-adopt-saved");
-    let conn = store.conn.as_ref().unwrap();
-    kept_under(conn, &alias, 1, &real);
-    let saved = real.with_added_extension("tmp");
-    std::fs::write(&saved, "saved by an editor").unwrap();
-    std::fs::rename(&saved, &real).unwrap();
-
-    let refusal = store.adopt_spelling(&alias, &real).unwrap_err().to_string();
+    let refusal = store
+        .check_restore_through(&alias, &real)
+        .unwrap_err()
+        .to_string();
     let named = format!("{} leads to {} now", alias.display(), real.display());
     assert!(refusal.contains(&named), "{refusal}");
-    assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
-}
-
-/// Each part of the recorded identity decides: another filesystem or another
-/// birth time is another file, and a row without a birth time matches on
-/// `(fs, ino)` alone.
-#[test]
-fn adoption_checks_each_identity_part() {
-    let (_dir, store, real, alias) = alias_fixture("bs-history-adopt-parts");
-    let conn = store.conn.as_ref().unwrap();
-    let (fs, ino, born) = identity(&real, &std::fs::symlink_metadata(&real).unwrap()).unwrap();
-    let born = born.expect("this filesystem records birth times");
-    for (row_fs, row_born, adopted) in [
-        (fs + 1, Some(born), false),
-        (fs, Some(born + 1), false),
-        (fs, None, true),
-    ] {
-        conn.execute("DELETE FROM versions", []).unwrap();
-        conn.execute("DELETE FROM files", []).unwrap();
-        conn.execute(
-            "INSERT INTO files(id, current_path, fs, ino, born, created_at)
-             VALUES (1, ?1, ?2, ?3, ?4, 0)",
-            params![alias.to_str().unwrap(), row_fs, ino, row_born],
-        )
+    store
+        .check_restore_through(&alias, &dir.join("real/missing.txt"))
         .unwrap();
-        let outcome = store.adopt_spelling(&alias, &real);
-        assert_eq!(
-            outcome.is_ok(),
-            adopted,
-            "{row_fs} {row_born:?}: {outcome:?}"
-        );
-        let key = if adopted { &real } else { &alias };
-        assert_eq!(file_id_for_path(conn, key).unwrap(), Some(1));
-    }
+    store
+        .check_restore_through(&dir.join("alias/other.txt"), &real)
+        .unwrap();
+    assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
 }
 
 /// A copy of `real` into the object `name`, taken without the lock, as the
@@ -364,26 +368,31 @@ fn copy_in_flight(store: &mut History, dir: &Path, real: &Path, name: &str) -> V
     }
 }
 
-/// Guards: persisted data: a restore that moves the rows, or a forget, while
-/// the worker copies leaves the copy recorded under the row its path has, or
+/// Guards: persisted data: a rename onto the path, or a forget, while the
+/// worker copies leaves the copy recorded under the row its path has, or
 /// removed with nothing recorded.
 #[test]
 fn copy_follows_rows_changed_meanwhile() {
-    let (dir, mut store, real, alias) = alias_fixture("bs-history-copy-race");
+    let (dir, mut store, real, _) = alias_fixture("bs-history-copy-race");
+    let renamed = dir.join("real/b.txt");
     {
         let conn = store.conn.as_ref().unwrap();
-        kept_under(conn, &alias, 1, &real);
+        kept_under(conn, &renamed, 1, &real);
         kept_under(conn, &real, 2, &real);
     }
-    let version = copy_in_flight(&mut store, &dir, &real, "ff/adopted");
-    store.adopt_spelling(&alias, &real).unwrap();
+    let version = copy_in_flight(&mut store, &dir, &real, "ff/renamed");
+    follow_renames(
+        store.conn.as_ref().unwrap(),
+        [(renamed.as_path(), real.as_path())],
+    )
+    .unwrap();
     assert!(store.finish_version(version, Ok(())).unwrap());
     let owner: i64 = store
         .conn
         .as_ref()
         .unwrap()
         .query_row(
-            "SELECT file_id FROM versions WHERE object = 'ff/adopted'",
+            "SELECT file_id FROM versions WHERE object = 'ff/renamed'",
             [],
             |row| row.get(0),
         )
@@ -436,30 +445,9 @@ fn row_ids(conn: &Connection) -> Vec<i64> {
         .collect()
 }
 
-/// Guards: persisted data: a row kept under a path through a folder since
-/// replaced by a link to where the folder went moves to the file's real path,
-/// as a row whose path is gone does; a hard link at a real path keeps its own.
-#[test]
-fn upsert_takes_rows_the_file_left() {
-    let (dir, store, real, alias) = alias_fixture("bs-history-upsert-left");
-    let conn = store.conn.as_ref().unwrap();
-    kept_under(conn, &alias, 1, &real);
-    kept_under(conn, &dir.join("gone/a.txt"), 2, &real);
-    let metadata = std::fs::symlink_metadata(&real).unwrap();
-    assert_eq!(store.upsert_file(&real, &metadata).unwrap(), 1);
-    assert_eq!(row_ids(conn), [1]);
-    assert_eq!(file_id_for_path(conn, &real).unwrap(), Some(1));
-    assert_eq!(version_owners(conn).len(), 2);
-
-    let hard_link = dir.join("real/b.txt");
-    std::fs::hard_link(&real, &hard_link).unwrap();
-    let id = store.upsert_file(&hard_link, &metadata).unwrap();
-    assert_eq!(row_ids(conn), [1, id]);
-}
-
-/// Guards: privacy action: forget erases the rows listed for the spelling
-/// and every row of the file the path leads to, except when the listed rows
-/// are another file's kept under another path: then only those.
+/// Guards: privacy action: forget erases every row seen through the path:
+/// the rows kept under or parked from each spelling, and every row recorded
+/// for the file the path leads to, whoever they were kept for.
 #[test]
 fn forget_reaches_the_file_rows() {
     let (dir, mut store, real, alias) = alias_fixture("bs-history-forget-rows");
@@ -477,8 +465,12 @@ fn forget_reaches_the_file_rows() {
         store.forget(spellings, Some(&real)).unwrap();
         row_ids(store.conn.as_ref().unwrap())
     };
-    let other_at_alias = [(alias.as_path(), 1, other.as_path()), (&real, 2, &real)];
-    assert_eq!(left_after(&other_at_alias, &[&alias, &real]), [2]);
+    let other_at_alias = [
+        (alias.as_path(), 1, other.as_path()),
+        (&real, 2, &real),
+        (&other, 3, &other),
+    ];
+    assert_eq!(left_after(&other_at_alias, &[&alias, &real]), [3]);
     let moved_at_alias = [(alias.as_path(), 1, real.as_path()), (&real, 2, &real)];
     assert_eq!(
         left_after(&moved_at_alias, &[&alias, &real]),
@@ -486,23 +478,34 @@ fn forget_reaches_the_file_rows() {
     );
     let stale_at_real = [(real.as_path(), 1, other.as_path()), (&elsewhere, 2, &real)];
     assert_eq!(left_after(&stale_at_real, &[&real]), Vec::<i64>::new());
+    // Parked from where the path leads, for another file.
+    let conn = store.conn.as_ref().unwrap();
+    conn.execute_batch("DELETE FROM versions; DELETE FROM files;")
+        .unwrap();
+    kept_under(conn, &real, 1, &other);
+    park(conn, 1).unwrap();
+    store.forget(&[&alias, &real], Some(&real)).unwrap();
+    assert_eq!(row_ids(store.conn.as_ref().unwrap()), Vec::<i64>::new());
 }
 
 /// Rows are never moved to a key that is not UTF-8: it would name no file.
 #[test]
-fn adoption_into_non_utf8_refused() {
+fn rename_into_non_utf8_refused() {
     use std::os::unix::ffi::OsStrExt;
-    let dir = crate::test_env::scratch_dir("bs-history-adopt-utf8");
-    let store = store_with(open_store(&dir.join("history.sqlite")).unwrap(), &dir);
-    let folder = dir.join(std::ffi::OsStr::from_bytes(b"Relat\xf3rios"));
-    std::fs::create_dir(&folder).unwrap();
-    std::os::unix::fs::symlink(&folder, dir.join("alias")).unwrap();
-    let (real, alias) = (folder.join("a.txt"), dir.join("alias/a.txt"));
-    std::fs::write(&real, "kept").unwrap();
-    let conn = store.conn.as_ref().unwrap();
-    kept_under(conn, &alias, 1, &real);
-    assert!(store.adopt_spelling(&alias, &real).is_err());
-    assert_eq!(file_id_for_path(conn, &alias).unwrap(), Some(1));
+    let dir = crate::test_env::scratch_dir("bs-history-rename-utf8");
+    let conn = open_store(&dir.join("history.sqlite")).unwrap();
+    conn.execute(
+        "INSERT INTO files(id, current_path, created_at) VALUES (1, '/d/a.md', 0)",
+        [],
+    )
+    .unwrap();
+    let latin1 = Path::new(std::ffi::OsStr::from_bytes(b"/d/Relat\xf3rios.md"));
+    assert!(follow_renames(&conn, [(Path::new("/d/a.md"), latin1)]).is_err());
+    assert_eq!(
+        file_id_for_path(&conn, Path::new("/d/a.md")).unwrap(),
+        Some(1)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The store as it was created while rows recorded `st_dev` and every row

@@ -177,6 +177,7 @@ pub fn run(
 
     let check_sources_at = matches!(scope.dirs, StartDirs::Saved(..))
         .then(|| Instant::now() + saved_start_check_delay());
+    let history_tx = spawn_history_worker(&history);
     let (mut watches, queued, overflowed) =
         start_inotify(tx, &runtime, scope.watch_list, scope.fingerprint)?;
     let catch_up = watch_initial_dirs(&mut watches, scope.roots, scope.dirs, scope.started);
@@ -190,7 +191,6 @@ pub fn run(
     )?;
     watches.record_run(scope.started)?;
     let origin_writer = open_origin_writer();
-    let history_tx = spawn_history_worker(&history);
 
     let mut content_backfill = ContentBackfill::new(runtime.pending_content.clone());
     content_backfill.request();
@@ -284,9 +284,16 @@ fn open_origin_writer() -> origin::OriginWriter {
 /// Separate on purpose: a version that cannot be written must never delay the
 /// search, and the store it writes to is the person's data rather than a
 /// cache this service can rebuild.
+///
+/// Called before any watch: what changed while the service was stopped is
+/// settled here before a change is heard, and the start's walk catches the
+/// rest.
 fn spawn_history_worker(
     history: &crate::history::SharedHistory,
 ) -> Sender<crate::history::HistoryEvent> {
+    if let Err(error) = crate::history::check_kept_paths(history) {
+        log::warn!("could not check the kept documents: {error:#}");
+    }
     let (history_tx, history_rx) = std::sync::mpsc::channel::<crate::history::HistoryEvent>();
     let history_store = history.clone();
     let spawned = std::thread::Builder::new()

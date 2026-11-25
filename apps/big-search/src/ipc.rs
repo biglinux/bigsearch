@@ -586,7 +586,7 @@ fn save_version_reply(
     let spelled = settings::normalized_client_path(Path::new(&request.path));
     history_reply(history, |store| {
         if let Some(spelled) = spelled.filter(|spelled| *spelled != path) {
-            store.adopt_spelling(&spelled, &path)?;
+            store.check_restore_through(&spelled, &path)?;
         }
         store
             .save_version(&path, crate::history::Reason::BeforeRestore)

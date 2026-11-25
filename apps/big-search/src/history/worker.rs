@@ -12,35 +12,50 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use super::disk::{clone_file, disk_capacity, low_disk_threshold, recovered_disk_target};
-use super::store::now_secs;
+use super::store::{Kept, all_rows, kept_at, now_secs, park};
 use super::{Reason, SharedHistory, Support, Unavailable};
 
 /// How long a file is kept in the catalogue after its path disappears.
 const MISSING_GRACE_SECONDS: i64 = 7 * 24 * 60 * 60;
 
-/// Forget documents whose file has been gone long enough, a parked row's
-/// (no key) included.
+/// Check every row against the file at its key: park one whose key holds a
+/// file born before this run began that the row does not record, or reaches
+/// its file through a folder replaced by a link (both arrived while nothing
+/// watched), count one whose file is gone missing, and forget those gone
+/// long enough, parked ones included. The watcher runs it before its first
+/// watch, so what changed while the service was stopped is settled before
+/// any change is heard; the worker, once an hour.
 ///
-/// The store is locked to read the catalogue and to write the outcome, not
-/// while the filesystem is asked about every document: the worker runs at idle
-/// priority, and a file manager's request for a version waits on the same lock.
-/// A row renamed or saved in between stops matching what was checked and is
-/// left for the next sweep.
-fn expire_missing(history: &SharedHistory) -> Result<()> {
-    let files: Vec<(i64, Option<String>, Option<i64>)> = {
+/// The store is locked to read the rows and to write the outcome, not while
+/// the filesystem is asked about every document: both callers run at low
+/// priority, and a file manager's request for a version waits on the same
+/// lock. A row renamed or saved in between stops matching what was checked
+/// and is left for the next sweep.
+///
+/// # Errors
+///
+/// Returns an error when the versions database cannot be read or written.
+pub fn check_kept_paths(history: &SharedHistory) -> Result<()> {
+    let (rows, started_at) = {
         let store = history.lock();
         let Some(conn) = &store.conn else {
             return Ok(());
         };
-        conn.prepare("SELECT id, current_path, missing_since FROM files")?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?
+        (all_rows(conn)?, store.started_at)
     };
-    let checked: Vec<_> = files
+    let mut real_folders: HashMap<PathBuf, bool> = HashMap::new();
+    let checked: Vec<_> = rows
         .into_iter()
-        .map(|(id, path, missing_since)| {
-            let exists = path.as_deref().is_some_and(|path| Path::new(path).exists());
-            (id, path, missing_since, exists)
+        .map(|(path, kept)| {
+            let found = path.as_deref().map(|path| {
+                let path = Path::new(path);
+                let unwatched = std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+                    super::born(&metadata).is_some_and(|born| born < started_at)
+                        && !(kept.records(&metadata) && is_real(path, &mut real_folders))
+                });
+                (path.exists(), unwatched)
+            });
+            (path, kept, found)
         })
         .collect();
 
@@ -50,12 +65,38 @@ fn expire_missing(history: &SharedHistory) -> Result<()> {
         return Ok(());
     };
     let mut expired = Vec::new();
-    for (id, path, missing_since, exists) in checked {
-        if note_presence(conn, id, path.as_deref(), missing_since, exists, now)? {
-            expired.push(id);
+    for (path, kept, found) in checked {
+        let (exists, unwatched) = found.unwrap_or((false, false));
+        if unwatched {
+            park_if_unchanged(conn, &kept, path.as_deref())?;
+        } else if note_presence(conn, &kept, path.as_deref(), exists, now)? {
+            expired.push(kept.id);
         }
     }
     store.erase_rows(conn, &expired)
+}
+
+/// Whether `path`'s folder is a real path, as its key was when kept:
+/// asked once per folder.
+fn is_real(path: &Path, real_folders: &mut HashMap<PathBuf, bool>) -> bool {
+    let Some(folder) = path.parent() else {
+        return false;
+    };
+    *real_folders
+        .entry(folder.to_path_buf())
+        .or_insert_with(|| std::fs::canonicalize(folder).is_ok_and(|real| real == folder))
+}
+
+/// Park the row checked as `kept` under `path`, if it is still that row.
+fn park_if_unchanged(conn: &rusqlite::Connection, kept: &Kept, path: Option<&str>) -> Result<()> {
+    let now_kept = match path {
+        Some(path) => kept_at(conn, Path::new(path))?,
+        None => None,
+    };
+    if now_kept.is_some_and(|now_kept| now_kept == *kept) {
+        park(conn, kept.id)?;
+    }
+    Ok(())
 }
 
 /// Record whether the file at `path` exists: a document back in place stops
@@ -63,13 +104,13 @@ fn expire_missing(history: &SharedHistory) -> Result<()> {
 /// grace has run out and the row is still the one that was checked.
 fn note_presence(
     conn: &rusqlite::Connection,
-    id: i64,
+    kept: &Kept,
     path: Option<&str>,
-    missing_since: Option<i64>,
     exists: bool,
     now: i64,
 ) -> Result<bool> {
-    match (exists, missing_since) {
+    let id = kept.id;
+    match (exists, kept.missing_since) {
         (true, Some(_)) => {
             conn.execute(
                 "UPDATE files SET missing_since = NULL WHERE id = ?1 AND current_path IS ?2",
@@ -384,12 +425,16 @@ fn next_event(
 /// Turn one watcher event into documents waiting for their version.
 fn queue_event(history: &SharedHistory, pending: &mut Pending, event: HistoryEvent) {
     match event {
-        HistoryEvent::Changed(path) => pending.note(path, QUIET_PERIOD),
+        HistoryEvent::Changed(path) => {
+            note_change(history, &path);
+            pending.note(path, QUIET_PERIOD);
+        }
         HistoryEvent::Renamed(from, to) => {
             let noted = history.lock().note_rename(&from, &to);
             if let Err(error) = noted {
                 log::debug!("could not follow a rename: {error:#}");
             }
+            note_change(history, &to);
             pending.note(to, QUIET_PERIOD);
         }
         // The pass that covers what no event could: the queue overflowed, or
@@ -402,6 +447,16 @@ fn queue_event(history: &SharedHistory, pending: &mut Pending, event: HistoryEve
                 pending.note(path, std::time::Duration::ZERO);
             }
         }
+    }
+}
+
+/// [`super::History::note_change`] at once, not when the version is due: a
+/// stop before then would leave the row recording a file the next start
+/// takes for one that arrived while nothing watched.
+fn note_change(history: &SharedHistory, path: &Path) {
+    let noted = history.lock().note_change(path);
+    if let Err(error) = noted {
+        log::debug!("could not note a change of {}: {error:#}", path.display());
     }
 }
 
@@ -456,14 +511,16 @@ fn keep_house(history: &SharedHistory, next_missing_sweep: &mut std::time::Insta
     }
     if std::time::Instant::now() >= *next_missing_sweep {
         *next_missing_sweep = std::time::Instant::now() + MISSING_SWEEP;
-        if let Err(error) = expire_missing(history) {
-            log::warn!("could not retire missing documents: {error:#}");
+        if let Err(error) = check_kept_paths(history) {
+            log::warn!("could not check the kept documents: {error:#}");
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+
     use super::*;
     use crate::history::store::open_store;
     use crate::history::tests::store_with;
@@ -497,7 +554,7 @@ mod tests {
             .unwrap();
         }
         let history = SharedHistory::new(store_with(conn, &dir));
-        expire_missing(&history).unwrap();
+        check_kept_paths(&history).unwrap();
 
         let store = history.lock();
         let rows: Vec<(i64, Option<i64>)> = store
@@ -517,6 +574,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Rows recording `real/own.odt`: at its key, at `real/other.odt`, at
+    /// `alias/own.odt` through a link to `real`, and at a key with no file.
+    fn rows_of_own(name: &str) -> (crate::test_env::ScratchDir, SharedHistory) {
+        let dir = crate::test_env::scratch_dir(name);
+        std::fs::create_dir(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+        let (own, other) = (dir.join("real/own.odt"), dir.join("real/other.odt"));
+        std::fs::write(&own, b"own").unwrap();
+        std::fs::write(&other, b"other").unwrap();
+        let metadata = std::fs::metadata(&own).unwrap();
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        for (id, key) in [
+            (1, own),
+            (2, other),
+            (3, dir.join("alias/own.odt")),
+            (4, dir.join("real/gone.odt")),
+        ] {
+            conn.execute(
+                "INSERT INTO files(id, current_path, ino, born, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 0)",
+                params![
+                    id,
+                    key.to_str().unwrap(),
+                    metadata.ino().cast_signed(),
+                    crate::history::born(&metadata)
+                ],
+            )
+            .unwrap();
+        }
+        let history = SharedHistory::new(store_with(conn, &dir));
+        (dir, history)
+    }
+
+    /// Each row as (id, parked, missing).
+    fn row_states(history: &SharedHistory) -> Vec<(i64, bool, bool)> {
+        history
+            .lock()
+            .conn
+            .as_ref()
+            .unwrap()
+            .prepare(
+                "SELECT id, parked_from IS NOT NULL, missing_since IS NOT NULL
+                   FROM files ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// After a start, a row is parked when its key holds a file born before
+    /// the run that it does not record, or reaches its file through a folder
+    /// replaced by a link; its own file keeps it, a gone one counts it missing.
+    #[test]
+    fn kept_paths_checked_after_start() {
+        let (dir, history) = rows_of_own("bs-history-kept-after-start");
+        history.lock().started_at = i64::MAX;
+        check_kept_paths(&history).unwrap();
+        assert_eq!(
+            row_states(&history),
+            [
+                (1, false, false),
+                (2, true, true),
+                (3, true, true),
+                (4, false, true)
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file born during the run is left to the change the watcher hears.
+    #[test]
+    fn kept_paths_born_during_run() {
+        let (dir, history) = rows_of_own("bs-history-kept-during-run");
+        check_kept_paths(&history).unwrap();
+        assert_eq!(
+            row_states(&history),
+            [
+                (1, false, false),
+                (2, false, false),
+                (3, false, false),
+                (4, false, true)
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A thread that panicked holding the store leaves it usable to the
     /// worker's next step and to every request.
     #[test]
@@ -531,7 +676,7 @@ mod tests {
         })
         .join();
         assert!(panicked.is_err());
-        expire_missing(&history).unwrap();
+        check_kept_paths(&history).unwrap();
         assert!(
             history
                 .lock()
@@ -555,7 +700,7 @@ mod tests {
         });
         let mut swept = false;
         run_step(|| {
-            expire_missing(&history).unwrap();
+            check_kept_paths(&history).unwrap();
             swept = true;
         });
         assert!(swept);

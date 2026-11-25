@@ -46,12 +46,12 @@ mod worker;
 
 pub(crate) use disk::{Refusal, clone_file};
 pub use eligibility::may_be_a_document;
-pub use worker::{HistoryEvent, Pending, run_worker};
+pub use worker::{HistoryEvent, Pending, check_kept_paths, run_worker};
 
 use disk::{disk_capacity, filesystem_id};
 use eligibility::{eligible_metadata, eligible_name, git_work_tree};
 use store::{
-    file_id_for_path, first_stored, follow_renames, is_live_session, join_rows, now_secs,
+    file_id_for_path, first_stored, follow_renames, is_live_session, kept_at, now_secs,
     object_name, open_store, park, parked_from, prepare_store, rows_of_file, rows_under,
 };
 
@@ -151,27 +151,29 @@ fn not_kept_error(why: &'static str) -> anyhow::Error {
 /// its inode number, and the birth time where the filesystem records one,
 /// since XFS hands a deleted document's inode number to the next new file.
 fn identity(path: &Path, metadata: &std::fs::Metadata) -> io::Result<(i64, i64, Option<i64>)> {
-    let born = metadata
-        .created()
-        .ok()
-        .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
-        .and_then(|since| i64::try_from(since.as_nanos()).ok());
     Ok((
         filesystem_id(path, metadata.dev())?,
         metadata.ino() as i64,
-        born,
+        born(metadata),
     ))
 }
 
-/// Whether `key` names the file with this identity as a real path: a key
-/// through a folder replaced by a link reaches it by way of another path.
-fn holds(key: &Path, file: (i64, i64, Option<i64>)) -> bool {
-    std::fs::symlink_metadata(key)
-        .and_then(|metadata| identity(key, &metadata))
-        .is_ok_and(|identity| identity == file)
-        && key
-            .parent()
-            .is_some_and(|folder| std::fs::canonicalize(folder).is_ok_and(|real| real == folder))
+/// A file's birth time in nanoseconds, where its filesystem records one.
+fn born(metadata: &std::fs::Metadata) -> Option<i64> {
+    metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
+        .and_then(|since| i64::try_from(since.as_nanos()).ok())
+}
+
+/// Now, in the nanoseconds [`born`] counts in.
+fn now_nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_nanos()).ok())
+        .unwrap_or(0)
 }
 
 /// The versions store.
@@ -194,6 +196,10 @@ pub struct History {
     budget_unchecked: bool,
     skip_git_repositories: bool,
     respect_gitignore: bool,
+    /// When this run of the service opened the store, in the nanoseconds
+    /// [`born`] counts in: a file born before it may have reached its path
+    /// while nothing watched.
+    started_at: i64,
 }
 
 impl History {
@@ -215,6 +221,7 @@ impl History {
             budget_unchecked: false,
             skip_git_repositories: settings.skip_git_repositories,
             respect_gitignore: settings.respect_gitignore,
+            started_at: now_nanos(),
         };
         let disabled = |reason| store(None, Support::Unavailable(reason), 0);
         if !settings.enabled {
@@ -295,12 +302,10 @@ impl History {
         Ok(())
     }
 
-    /// Forget the versions of one document, also from a store turned off.
-    /// The document is the first of `spellings` that has a stored row, and
-    /// with `file_at`, every row kept for the file there under another path
-    /// (its folder moved while the service was stopped), unless that stored
-    /// row is another file's kept under another path than `file_at`; with
-    /// each, the rows parked from its path.
+    /// Forget the versions of one document, also from a store turned off:
+    /// every row kept under one of `spellings` or parked from one of them or
+    /// from `file_at`, and every row recorded for the file at `file_at`. A
+    /// forget errs toward erasing: what is listed through any of them goes.
     ///
     /// # Errors
     ///
@@ -318,31 +323,18 @@ impl History {
                 &opened
             }
         };
-        let stored = first_stored(conn, spellings)?;
-        let mut file_ids: Vec<i64> = stored.iter().map(|(file_id, _)| *file_id).collect();
-        let mut displaced_from: Vec<&Path> = match stored {
-            Some((_, path)) => vec![path],
-            None => spellings.iter().map(AsRef::as_ref).collect(),
-        };
+        let paths: Vec<&Path> = spellings.iter().map(AsRef::as_ref).chain(file_at).collect();
+        let mut file_ids = parked_from(conn, &paths)?;
+        for path in &paths {
+            file_ids.extend(file_id_for_path(conn, path)?);
+        }
         if let Some(file_at) = file_at
             && let Ok(metadata) = std::fs::symlink_metadata(file_at)
         {
             let file = identity(file_at, &metadata)
                 .with_context(|| format!("read {}", file_at.display()))?;
-            let of_the_file: Vec<i64> = rows_of_file(conn, file)?
-                .into_iter()
-                .map(|(file_id, _)| file_id)
-                .collect();
-            // The row at `file_at` is its file's by path, whatever identity it
-            // recorded before an unwatched save.
-            let another_files = stored
-                .is_some_and(|(file_id, path)| path != file_at && !of_the_file.contains(&file_id));
-            if !another_files {
-                file_ids.extend(of_the_file);
-                displaced_from.push(file_at);
-            }
+            file_ids.extend(rows_of_file(conn, file)?);
         }
-        file_ids.extend(parked_from(conn, &displaced_from)?);
         file_ids.sort_unstable();
         file_ids.dedup();
         self.erase_rows(conn, &file_ids)
@@ -398,7 +390,7 @@ impl History {
         // rename(2) moves a folder only onto an empty one, and nothing lies
         // below a file, so every row below the destination is a document's
         // that left it, deleted or moved while the service was stopped:
-        // parked for its file to claim, never handed to one arriving there.
+        // parked, never handed to one arriving there.
         let parked = conn.unchecked_transaction()?;
         for (file_id, _) in rows_under(conn, to)? {
             park(conn, file_id)?;
@@ -412,56 +404,71 @@ impl History {
         )
     }
 
-    /// Settle the versions kept under `spelled`, a path that leads to
-    /// `resolved` now, before a restore through it.
-    ///
-    /// Kept for the file that is at `resolved` (its folder moved and a link
-    /// put in its place), they move to `resolved`, where the restore keeps its
-    /// undo. With nothing at `resolved` a restore loses nothing, and they stay
-    /// where they are.
+    /// Settle the row at `path` once the watcher heard a change there, before
+    /// its version is due: the file there now is the row's document saved
+    /// again, unless that document was found gone, so another file arrived
+    /// and the row is parked.
     ///
     /// # Errors
     ///
-    /// Returns an error when the file at `resolved` is not known to be the one
-    /// the versions were kept from: the restore that follows could write a
-    /// version of another document over it. Also when the versions database
-    /// cannot be read or changed.
-    pub fn adopt_spelling(&self, spelled: &Path, resolved: &Path) -> Result<()> {
+    /// Returns an error when the versions database cannot be written.
+    pub fn note_change(&self, path: &Path) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        let Some(file_id) = file_id_for_path(conn, spelled)? else {
+        let Some(kept) = kept_at(conn, path)? else {
             return Ok(());
         };
-        let metadata = match std::fs::symlink_metadata(resolved) {
-            Ok(metadata) => metadata,
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return Ok(());
+        };
+        if !metadata.is_file() || kept.records(&metadata) {
+            return Ok(());
+        }
+        if kept.missing_since.is_some() {
+            return park(conn, kept.id);
+        }
+        let (fs, ino, born) =
+            identity(path, &metadata).with_context(|| format!("read {}", path.display()))?;
+        conn.execute(
+            "UPDATE files SET fs = ?2, ino = ?3, born = ?4 WHERE id = ?1",
+            params![kept.id, fs, ino, born],
+        )?;
+        Ok(())
+    }
+
+    /// Refuse a restore through `spelled`, a path that leads to `resolved`
+    /// now, when versions are kept under `spelled` and a file is at
+    /// `resolved`: they were kept for what was at `spelled`, and the restore
+    /// that follows could write a version of one document over another.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming both paths when refused, and when the versions
+    /// database or `resolved` cannot be read.
+    pub fn check_restore_through(&self, spelled: &Path, resolved: &Path) -> Result<()> {
+        let Some(conn) = &self.conn else {
+            return Ok(());
+        };
+        if file_id_for_path(conn, spelled)?.is_none() {
+            return Ok(());
+        }
+        match std::fs::symlink_metadata(resolved) {
+            Ok(_) => anyhow::bail!(
+                "{} leads to {} now, and nothing shows it is the file its versions were kept from",
+                spelled.display(),
+                resolved.display()
+            ),
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
                 ) =>
             {
-                return Ok(());
+                Ok(())
             }
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", resolved.display()));
-            }
-        };
-        let file = identity(resolved, &metadata)
-            .with_context(|| format!("read {}", resolved.display()))?;
-        let same = rows_of_file(conn, file)?
-            .iter()
-            .any(|(id, _)| *id == file_id);
-        // A different inode is another document, or the same one after an
-        // editor's save replaced it: nothing recorded tells the two apart.
-        if !same {
-            anyhow::bail!(
-                "{} leads to {} now, and nothing shows it is the file its versions were kept from",
-                spelled.display(),
-                resolved.display()
-            );
+            Err(error) => Err(error).with_context(|| format!("read {}", resolved.display())),
         }
-        follow_renames(conn, [(spelled, resolved)])
     }
 
     /// The earlier versions of one document, newest first.
@@ -725,60 +732,46 @@ impl History {
             .collect()
     }
 
-    /// Find or create the catalogue row for this document, and join to it the
-    /// rows kept for the same file under keys that do not hold it as a real
-    /// path: the path's own row, unless it records another file and this one
-    /// has rows of its own (DESIGN.md, section 11).
+    /// Find or create the catalogue row for this document. The row at its
+    /// path is its own, as an editor's save is a new file at the same path,
+    /// unless it records another file that arrived unheard: where its document
+    /// was found gone, or born before this run began. That row is parked
+    /// (DESIGN.md, section 11).
     fn upsert_file(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<i64> {
         let conn = self.conn.as_ref().expect("checked by the caller");
         let key = path.to_string_lossy().into_owned();
-        let file = identity(path, metadata).with_context(|| format!("read {}", path.display()))?;
-        let (fs, ino, born) = file;
-        let of_the_file = rows_of_file(conn, file)?;
-        let left: Vec<i64> = of_the_file
-            .iter()
-            .filter(|(_, previous)| match previous {
-                Some(previous) => *previous != key && !holds(Path::new(previous), file),
-                None => true,
-            })
-            .map(|(id, _)| *id)
-            .collect();
+        let (fs, ino, born) =
+            identity(path, metadata).with_context(|| format!("read {}", path.display()))?;
         let transaction = conn.unchecked_transaction()?;
-        let mut at_path = file_id_for_path(conn, path)?;
-        if let Some(id) = at_path
-            && !left.is_empty()
-            && !of_the_file.iter().any(|(row, _)| *row == id)
-        {
-            park(conn, id)?;
-            at_path = None;
-        }
-        let id = if let Some(id) = at_path {
-            // Only on a change: an UPDATE that rewrites the same values still
-            // writes the page to the WAL, and every save passes through here.
-            conn.execute(
-                "UPDATE files SET fs = ?2, ino = ?3, born = ?4, missing_since = NULL
-                  WHERE id = ?1 AND (fs IS NOT ?2 OR ino IS NOT ?3 OR born IS NOT ?4
-                                     OR missing_since IS NOT NULL)",
-                params![id, fs, ino, born],
-            )?;
-            id
-        } else if let Some(&id) = left.first() {
-            conn.execute(
-                "UPDATE files SET current_path = ?2, born = ?3, missing_since = NULL,
-                                  parked_from = NULL
-                  WHERE id = ?1",
-                params![id, key, born],
-            )?;
-            id
-        } else {
-            conn.execute(
-                "INSERT INTO files(current_path, fs, ino, born, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![key, fs, ino, born, now_secs()],
-            )?;
-            conn.last_insert_rowid()
+        let id = match kept_at(conn, path)? {
+            Some(kept)
+                if kept.records(metadata)
+                    || (kept.missing_since.is_none()
+                        && born.is_none_or(|born| born >= self.started_at)) =>
+            {
+                // Only on a change: an UPDATE that rewrites the same values
+                // still writes the page to the WAL, and every save passes
+                // through here.
+                conn.execute(
+                    "UPDATE files SET fs = ?2, ino = ?3, born = ?4, missing_since = NULL
+                      WHERE id = ?1 AND (fs IS NOT ?2 OR ino IS NOT ?3 OR born IS NOT ?4
+                                         OR missing_since IS NOT NULL)",
+                    params![kept.id, fs, ino, born],
+                )?;
+                kept.id
+            }
+            arrived_over => {
+                if let Some(kept) = arrived_over {
+                    park(conn, kept.id)?;
+                }
+                conn.execute(
+                    "INSERT INTO files(current_path, fs, ino, born, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![key, fs, ino, born, now_secs()],
+                )?;
+                conn.last_insert_rowid()
+            }
         };
-        join_rows(conn, id, &left)?;
         transaction.commit()?;
         Ok(id)
     }

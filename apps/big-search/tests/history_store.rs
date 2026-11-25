@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use big_search::history::{History, Reason, Support, Unavailable};
+use big_search::history::{History, Reason, SharedHistory, Support, Unavailable, check_kept_paths};
 
 /// A scratch home on the same filesystem as the build directory.
 ///
@@ -50,23 +50,40 @@ fn versions_survive_replacing_saves() {
     let Some((mut history, document)) = open_with_a_first_version(&home) else {
         return;
     };
-    replacing_save_keeps_the_earlier_state(&mut history, &document);
-    let renamed = rename_carries_the_history(&mut history, &home, &document);
-    state_before_a_restore_survives(&mut history, &renamed);
-    hidden_rename_and_forget(&mut history, &home, &renamed);
-    folder_rename_carries_the_history(&mut history, &home);
-    forget_after_a_move_while_stopped(&mut history, &home);
-    folder_moved_onto_a_vanished_one(&mut history, &home);
-    folder_moved_onto_a_moved_ones_name(&mut history, &home);
+    replacing_save_keeps_the_earlier_state(&history, &document);
+    let renamed = rename_carries_the_history(&history, &home, &document);
+    state_before_a_restore_survives(&history, &renamed);
+    hidden_rename_and_forget(&history, &home, &renamed);
+    folder_rename_carries_the_history(&history, &home);
+    forget_after_a_move_while_stopped(&history, &home);
+    folder_moved_onto_a_vanished_one(&history, &home);
+    folder_moved_while_stopped(&mut history, &home);
     rename_chain_while_stopped(&mut history, &home);
+    created_where_a_document_left(&mut history, &home);
     parked_versions_forgotten(&mut history, &home);
-    linked_folder_never_kept(&mut history, &home);
-    non_documents_never_kept(&mut history, &home);
+    linked_folder_never_kept(&history, &home);
+    non_documents_never_kept(&history, &home);
+}
+
+/// The service started again: its store opened anew and the paths it keeps
+/// checked before anything it hears.
+fn restarted() -> SharedHistory {
+    let history = SharedHistory::new(History::open(&big_search_config::FileHistory::default()));
+    check_kept_paths(&history).expect("check the kept paths");
+    history
+}
+
+/// What the versions worker does with a save the watcher heard: the row at
+/// the path settled at once, the version kept once the file is quiet.
+fn heard_save(history: &SharedHistory, path: &Path) -> bool {
+    let mut store = history.lock();
+    store.note_change(path).expect("note the change");
+    store.save_version(path, Reason::Saved).expect("save")
 }
 
 /// Open the store in the scratch home and keep a first version of a document.
 /// `None` when this filesystem keeps no versions at all.
-fn open_with_a_first_version(home: &Path) -> Option<(History, PathBuf)> {
+fn open_with_a_first_version(home: &Path) -> Option<(SharedHistory, PathBuf)> {
     // SAFETY: this test binary is its own process and sets these once, before
     // anything reads them.
     unsafe {
@@ -78,15 +95,14 @@ fn open_with_a_first_version(home: &Path) -> Option<(History, PathBuf)> {
     let document = home.join("Documentos/contrato.odt");
     std::fs::write(&document, "versão A").expect("write the document");
 
-    let mut history = History::open(&big_search_config::FileHistory::default());
+    let history = SharedHistory::new(History::open(&big_search_config::FileHistory::default()));
     // `Saved`, not `Baseline`: a document created while the service is watching
     // earns its first version from the watcher, and the state it started from
     // has to survive thinning either way.
-    let kept = history
-        .save_version(&document, Reason::Saved)
-        .expect("save the first version");
+    let kept = heard_save(&history, &document);
 
-    if let Support::Unavailable(reason) = history.support() {
+    let support = history.lock().support();
+    if let Support::Unavailable(reason) = support {
         assert!(
             // A container's root is an overlay, which is also how a live
             // session looks; the service keeps no versions in either.
@@ -107,18 +123,19 @@ fn open_with_a_first_version(home: &Path) -> Option<(History, PathBuf)> {
     Some((history, document))
 }
 
-fn replacing_save_keeps_the_earlier_state(history: &mut History, document: &Path) {
+fn replacing_save_keeps_the_earlier_state(history: &SharedHistory, document: &Path) {
     write_by_replacing(document, "versão B");
     assert!(
-        history
-            .save_version(document, Reason::Saved)
-            .expect("save the second version"),
+        heard_save(history, document),
         "the save that replaced the document did not earn a version"
     );
 
     // One, not two: the state the document is in right now is not an *earlier*
     // version of it, so it is left out of the list.
-    let versions = history.versions(&[document]).expect("read the versions");
+    let versions = history
+        .lock()
+        .versions(&[document])
+        .expect("read the versions");
     assert_eq!(versions.len(), 1, "{versions:?}");
     let oldest = versions.last().expect("one earlier version");
     assert_eq!(
@@ -140,27 +157,24 @@ fn replacing_save_keeps_the_earlier_state(history: &mut History, document: &Path
 
     // Saving nothing new keeps nothing new.
     assert!(
-        !history
-            .save_version(document, Reason::Saved)
-            .expect("no change"),
+        !heard_save(history, document),
         "an unchanged document earned a second version"
     );
 }
 
-fn rename_carries_the_history(history: &mut History, home: &Path, document: &Path) -> PathBuf {
+fn rename_carries_the_history(history: &SharedHistory, home: &Path, document: &Path) -> PathBuf {
     // Renaming carries the history with it, instead of starting again.
     let renamed = home.join("Documentos/contrato assinado.odt");
     std::fs::rename(document, &renamed).expect("rename");
     // What the watcher does with a rename pair; the next save replaces the
     // inode, so this is the only link to the document's past.
     history
+        .lock()
         .note_rename(document, &renamed)
         .expect("note the rename");
     write_by_replacing(&renamed, "versão C");
-    history
-        .save_version(&renamed, Reason::Saved)
-        .expect("save after the rename");
-    let after_rename = history.versions(&[&renamed]).expect("versions");
+    heard_save(history, &renamed);
+    let after_rename = history.lock().versions(&[&renamed]).expect("versions");
     assert!(
         !after_rename.is_empty(),
         "the history did not follow the renamed document: {after_rename:?}"
@@ -177,24 +191,22 @@ fn rename_carries_the_history(history: &mut History, home: &Path, document: &Pat
     renamed
 }
 
-fn state_before_a_restore_survives(history: &mut History, renamed: &Path) {
+fn state_before_a_restore_survives(history: &SharedHistory, renamed: &Path) {
     // The state a document was in right before somebody went back to an older
     // version survives the next save, minutes later, in the same hour slot.
     // The dialog that asks promises exactly that.
     write_by_replacing(renamed, "versão D");
-    history
-        .save_version(renamed, Reason::Saved)
-        .expect("the watcher keeps this state first");
+    heard_save(history, renamed);
     // The file manager asks for the same state again, right before writing an
     // older version over it. Nothing new to clone, and that row is the undo.
     history
+        .lock()
         .save_version(renamed, Reason::BeforeRestore)
         .expect("keep the state before going back");
     write_by_replacing(renamed, "versão A");
-    history
-        .save_version(renamed, Reason::Saved)
-        .expect("save after going back");
+    heard_save(history, renamed);
     let undo = history
+        .lock()
         .versions(&[renamed])
         .expect("versions")
         .into_iter()
@@ -206,46 +218,58 @@ fn state_before_a_restore_survives(history: &mut History, renamed: &Path) {
     );
 }
 
-fn hidden_rename_and_forget(history: &mut History, home: &Path, renamed: &Path) {
+fn hidden_rename_and_forget(history: &SharedHistory, home: &Path, renamed: &Path) {
     // A file manager deletes by renaming to a hidden name, then unlinking. The
     // history must not follow, or a later "forget" could never find it.
     let on_its_way_out = home.join("Documentos/.bigfiles-delete-copy-9f2c.odt");
     history
+        .lock()
         .note_rename(renamed, &on_its_way_out)
         .expect("note the rename");
     assert!(
-        !history.versions(&[renamed]).expect("versions").is_empty(),
+        !history
+            .lock()
+            .versions(&[renamed])
+            .expect("versions")
+            .is_empty(),
         "the history followed the document out of reach"
     );
 
     // And forgetting takes the objects with it, not just the rows.
     let objects: Vec<PathBuf> = history
+        .lock()
         .versions(&[renamed])
         .expect("versions")
         .into_iter()
         .map(|version| version.object)
         .collect();
-    history.forget(&[renamed], None).expect("forget");
-    assert!(history.versions(&[renamed]).expect("versions").is_empty());
+    history.lock().forget(&[renamed], None).expect("forget");
+    assert!(
+        history
+            .lock()
+            .versions(&[renamed])
+            .expect("versions")
+            .is_empty()
+    );
     for object in objects {
         assert!(!object.exists(), "{} was left behind", object.display());
     }
 }
 
 /// A document with one earlier version listed, written at `path`.
-fn kept_twice(history: &mut History, path: &Path) {
+fn kept_twice(history: &SharedHistory, path: &Path) {
     std::fs::create_dir_all(path.parent().expect("a folder")).expect("create the folder");
     std::fs::write(path, "primeira").expect("write");
-    history.save_version(path, Reason::Saved).expect("save");
+    heard_save(history, path);
     write_by_replacing(path, "segunda");
-    history.save_version(path, Reason::Saved).expect("save");
-    assert_eq!(history.versions(&[path]).expect("versions").len(), 1);
+    heard_save(history, path);
+    assert_eq!(history.lock().versions(&[path]).expect("versions").len(), 1);
 }
 
 /// Guards: privacy action: a folder renamed while the service runs takes the
 /// history of every document in it, and of no folder that merely shares its
 /// name's start, so the request to forget it through its new path finds it.
-fn folder_rename_carries_the_history(history: &mut History, home: &Path) {
+fn folder_rename_carries_the_history(history: &SharedHistory, home: &Path) {
     let docs = home.join("Documentos");
     let inside = docs.join("proj/a.odt");
     let beside = [docs.join("proj-a/b.odt"), docs.join("proj2/b.odt")];
@@ -255,37 +279,72 @@ fn folder_rename_carries_the_history(history: &mut History, home: &Path) {
     std::fs::create_dir(docs.join("arquivo")).expect("create the archive");
     std::fs::rename(docs.join("proj"), docs.join("arquivo/proj")).expect("move the folder");
     history
+        .lock()
         .note_rename(&docs.join("proj"), &docs.join("arquivo/proj"))
         .expect("note the rename");
     std::os::unix::fs::symlink(docs.join("arquivo/proj"), docs.join("proj")).expect("link");
 
     let moved = docs.join("arquivo/proj/a.odt");
-    assert_eq!(history.versions(&[&moved]).expect("versions").len(), 1);
-    assert!(history.versions(&[&inside]).expect("versions").is_empty());
+    assert_eq!(
+        history.lock().versions(&[&moved]).expect("versions").len(),
+        1
+    );
+    assert!(
+        history
+            .lock()
+            .versions(&[&inside])
+            .expect("versions")
+            .is_empty()
+    );
     for document in &beside {
-        assert_eq!(history.versions(&[document]).expect("versions").len(), 1);
+        assert_eq!(
+            history
+                .lock()
+                .versions(&[document])
+                .expect("versions")
+                .len(),
+            1
+        );
     }
-    history.forget(&[&moved], Some(&moved)).expect("forget");
-    assert!(history.versions(&[&moved]).expect("versions").is_empty());
+    history
+        .lock()
+        .forget(&[&moved], Some(&moved))
+        .expect("forget");
+    assert!(
+        history
+            .lock()
+            .versions(&[&moved])
+            .expect("versions")
+            .is_empty()
+    );
 }
 
 /// Guards: privacy action: forgetting a document through its path erases the
 /// versions kept under the path it had before its folder moved while the
 /// service was stopped.
-fn forget_after_a_move_while_stopped(history: &mut History, home: &Path) {
+fn forget_after_a_move_while_stopped(history: &SharedHistory, home: &Path) {
     let docs = home.join("Documentos");
     let before = docs.join("pasta/c.odt");
     kept_twice(history, &before);
     std::fs::rename(docs.join("pasta"), docs.join("arquivo/pasta")).expect("move the folder");
     let now_at = docs.join("arquivo/pasta/c.odt");
-    history.forget(&[&now_at], Some(&now_at)).expect("forget");
-    assert!(history.versions(&[&before]).expect("versions").is_empty());
+    history
+        .lock()
+        .forget(&[&now_at], Some(&now_at))
+        .expect("forget");
+    assert!(
+        history
+            .lock()
+            .versions(&[&before])
+            .expect("versions")
+            .is_empty()
+    );
 }
 
 /// Guards: persisted data: `rm -r velha; mv nova velha` offers the deleted
 /// documents' versions neither as the moved one's nor as a new one's, and
 /// forgetting their paths erases them.
-fn folder_moved_onto_a_vanished_one(history: &mut History, home: &Path) {
+fn folder_moved_onto_a_vanished_one(history: &SharedHistory, home: &Path) {
     let docs = home.join("Documentos");
     let vanished = docs.join("velha/e.odt");
     let unmatched = docs.join("velha/f.odt");
@@ -298,50 +357,71 @@ fn folder_moved_onto_a_vanished_one(history: &mut History, home: &Path) {
     kept_twice(history, &docs.join("nova/e.odt"));
     std::fs::rename(docs.join("nova"), docs.join("velha")).expect("move the folder");
     history
+        .lock()
         .note_rename(&docs.join("nova"), &docs.join("velha"))
         .expect("note the rename");
-    assert_eq!(history.versions(&[&vanished]).expect("versions").len(), 1);
+    assert_eq!(
+        history
+            .lock()
+            .versions(&[&vanished])
+            .expect("versions")
+            .len(),
+        1
+    );
     std::fs::write(&unmatched, "nova").expect("write");
-    history
-        .save_version(&unmatched, Reason::Saved)
-        .expect("save");
+    heard_save(history, &unmatched);
     assert!(
         history
+            .lock()
             .versions(&[&unmatched])
             .expect("versions")
             .is_empty()
     );
     for document in [&vanished, &unmatched] {
-        history.forget(&[document], Some(document)).expect("forget");
+        history
+            .lock()
+            .forget(&[document], Some(document))
+            .expect("forget");
     }
     for object in objects {
         assert!(!object.exists(), "{} was left behind", object.display());
     }
 }
 
-/// Guards: persisted data: `mv b c; mkdir b` while the service was stopped,
-/// then `mv a b` heard before the pass after the start reaches `c`, leaves
-/// the document now in `c` its versions.
-fn folder_moved_onto_a_moved_ones_name(history: &mut History, home: &Path) {
+/// Guards: privacy action: `mv b c; mkdir b` while the service was stopped,
+/// then `mv a b` heard, offers the versions of the document now in `c` for
+/// no file arriving in `b`, and forgetting the document in `c` erases them.
+fn folder_moved_while_stopped(history: &mut SharedHistory, home: &Path) {
     let docs = home.join("Documentos");
     let document = docs.join("destino/x.odt");
     kept_twice(history, &document);
     let kept = listed_objects(history, &document);
     std::fs::rename(docs.join("destino"), docs.join("guardada")).expect("move the folder");
     std::fs::create_dir(docs.join("destino")).expect("create its namesake");
+    *history = restarted();
     std::fs::create_dir(docs.join("origem")).expect("create a folder");
+    std::fs::write(docs.join("origem/x.odt"), "outra").expect("write");
     std::fs::rename(docs.join("origem"), docs.join("destino")).expect("move onto the namesake");
     history
+        .lock()
         .note_rename(&docs.join("origem"), &docs.join("destino"))
         .expect("note the rename");
+    heard_save(history, &document);
+    assert!(listed_objects(history, &document).is_empty());
     let moved = docs.join("guardada/x.odt");
-    history.save_version(&moved, Reason::Saved).expect("save");
-    assert_eq!(listed_objects(history, &moved), kept);
+    history
+        .lock()
+        .forget(&[&moved], Some(&moved))
+        .expect("forget");
+    for object in kept {
+        assert!(!object.exists(), "{} was left behind", object.display());
+    }
 }
 
 /// The objects of the versions listed for `path`.
-fn listed_objects(history: &History, path: &Path) -> Vec<PathBuf> {
+fn listed_objects(history: &SharedHistory, path: &Path) -> Vec<PathBuf> {
     history
+        .lock()
         .versions(&[path])
         .expect("versions")
         .into_iter()
@@ -349,10 +429,21 @@ fn listed_objects(history: &History, path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Guards: persisted data: `mv r s; mv t r` while the service was stopped
-/// leaves each document its own versions when the pass over the catalogue
-/// reaches `r` first, where the rows of both documents meet.
-fn rename_chain_while_stopped(history: &mut History, home: &Path) {
+/// The pass after a start: each document whose state no version holds is
+/// saved, as the watcher never heard it change.
+fn caught_up(history: &SharedHistory, documents: &[&Path]) {
+    for document in documents {
+        history
+            .lock()
+            .save_version(document, Reason::Saved)
+            .expect("save");
+    }
+}
+
+/// Guards: privacy action: `mv r s; mv t r` while the service was stopped
+/// lists neither document's versions for the other, however a heard save
+/// and the pass after the start reach them.
+fn rename_chain_while_stopped(history: &mut SharedHistory, home: &Path) {
     let docs = home.join("Documentos/cadeia");
     let (r, s, t) = (docs.join("r.odt"), docs.join("s.odt"), docs.join("t.odt"));
     kept_twice(history, &r);
@@ -360,17 +451,43 @@ fn rename_chain_while_stopped(history: &mut History, home: &Path) {
     let (of_r, of_t) = (listed_objects(history, &r), listed_objects(history, &t));
     std::fs::rename(&r, &s).expect("move r");
     std::fs::rename(&t, &r).expect("move t");
+    *history = restarted();
+    write_by_replacing(&r, "editada");
+    heard_save(history, &r);
+    caught_up(history, &[&s]);
     for document in [&r, &s] {
-        history.save_version(document, Reason::Saved).expect("save");
+        let listed = listed_objects(history, document);
+        assert!(
+            listed
+                .iter()
+                .all(|object| !of_r.contains(object) && !of_t.contains(object)),
+            "{} lists {listed:?}",
+            document.display()
+        );
     }
-    assert_eq!(listed_objects(history, &s), of_r);
-    assert_eq!(listed_objects(history, &r), of_t);
+}
+
+/// Guards: privacy action: a document created where one moved away from
+/// while the service was stopped starts its own history.
+fn created_where_a_document_left(history: &mut SharedHistory, home: &Path) {
+    let docs = home.join("Documentos/deixada");
+    let (left, now_at) = (docs.join("d.odt"), docs.join("e.odt"));
+    kept_twice(history, &left);
+    std::fs::rename(&left, &now_at).expect("move d");
+    *history = restarted();
+    std::fs::write(&left, "nova").expect("create");
+    heard_save(history, &left);
+    write_by_replacing(&left, "nova, editada");
+    heard_save(history, &left);
+    let listed = listed_objects(history, &left);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(std::fs::read_to_string(&listed[0]).expect("read"), "nova");
 }
 
 /// Guards: privacy action: `mv r s; mv t r` and a save of `s` while the
-/// service was stopped leave `r`'s versions with no document to claim them;
+/// service was stopped leave `r`'s versions parked, listed for neither;
 /// forgetting `r` erases them.
-fn parked_versions_forgotten(history: &mut History, home: &Path) {
+fn parked_versions_forgotten(history: &mut SharedHistory, home: &Path) {
     let docs = home.join("Documentos/estacionada");
     let (r, s, t) = (docs.join("r.odt"), docs.join("s.odt"), docs.join("t.odt"));
     kept_twice(history, &r);
@@ -379,11 +496,10 @@ fn parked_versions_forgotten(history: &mut History, home: &Path) {
     std::fs::rename(&r, &s).expect("move r");
     std::fs::rename(&t, &r).expect("move t");
     write_by_replacing(&s, "editada");
-    for document in [&r, &s] {
-        history.save_version(document, Reason::Saved).expect("save");
-    }
+    *history = restarted();
+    caught_up(history, &[&r, &s]);
     assert!(listed_objects(history, &s).is_empty());
-    history.forget(&[&r], Some(&r)).expect("forget");
+    history.lock().forget(&[&r], Some(&r)).expect("forget");
     for object in of_r {
         assert!(!object.exists(), "{} was left behind", object.display());
     }
@@ -392,35 +508,29 @@ fn parked_versions_forgotten(history: &mut History, home: &Path) {
 /// Guards: persisted data: a save heard before a folder on the way was
 /// replaced by a link keeps nothing of the file the link leads to under the
 /// path, which would give the path's history that file's identity.
-fn linked_folder_never_kept(history: &mut History, home: &Path) {
+fn linked_folder_never_kept(history: &SharedHistory, home: &Path) {
     let docs = home.join("Documentos");
     let other = docs.join("outra/d.odt");
     std::fs::create_dir_all(other.parent().expect("a folder")).expect("create the folder");
     std::fs::write(&other, "outra").expect("write");
     std::os::unix::fs::symlink(docs.join("outra"), docs.join("ligada")).expect("link");
     let through_link = docs.join("ligada/d.odt");
-    assert!(
-        !history
-            .save_version(&through_link, Reason::Saved)
-            .expect("save")
-    );
+    assert!(!heard_save(history, &through_link));
     assert!(
         history
+            .lock()
             .versions(&[&through_link])
             .expect("versions")
             .is_empty()
     );
 }
 
-fn non_documents_never_kept(history: &mut History, home: &Path) {
+fn non_documents_never_kept(history: &SharedHistory, home: &Path) {
     // Non-documents never reach the store. Same test because the home folder
     // is resolved once per process.
     for name in ["filme.mkv", "senhas.txt", "cofre.kdbx", "vazio.odt"] {
         let path = home.join("Documentos").join(name);
         std::fs::write(&path, if name == "vazio.odt" { "" } else { "conteúdo" }).expect("write");
-        assert!(
-            !history.save_version(&path, Reason::Saved).expect("save"),
-            "{name} should never be kept"
-        );
+        assert!(!heard_save(history, &path), "{name} should never be kept");
     }
 }

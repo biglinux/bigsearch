@@ -366,6 +366,14 @@ impl PathMatrix {
                 .unwrap(),
         );
         assert!(wait_socket(&sock), "daemon never bound socket");
+        // Watching, so the rearrangement is heard.
+        assert!(
+            settles(
+                || send_daemon_request(&sock, "{\"v\":2,\"cmd\":\"status\"}")
+                    .contains("\"activity\":\"idle\"")
+            ),
+            "the daemon never finished its start"
+        );
         Self {
             base,
             home,
@@ -452,16 +460,16 @@ fn client_path_matrix() {
         matrix.keep_one(folder, &format!("{folder} edited"));
     }
     matrix.rearrange();
-    let other = versions_by_spelling(&matrix);
+    versions_by_spelling(&matrix);
     moved_folder_linked(&matrix);
     disk_requests(&matrix);
     origin_requests(&matrix);
-    forget_by_spelling(&matrix, &other);
+    let other = forget_by_spelling(&matrix);
     source_root_replaced(&matrix, &other);
 }
 
-/// The versions listed through each spelling; returns those of `other`.
-fn versions_by_spelling(matrix: &PathMatrix) -> Vec<i64> {
+/// The versions listed through each spelling.
+fn versions_by_spelling(matrix: &PathMatrix) {
     // Alias inside a source: one document under either spelling.
     let real = matrix.ids("real");
     assert_eq!(real.len(), 1, "{real:?}");
@@ -481,15 +489,19 @@ fn versions_by_spelling(matrix: &PathMatrix) -> Vec<i64> {
     // Links to outside and to nothing: nothing was kept there.
     assert_eq!(matrix.ids("out"), Vec::<i64>::new());
     assert_eq!(matrix.ids("dangling"), Vec::<i64>::new());
-    other
 }
 
-/// A folder moved and a link put in its place while the daemon runs: the rows
-/// kept under the link's spelling were kept for the file it leads to, so a
-/// restore through the link proceeds and they move to where it leads.
+/// A folder moved and a link put in its place while the daemon runs: the
+/// rows follow the folder, so the link's spelling lists them where it leads
+/// and a restore through it proceeds.
 fn moved_folder_linked(matrix: &PathMatrix) {
     let kept = matrix.ids("moved");
     assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(
+        settles(|| matrix.ids("moved-to") == kept),
+        "the rows did not follow the folder: {:?}",
+        matrix.ids("moved-to")
+    );
     assert_answers(
         &matrix.sock,
         &[(path_cmd("save_version", &matrix.file("moved")), None)],
@@ -592,13 +604,13 @@ fn origin_requests(matrix: &PathMatrix) {
     );
 }
 
-/// Forgetting through one spelling erases that document's versions only.
-fn forget_by_spelling(matrix: &PathMatrix, other: &[i64]) {
+/// Forgetting through a spelling erases every version listed through it or
+/// where it leads; returns those of `other` kept again.
+fn forget_by_spelling(matrix: &PathMatrix) -> Vec<i64> {
     let forget = |folder: &str| matrix.reply("forget_versions", &matrix.file(folder));
     assert_eq!(forget("old")["kind"], "ok");
-    assert_eq!(matrix.ids("other"), other, "forgetting old erased other");
-    // With the old folder's rows gone, the spelling leads where it resolves.
-    assert_eq!(matrix.ids("old"), other);
+    assert_eq!(matrix.ids("old"), Vec::<i64>::new());
+    assert_eq!(matrix.ids("other"), Vec::<i64>::new());
     assert_eq!(forget("alias")["kind"], "ok");
     assert_eq!(matrix.ids("real"), Vec::<i64>::new());
     for folder in ["gone", "proj", "vacated", "out", "dangling"] {
@@ -607,6 +619,10 @@ fn forget_by_spelling(matrix: &PathMatrix, other: &[i64]) {
     }
     matrix.keep_one("alias", "real again");
     assert_eq!(matrix.ids("real").len(), 1);
+    matrix.keep_one("other", "other again");
+    let other = matrix.ids("other");
+    assert_eq!(other.len(), 1, "{other:?}");
+    other
 }
 
 /// The source root replaced by a link while the daemon runs leads nowhere
