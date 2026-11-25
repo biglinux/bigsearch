@@ -520,27 +520,7 @@ impl State {
         let mut stored_after = after_text.to_owned();
         let mut stored_done = self.clear_before_persist;
         while !stored_done && entries.len() < limit {
-            let mut stmt = self
-                .conn
-                .prepare_cached(
-                    "
-                    SELECT path, mtime, size FROM file_state
-                    WHERE namespace = ?1 AND path > ?2
-                    ORDER BY path
-                    LIMIT ?3
-                    ",
-                )
-                .context("prepare path batch query")?;
-            let rows = stmt
-                .query_map(params![self.namespace, stored_after, limit as i64], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        db_size_to_u64(row.get::<_, i64>(2)?),
-                    ))
-                })
-                .context("query path batch")?;
-            let page = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            let page = self.stored_page(&stored_after, limit)?;
             stored_done = page.len() < limit;
             if let Some((last, _, _)) = page.last() {
                 stored_after.clone_from(last);
@@ -567,6 +547,31 @@ impl State {
             .into_iter()
             .map(|(path, mtime, size)| (PathBuf::from(path), mtime, size))
             .collect())
+    }
+
+    /// Up to `limit` stored rows after `after`, in path order, pending changes ignored.
+    fn stored_page(&self, after: &str, limit: usize) -> Result<Vec<(String, i64, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "
+                SELECT path, mtime, size FROM file_state
+                WHERE namespace = ?1 AND path > ?2
+                ORDER BY path
+                LIMIT ?3
+                ",
+            )
+            .context("prepare path batch query")?;
+        let rows = stmt
+            .query_map(params![self.namespace, after, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    db_size_to_u64(row.get::<_, i64>(2)?),
+                ))
+            })
+            .context("query path batch")?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn len(&self) -> usize {

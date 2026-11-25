@@ -409,41 +409,26 @@ fn run_extraction_worker(
         // Only a regular file is read: a link would duplicate its target's body.
         // The descriptor is held through the extraction: while it is open no
         // other process can take a write lease, so no reader below skips the file.
-        let _lease_bar = match extract::open_regular_with(&path, libc::O_NOFOLLOW) {
-            Ok(file) => file,
+        let body = match extract::open_regular_with(&path, libc::O_NOFOLLOW) {
+            Ok(_lease_bar) => {
+                let duplicate = signatures.is_some_and(|signatures| {
+                    matches!(
+                        signatures
+                            .lock()
+                            .expect("signature lock")
+                            .claim(&path, size),
+                        ContentClaim::Duplicate
+                    )
+                });
+                if duplicate { None } else { extract_body(&path) }
+            }
             // No result: the file stays pending and a later pass reads it.
             Err(extract::Unopened::Busy) => {
                 busy += 1;
                 continue;
             }
-            Err(extract::Unopened::Refused) => {
-                let _ = tx.send(ContentResult {
-                    path,
-                    mtime,
-                    size,
-                    body: None,
-                });
-                continue;
-            }
+            Err(extract::Unopened::Refused) => None,
         };
-        if let Some(signatures) = signatures
-            && matches!(
-                signatures
-                    .lock()
-                    .expect("signature lock")
-                    .claim(&path, size),
-                ContentClaim::Duplicate
-            )
-        {
-            let _ = tx.send(ContentResult {
-                path,
-                mtime,
-                size,
-                body: None,
-            });
-            continue;
-        }
-        let body = extract_body(&path);
         let _ = tx.send(ContentResult {
             path,
             mtime,

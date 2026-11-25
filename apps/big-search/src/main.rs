@@ -694,7 +694,14 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
     };
 
     print_hits(&s, &outcome);
-    if mode != "name" && !content_on {
+    print_search_notes(&outcome, mode != "name" && !content_on);
+    Ok(())
+}
+
+/// What may be missing from a search, on stderr: content search off in this
+/// profile, matches past the candidate ceiling, files not yet extracted.
+fn print_search_notes(outcome: &big_indexd_client::QueryOutcome, content_off: bool) {
+    if content_off {
         eprintln!(
             "{}",
             dim(
@@ -722,7 +729,6 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
             ))
         );
     }
-    Ok(())
 }
 
 /// The same query against the index files, read-only, when no daemon listens.
