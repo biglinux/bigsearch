@@ -242,10 +242,9 @@ pub struct Inotify {
 }
 
 /// Start inotify for the sources `roots`; each event heard wakes the watcher
-/// loop through `wake`. Call it from a thread at normal priority: notify's
-/// reader thread takes its caller's nice value and cgroup, and one at the
-/// indexer's idle priority falls behind the kernel's queue on a busy machine.
-/// The reader runs `SCHED_BATCH` ([`crate::throttle::spawn_batched`]).
+/// loop through `wake`. notify's reader thread takes its caller's policy, nice
+/// value and cgroup: the daemon calls this through
+/// [`crate::throttle::spawn_lowered`].
 ///
 /// # Errors
 ///
@@ -258,10 +257,9 @@ pub fn start_inotify(wake: Sender<WatchMessage>, roots: Vec<PathBuf>) -> Result<
     // A close after writing is how a save ends.
     let config =
         Config::default().with_event_kinds(EventKindMask::CORE | EventKindMask::ACCESS_CLOSE);
-    let watcher = crate::throttle::spawn_batched(|| {
+    let watcher =
         RecommendedWatcher::new(move |watcher_result| hearing.hear(watcher_result), config)
-    })
-    .context("inotify init")?;
+            .context("inotify init")?;
     Ok(Inotify { watcher, heard })
 }
 

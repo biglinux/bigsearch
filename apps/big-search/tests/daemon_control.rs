@@ -524,12 +524,11 @@ fn save_before_stop_kept() {
     );
 }
 
-/// Guards: the kernel's event queue: the thread reading the sources' inotify
-/// descriptor keeps a normal program's share (`SCHED_BATCH`) while the indexer
-/// runs idle, so a busy machine does not leave the queue to overflow into a
-/// walk of every source.
+/// Guards: the person's CPU: the thread reading the sources' inotify
+/// descriptor runs in the indexer's idle class, so a burst of changes costs no
+/// normal-priority CPU, while the main thread keeps a normal program's share.
 #[test]
-fn inotify_reader_keeps_priority() {
+fn inotify_reader_runs_idle() {
     let base = scratch::scratch_dir("bs-priority");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
@@ -543,9 +542,9 @@ fn inotify_reader_keeps_priority() {
             .unwrap(),
     );
     let pid = daemon.0.id();
-    // The main thread binds the socket once it has started the sources' watch
-    // and the query readers' watches on the index folders, none of which waits
-    // on the idle indexer.
+    // The main thread binds the socket once the sources' watch and the query
+    // readers' watches on the index folders exist, without waiting on the
+    // indexer's walk.
     assert!(
         wait_socket(&run.join("biglinux/indexd.sock")),
         "the daemon did not bind its socket"
@@ -568,8 +567,7 @@ fn inotify_reader_keeps_priority() {
         "not one thread reads the sources' watch: {:?}",
         readers()
     );
-    assert_eq!(thread_policy(pid, readers()[0]), libc::SCHED_BATCH);
-    // The thread that started it answers queries.
+    assert_eq!(thread_policy(pid, readers()[0]), libc::SCHED_IDLE);
     assert_eq!(thread_policy(pid, pid), libc::SCHED_OTHER);
 }
 

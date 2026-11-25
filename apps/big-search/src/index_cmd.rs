@@ -449,10 +449,12 @@ fn spawn_watcher(
     history: &big_search::history::SharedHistory,
     available: Vec<&'static settings::Source>,
 ) -> Result<()> {
-    // Started on this thread, at normal priority, which notify's reader thread
-    // takes: the watcher thread's idle priority would starve it.
+    // notify's reader thread takes its creator's class: started on a lowered
+    // thread, it reads the kernel's queue on CPU time nobody else wants.
     let roots = available.iter().map(|source| source.path.clone()).collect();
-    let inotify = watch::start_inotify(control.commands.clone(), roots)?;
+    let commands = control.commands.clone();
+    let inotify = throttle::spawn_lowered(|| watch::start_inotify(commands, roots))
+        .context("start the file watch")??;
     let watch_history = history.clone();
     let watch_paused = control.paused.clone();
     let watch_activity = control.activity.clone();

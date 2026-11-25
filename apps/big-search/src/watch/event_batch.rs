@@ -20,9 +20,8 @@ pub(super) const MAX_FOLDERS: usize = 256;
 /// document's versions stay under its old path.
 const MAX_RENAMES: usize = 16_384;
 
-/// Filled by the inotify thread, which runs at normal priority so the
-/// kernel's queue is read however long the indexer waits for the CPU, and
-/// taken whole by the watcher loop.
+/// Filled by the inotify thread, one entry per path however often it
+/// changes, and taken whole by the watcher loop.
 pub(super) struct Heard {
     /// `None` once taken: the next event wakes the loop again.
     batch: Mutex<Option<WatchBatch>>,

@@ -325,10 +325,16 @@ hidden and gitignored churn never wakes the daemon.
   none for what it held, so the tree goes as one `dir` term in the name index
   and one key range in the catalogue, never read into memory; its content
   documents follow through the orphan prune of the next backfill passes.
-- At most 16,384 events wait for the watcher (`MAX_QUEUED_EVENTS`), so a backup
-  or a recursive copy cannot queue its whole tree in memory. Past that, or when
-  the kernel's own queue overflows, the events are dropped and the watcher
-  rescans every root.
+- What the inotify thread hears waits in one batch the watcher takes whole,
+  one entry per path however often it changes, in memory only: what a stop
+  loses, the next start's catch-up or walk finds. Past 16,384 paths
+  (`MAX_PATHS`) they collapse into their folders, each walked whole, so a
+  backup or a recursive copy cannot hold its whole tree in memory. Past 256
+  folders (`MAX_FOLDERS`), or when the kernel's own queue overflows, the batch
+  is dropped and the watcher rescans every root; the log tells the two apart.
+- The inotify thread runs in the indexer's idle class (section 7), so intake
+  costs no CPU a program wants; under sustained load the kernel's queue may
+  overflow into that rescan.
 
 ## 6. Extraction
 
@@ -419,11 +425,12 @@ candidate should a crate replace the subprocess.
 ## 7. Throttle
 
 `throttle::lower_priority` is called by the watcher, the content workers, the
-history worker and a foreground reindex. It moves the calling thread into the
-indexer's cgroup, which has `cpu.idle`, and gives it `SCHED_IDLE` with a
-utilization clamp of 512 out of 1024, nice 19 as the fallback, and
-`IOPRIO_CLASS_IDLE`; the programs it starts inherit all of it. The cgroup
-carries the same clamp (`cpu.uclamp.max`), since the unit's
+history worker, a foreground reindex and the short-lived thread that starts
+the inotify reader (`throttle::spawn_lowered`). It moves the calling thread
+into the indexer's cgroup, which has `cpu.idle`, and gives it `SCHED_IDLE`
+with a utilization clamp of 512 out of 1024, nice 19 as the fallback, and
+`IOPRIO_CLASS_IDLE`; the threads and programs it starts inherit all of it.
+The cgroup carries the same clamp (`cpu.uclamp.max`), since the unit's
 `RestrictRealtime=yes` refuses `sched_setattr` and the thread then gets
 `SCHED_IDLE` through `sched_setscheduler`, without a clamp of its own; the log
 says once whether the cgroup's clamp covers it. The query
