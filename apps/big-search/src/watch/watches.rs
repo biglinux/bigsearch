@@ -141,6 +141,34 @@ impl Watches {
         false
     }
 
+    /// Unlist `dir` and the folders under it, still on disk but out of the
+    /// index, and drop their watches: the kernel keeps a watch until its
+    /// folder is deleted, and with it a share of `max_user_watches`.
+    pub(super) fn forget_tree(&mut self, dir: &Path) {
+        match self.dirs.tree(dir) {
+            Ok(listed) => {
+                for folder in listed {
+                    self.unwatch(&folder);
+                }
+            }
+            Err(error) => log::warn!(
+                "cannot list the folders watched under {}: their watches stay until a restart: {error:#}",
+                dir.display()
+            ),
+        }
+        self.dirs.remove_tree(dir);
+    }
+
+    /// Drop the watch on `dir`. A folder deleted, moved or never watched has
+    /// no watch left to drop.
+    pub(super) fn unwatch(&mut self, dir: &Path) {
+        if let Err(error) = self.watcher.unwatch(dir)
+            && !matches!(error.kind, notify::ErrorKind::WatchNotFound)
+        {
+            log::warn!("cannot stop watching {}: {error}", dir.display());
+        }
+    }
+
     /// Save the folder list, before the catalogue at every persist site, two
     /// transactions a kill can come between. A folder listed but not
     /// catalogued is walked whole by the next start's catch-up; one catalogued

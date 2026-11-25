@@ -221,9 +221,12 @@ fn reindex_evicts_ignored_folder() {
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     std::fs::create_dir_all(&generated).unwrap();
     std::fs::write(generated.join("inner.txt"), "alpha").unwrap();
+    for sub in 0..10 {
+        std::fs::create_dir_all(generated.join(format!("sub{sub}"))).unwrap();
+    }
     std::fs::create_dir_all(&run).unwrap();
     let sock = run.join("biglinux/indexd.sock");
-    let _daemon = KillOnDrop(
+    let daemon = KillOnDrop(
         env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
             .spawn()
             .unwrap(),
@@ -233,6 +236,11 @@ fn reindex_evicts_ignored_folder() {
         settles(|| query_paths(&sock, "name", "inner", &home).0 == 1),
         "the first walk did not index the folder"
     );
+    assert!(
+        settles(|| catalogue_rows(&xdg_storage_home, "watch", &generated) == 10),
+        "the first walk did not list the subfolders"
+    );
+    let watches = inotify_watches(daemon.0.id());
 
     std::fs::write(repo.join(".gitignore"), "generated/\n").unwrap();
     assert_answers(&sock, &[(path_cmd("reindex", &generated), None)]);
@@ -242,6 +250,11 @@ fn reindex_evicts_ignored_folder() {
     );
     assert_eq!(query_paths(&sock, "name", "inner", &home).0, 0);
     assert_eq!(catalogue_rows(&xdg_storage_home, "name", &generated), 0);
+    // The folder and its ten subfolders, still on disk, lose their watches.
+    assert!(
+        settles(|| inotify_watches(daemon.0.id()) + 11 <= watches),
+        "the ignored folders are still watched"
+    );
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -259,9 +272,12 @@ fn reindex_of_parent_evicts_ignored_subtree() {
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     std::fs::create_dir_all(generated.join("deep")).unwrap();
     std::fs::write(generated.join("deep/inner.txt"), "innerworddeep").unwrap();
+    for sub in 0..10 {
+        std::fs::create_dir_all(generated.join(format!("deep/sub{sub}"))).unwrap();
+    }
     std::fs::create_dir_all(&run).unwrap();
     let sock = run.join("biglinux/indexd.sock");
-    let _daemon = KillOnDrop(
+    let daemon = KillOnDrop(
         env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
             .env("BIG_SEARCH_DAEMON_CONTENT_IDLE_MS", "100")
             .env("BIG_SEARCH_CONTENT_COOLDOWN_SECS", "0")
@@ -275,15 +291,22 @@ fn reindex_of_parent_evicts_ignored_subtree() {
         "the first walk did not index the subfolder"
     );
     assert!(
-        settles(|| catalogue_rows(&xdg_storage_home, "watch", &generated) > 0),
-        "the first walk did not list the subfolder"
+        settles(|| catalogue_rows(&xdg_storage_home, "watch", &generated) == 11),
+        "the first walk did not list the subfolders"
     );
+    let watches = inotify_watches(daemon.0.id());
 
     std::fs::write(repo.join(".gitignore"), "generated/\n").unwrap();
     assert_answers(&sock, &[(path_cmd("reindex", &repo), None)]);
     assert_tree_gone(&sock, &xdg_storage_home, &generated, "inner");
     assert_eq!(query_paths(&sock, "name", "generated", &home).0, 0);
     assert_eq!(catalogue_rows(&xdg_storage_home, "watch", &generated), 0);
+    // The twelve folders the reindex leaves out, still on disk, lose their
+    // watches.
+    assert!(
+        settles(|| inotify_watches(daemon.0.id()) + 12 <= watches),
+        "the ignored folders are still watched"
+    );
     let _ = std::fs::remove_dir_all(&base);
 }
 

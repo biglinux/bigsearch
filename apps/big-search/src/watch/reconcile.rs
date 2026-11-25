@@ -182,7 +182,7 @@ impl ReconcilePass<'_> {
     /// A new or moved-in folder: watched before it is read, and each subfolder
     /// as the walk reaches it, so an entry created during the walk is either
     /// read or reported. A forced one is judged whole again: what the walk no
-    /// longer reaches leaves the folder list with its rows.
+    /// longer reaches leaves the folder list with its rows and its watch.
     fn walk_folder(
         &mut self,
         watches: &mut Watches,
@@ -190,10 +190,17 @@ impl ReconcilePass<'_> {
         path: &Path,
     ) -> Result<scan::ReconcileOutcome> {
         if self.forced {
+            let listed = watches.dirs.tree(path)?;
             watches.dirs.remove_tree(path);
-            return scan::reconcile_folder(self.writer, self.f, state, path, &mut |dir| {
+            let outcome = scan::reconcile_folder(self.writer, self.f, state, path, &mut |dir| {
                 watches.watch(dir);
-            });
+            })?;
+            for folder in listed {
+                if watches.dirs.recorded(&folder).is_none() {
+                    watches.unwatch(&folder);
+                }
+            }
+            return Ok(outcome);
         }
         watches.watch(path);
         scan::reconcile_subtree_inline(self.writer, self.f, state, self.scope, path, &mut |dir| {
@@ -226,6 +233,11 @@ pub(super) fn evict(
     // the folder and none for what it held: its whole tree goes.
     scan::delete_tree(writer, f, path);
     state.remove_tree(path);
-    watches.dirs.remove_tree(path);
+    // The watcher drops the watches of a deleted or moved folder itself.
+    if gone {
+        watches.dirs.remove_tree(path);
+    } else {
+        watches.forget_tree(path);
+    }
     true
 }

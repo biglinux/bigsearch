@@ -170,6 +170,21 @@ pub fn catalogue_rows(xdg_storage_home: &Path, namespace: &str, dir: &Path) -> i
     .unwrap()
 }
 
+/// The inotify watches process `pid` holds, over all its inotify descriptors,
+/// as the kernel lists them.
+pub fn inotify_watches(pid: u32) -> usize {
+    std::fs::read_dir(format!("/proc/{pid}/fdinfo"))
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .map(|info| {
+            info.lines()
+                .filter(|line| line.starts_with("inotify wd:"))
+                .count()
+        })
+        .sum()
+}
+
 /// Polls `check` for up to 20 s.
 pub fn settles(check: impl Fn() -> bool) -> bool {
     settles_within(Duration::from_secs(20), check)

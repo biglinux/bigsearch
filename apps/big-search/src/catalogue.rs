@@ -173,6 +173,36 @@ impl State {
         Ok(rows.flatten().map(PathBuf::from).collect())
     }
 
+    /// `dir` and the paths under it, pending changes included.
+    pub(crate) fn tree(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+        let dir_key = key(dir);
+        let (low, high) = subtree_range(&dir_key);
+        let in_tree =
+            |path: &str| path == dir_key || (path >= low.as_str() && path < high.as_str());
+        let mut paths: Vec<String> = Vec::new();
+        if !self.clear_before_persist {
+            let mut statement = self.conn.prepare_cached(
+                "SELECT path FROM file_state
+                  WHERE namespace = ?1 AND (path = ?2 OR (path >= ?3 AND path < ?4))",
+            )?;
+            let rows = statement.query_map(params![self.namespace, dir_key, low, high], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for path in rows {
+                let path = path?;
+                if !self.pending.contains_key(&path) && !self.in_removed_tree(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        for (path, change) in &self.pending {
+            if matches!(change, PendingChange::Set(..)) && in_tree(path) {
+                paths.push(path.clone());
+            }
+        }
+        Ok(paths.into_iter().map(PathBuf::from).collect())
+    }
+
     /// Forget `path` and every path under it. A folder moved away, to the trash
     /// included, is one event naming the folder and none for what it held.
     pub fn remove_tree(&mut self, path: &Path) {
