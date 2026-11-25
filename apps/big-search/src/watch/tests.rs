@@ -12,6 +12,46 @@ fn stop_window_keeps_late_rename() {
     let _data = EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap());
     let _config = EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap());
     let roots = [base.join("docs")];
+    let (watch_loop, tx, history_rx, queued) = stopping_loop(&base, &roots);
+    let (from, to) = (roots[0].join("a.txt"), roots[0].join("b.txt"));
+    let renamed = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+        .add_path(from.clone())
+        .add_path(to.clone());
+    tx.send(WatchMessage::Stop(0)).unwrap();
+    tx.send(WatchMessage::ControlCommand(
+        WatchControlCommand::WarmContent,
+    ))
+    .unwrap();
+    // Well inside the window, and after the loop took the stop.
+    let late = std::thread::spawn(move || {
+        std::thread::sleep(DEBOUNCE / 5);
+        queued.fetch_add(1, Ordering::Relaxed);
+        tx.send(WatchMessage::Fs(Ok(renamed))).unwrap();
+    });
+    assert_eq!(watch_loop.run_until_stopped().unwrap(), 0);
+    late.join().unwrap();
+    let heard: Vec<HistoryEvent> = history_rx.try_iter().collect();
+    assert!(
+        heard
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::Renamed(a, b) if *a == from && *b == to)),
+        "the versions worker heard {} events, not the rename",
+        heard.len()
+    );
+}
+
+/// A watcher loop over `roots` with its index and catalogue under `base`, and
+/// the ends a test drives it through: its message sender, what the versions
+/// worker hears, and the count of events in flight.
+fn stopping_loop<'a>(
+    base: &std::path::Path,
+    roots: &'a [PathBuf],
+) -> (
+    WatchLoop<'a>,
+    Sender<WatchMessage>,
+    Receiver<HistoryEvent>,
+    Arc<AtomicUsize>,
+) {
     let index = crate::index::open_or_create(&base.join("index")).unwrap();
     let content_index = crate::index::create_content_fixture(
         &base.join("content"),
@@ -49,33 +89,9 @@ fn stop_window_keeps_late_rename() {
         rx,
         runtime,
         state: State::empty(&state_db, crate::catalogue::NAME_NAMESPACE).unwrap(),
-        roots: &roots,
+        roots,
         content_index,
         index,
     };
-    let (from, to) = (roots[0].join("a.txt"), roots[0].join("b.txt"));
-    let renamed = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
-        .add_path(from.clone())
-        .add_path(to.clone());
-    tx.send(WatchMessage::Stop(0)).unwrap();
-    tx.send(WatchMessage::ControlCommand(
-        WatchControlCommand::WarmContent,
-    ))
-    .unwrap();
-    // Well inside the window, and after the loop took the stop.
-    let late = std::thread::spawn(move || {
-        std::thread::sleep(DEBOUNCE / 5);
-        queued.fetch_add(1, Ordering::Relaxed);
-        tx.send(WatchMessage::Fs(Ok(renamed))).unwrap();
-    });
-    assert_eq!(watch_loop.run_until_stopped().unwrap(), 0);
-    late.join().unwrap();
-    let heard: Vec<HistoryEvent> = history_rx.try_iter().collect();
-    assert!(
-        heard
-            .iter()
-            .any(|event| matches!(event, HistoryEvent::Renamed(a, b) if *a == from && *b == to)),
-        "the versions worker heard {} events, not the rename",
-        heard.len()
-    );
+    (watch_loop, tx, history_rx, queued)
 }
