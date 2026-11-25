@@ -69,15 +69,23 @@ impl Heard {
     }
 }
 
+/// Why a batch walks the sources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Rescan {
+    /// The kernel's queue overflowed: events were lost.
+    Overflowed,
+    /// The folders passed [`MAX_FOLDERS`].
+    Collapsed,
+}
+
 pub(super) struct WatchBatch {
     pub(super) paths: HashSet<PathBuf>,
     /// Folders walked whole in place of the paths that passed [`MAX_PATHS`],
     /// none below another.
     pub(super) folders: BTreeSet<PathBuf>,
-    /// Events were lost (the kernel's queue overflowed) or the folders passed
-    /// [`MAX_FOLDERS`]: the sources are walked instead of `paths` and
-    /// `folders`, which stay empty.
-    pub(super) rescan: bool,
+    /// Set when the sources are walked instead of `paths` and `folders`,
+    /// which stay empty.
+    pub(super) rescan: Option<Rescan>,
     origin_paths: Vec<PathBuf>,
     origin_overflow: bool,
     /// Files that may have just been saved, for the versions worker. Bounded by
@@ -93,7 +101,7 @@ impl WatchBatch {
         Self {
             paths: HashSet::new(),
             folders: BTreeSet::new(),
-            rescan: false,
+            rescan: None,
             origin_paths: Vec::new(),
             origin_overflow: false,
             history_paths: HashSet::new(),
@@ -159,7 +167,7 @@ impl WatchBatch {
 
     fn ingest(&mut self, event: notify::Event, roots: &[PathBuf]) {
         if event.need_rescan() {
-            self.give_up_paths();
+            self.give_up_paths(Rescan::Overflowed);
         }
         self.add_origin_paths(origin_paths_for_event(event.kind, &event.paths));
         self.add_history(event.kind, &event.paths);
@@ -172,7 +180,7 @@ impl WatchBatch {
         // Most batches hold no folder: no event pays the walk up its path.
         let in_folder = !self.folders.is_empty()
             && path.ancestors().any(|folder| self.folders.contains(folder));
-        if self.rescan || in_folder {
+        if self.rescan.is_some() || in_folder {
             return;
         }
         self.paths.insert(path);
@@ -190,7 +198,7 @@ impl WatchBatch {
             };
             self.add_folder(folder);
             if self.folders.len() > MAX_FOLDERS {
-                self.give_up_paths();
+                self.give_up_paths(Rescan::Collapsed);
                 return;
             }
         }
@@ -212,8 +220,8 @@ impl WatchBatch {
         self.folders.insert(folder);
     }
 
-    fn give_up_paths(&mut self) {
-        self.rescan = true;
+    fn give_up_paths(&mut self, cause: Rescan) {
+        self.rescan = Some(cause);
         self.paths = HashSet::new();
         self.folders = BTreeSet::new();
     }

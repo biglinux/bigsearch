@@ -1,8 +1,8 @@
-use super::event_batch::{MAX_FOLDERS, MAX_PATHS};
+use super::event_batch::{MAX_FOLDERS, MAX_PATHS, Rescan};
 use super::*;
 use crate::history::HistoryEvent;
 use crate::test_env::{ENV_LOCK, EnvVarGuard, scratch_dir};
-use notify::event::{CreateKind, EventKind, ModifyKind, RenameMode};
+use notify::event::{CreateKind, EventKind, Flag, ModifyKind, RenameMode};
 use std::collections::BTreeSet;
 
 /// Guards: persisted data: a rename the inotify thread passes on after the
@@ -44,7 +44,8 @@ fn stop_window_keeps_late_rename() {
 
 /// A burst past [`MAX_PATHS`] collapses into the folders that hold its
 /// paths, a source standing for itself, and past [`MAX_FOLDERS`] into a walk
-/// of the sources; the loop is woken once per batch.
+/// of the sources, told apart from a kernel overflow; the loop is woken once
+/// per batch.
 #[test]
 fn heard_paths_collapse_then_rescan() {
     let root = PathBuf::from("/r");
@@ -59,7 +60,7 @@ fn heard_paths_collapse_then_rescan() {
     }
     hear(root.join("a/late"));
     let batch = heard.take().unwrap();
-    assert!(batch.paths.is_empty() && !batch.rescan);
+    assert!(batch.paths.is_empty() && batch.rescan.is_none());
     assert_eq!(batch.folders, folders(&["/r/a", "/r/b/c"]));
     assert_eq!(rx.try_iter().count(), 1, "one wake per batch");
 
@@ -75,9 +76,17 @@ fn heard_paths_collapse_then_rescan() {
     }
     hear(root.join("after"));
     let batch = heard.take().unwrap();
-    assert!(batch.rescan);
+    assert_eq!(batch.rescan, Some(Rescan::Collapsed));
     assert!(batch.paths.is_empty() && batch.folders.is_empty());
     assert!(heard.take().is_none());
+
+    hear(root.join("before"));
+    heard.hear(Ok(
+        notify::Event::new(EventKind::Other).set_flag(Flag::Rescan)
+    ));
+    let batch = heard.take().unwrap();
+    assert_eq!(batch.rescan, Some(Rescan::Overflowed));
+    assert!(batch.paths.is_empty());
 }
 
 /// Guards: an in-place save heard among more paths than a batch holds still

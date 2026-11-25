@@ -21,7 +21,7 @@ use crate::origin;
 use crate::scan;
 use anyhow::{Context, Result};
 use content_backfill::{ContentBackfill, compact_when_worth_it, run_content_backfill_batch};
-use event_batch::{Heard, WatchBatch, observe_origin_batch};
+use event_batch::{Heard, MAX_FOLDERS, Rescan, WatchBatch, observe_origin_batch};
 use notify::{Config, EventKindMask, RecommendedWatcher, Watcher};
 use reconcile::{evict, reconcile_batch, reconcile_forced};
 use start::{catch_up_at_start, watch_initial_dirs};
@@ -653,8 +653,13 @@ impl WatchLoop<'_> {
                 .history_tx
                 .send(crate::history::HistoryEvent::Changed(path));
         }
-        let walk_started = if batch.rescan {
-            log::warn!("inotify overflow: full rescan");
+        let walk_started = if let Some(cause) = batch.rescan {
+            match cause {
+                Rescan::Overflowed => log::warn!("inotify overflow: full rescan"),
+                Rescan::Collapsed => {
+                    log::info!("changes in over {MAX_FOLDERS} folders at once: full rescan");
+                }
+            }
             Some(self.rescan_sources(&mut outcome)?)
         } else {
             None
