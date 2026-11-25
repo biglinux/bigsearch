@@ -243,9 +243,12 @@ fn skipped_entries_become_tombstones() {
     let vanished = base.join("apagado.md");
     // Extension-less, so a sniff candidate, but nothing to extract.
     let folder = base.join("uma-pasta");
+    // A text name on a FIFO: opening it would block the worker.
+    let pipe = base.join("fila.txt");
     std::fs::write(&movie, b"binario").unwrap();
     std::fs::write(&note, b"texto").unwrap();
     std::fs::create_dir_all(&folder).unwrap();
+    make_fifo(&pipe);
 
     let mut catalog =
         catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
@@ -253,6 +256,7 @@ fn skipped_entries_become_tombstones() {
     catalog.set(&note, 100, 10);
     catalog.set(&vanished, 100, 10);
     catalog.set(&folder, 100, 4096);
+    catalog.set(&pipe, 100, 0);
     catalog.persist().unwrap();
 
     let (batch, _) =
@@ -264,10 +268,11 @@ fn skipped_entries_become_tombstones() {
         batch.non_candidates,
         vec![
             (vanished.clone(), 100, 10),
+            (pipe.clone(), 100, 0),
             (movie.clone(), 100, 50),
             (folder.clone(), 100, 4096),
         ],
-        "deleted file, policy-skipped file and directory are all tombstoned"
+        "deleted file, FIFO, policy-skipped file and directory are all tombstoned"
     );
 
     // Record the tombstones + the extracted file in the content namespace:
@@ -318,6 +323,50 @@ fn symlinks_skip_content_extraction() {
     assert_eq!(hits[0].path, target.to_string_lossy());
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn extraction_passes_over_fifo() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-fifo");
+    let note = base.join("note.md");
+    let pipe = base.join("pipe.txt");
+    let _env = [
+        EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
+        EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap()),
+    ];
+    std::fs::write(&note, b"reachable body").unwrap();
+    make_fifo(&pipe);
+
+    // A file listed by a watcher event skips the selection's settling.
+    let index = crate::index::open_content_or_create(&base.join("idx")).unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker_index = index.clone();
+    std::thread::spawn(move || {
+        let indexed = index_content_limited(&worker_index, vec![pipe, note], None);
+        let _ = done_tx.send(indexed.map_err(|e| format!("{e:#}")));
+    });
+    let indexed = done_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("extraction waits on the FIFO");
+    assert_eq!(indexed, Ok(1));
+    let hits = crate::query::search_content(&index.reader().unwrap(), "reachable", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "coreutils makes the FIFO, outside this crate"
+)]
+fn make_fifo(path: &std::path::Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo {}", path.display());
 }
 
 #[test]

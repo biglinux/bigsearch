@@ -384,14 +384,13 @@ fn run_extraction_worker(
         };
         let Some(path) = next else { break };
         throttle::yield_for_pressure();
-        // One stat answers both questions: the selection pass already
-        // stat'ed this file, and asking again for mtime/size and then a
-        // third time for the symlink check was pure repetition.
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             continue;
         };
         let (mtime, size) = catalogue::meta_pair(&metadata);
-        if metadata.is_symlink() {
+        // Only a regular file is read: a link would duplicate its target's
+        // body, and opening a FIFO blocks this worker until a writer comes.
+        if !metadata.is_file() {
             let _ = tx.send(ContentResult {
                 path,
                 mtime,
@@ -694,8 +693,8 @@ impl CatalogSelection {
     fn take(&mut self, path: PathBuf, mtime: i64, size: u64) -> bool {
         let path_key = path.to_string_lossy().into_owned();
         // Three ways a catalogue entry is settled without extracting it: the
-        // policy never wants it, it is already gone, or it is a directory.
-        // All get a tombstone.
+        // policy never wants it, it is already gone, or it is not a regular
+        // file. All get a tombstone.
         //
         // The vanished case has to be caught here, not in the worker: there
         // `catalogue::meta` fails and the path is skipped with no result, so no
@@ -705,16 +704,14 @@ impl CatalogSelection {
         // Only this side still holds the catalogue's mtime/size, which is
         // what the pending join compares against.
         //
-        // Directories reach this point because `meta::is_meta_candidate`
+        // The scan catalogues every file type, and `meta::is_meta_candidate`
         // answers `sniff_type` (on by default) for anything without an
-        // extension, and never asks whether the path is a file. A directory
-        // has no body and no media metadata, but its mtime changes whenever
-        // an entry is added or removed inside it, so `$HOME` itself would
-        // sit inside the edit cooldown and every content search would end
-        // with "1 file being indexed, try again shortly".
+        // extension. A directory's mtime changes whenever an entry inside it
+        // does, so `$HOME` itself would sit inside the edit cooldown; a FIFO
+        // blocks the worker that opens it, and with it the whole pass.
         let settled = match std::fs::symlink_metadata(&path) {
-            Err(_) => true,        // gone before the pass reached it
-            Ok(md) => md.is_dir(), // nothing to extract from a directory
+            Err(_) => true, // gone before the pass reached it
+            Ok(md) => !md.is_file(),
         };
         if !is_extraction_candidate(&path) || settled {
             self.after = Some(path_key);
