@@ -1052,7 +1052,8 @@ mod tests {
         writer.commit().unwrap();
         drop(writer);
 
-        let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         state.set(Path::new("/catalog/keep-alpha.txt"), 10, 1);
         state.set(Path::new("/catalog/missing-beta.txt"), 20, 2);
         state.set(Path::new("/catalog/missing-gamma.txt"), 30, 3);

@@ -29,10 +29,12 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
     let mut content_index = index::open_content_or_create(&config::content_index_dir())?;
     scan::write_effective_ignore()?;
     // The daemon's folder list does not follow this walk; its next start walks.
-    watch::forget_saved_run(&catalogue::State::load(
+    // The first state write, so a database that will not open refuses the
+    // reindex before any index is touched.
+    watch::forget_saved_run(&catalogue::State::open(
         &config::state_db_path(),
         catalogue::WATCH_NAMESPACE,
-    ))?;
+    )?)?;
 
     let (scan_roots, mut state, rebuild_content_from_state) = if explicit_roots.is_empty() {
         reconcile_plan(&mut index, &mut content_index)?
@@ -115,18 +117,19 @@ fn reconcile_plan(
     );
     let index_empty = index::document_count(&index.reader()?) == 0;
     let state = if index_empty {
+        let state = catalogue::State::empty(
+            &crate::config::state_db_path(),
+            crate::catalogue::NAME_NAMESPACE,
+        )?;
         *content_index = index::recreate_content_on_disk(&config::content_index_dir())?;
         content::clear_content_state()?;
-        catalogue::State::empty(
-            &crate::config::state_db_path(),
-            crate::catalogue::NAME_NAMESPACE,
-        )
+        state
     } else {
         ensure_content_state_matches_index(content_index)?;
-        catalogue::State::load(
+        catalogue::State::open(
             &crate::config::state_db_path(),
             crate::catalogue::NAME_NAMESPACE,
-        )
+        )?
     };
     Ok((
         available,
@@ -142,19 +145,16 @@ fn explicit_rebuild_plan(
     content_index: &mut tantivy::Index,
 ) -> Result<(Vec<PathBuf>, catalogue::State, bool)> {
     log::info!("scan roots (explicit): {explicit:?}");
+    let state = catalogue::State::empty(
+        &crate::config::state_db_path(),
+        crate::catalogue::NAME_NAMESPACE,
+    )?;
     let mut writer = index::bulk_writer(index)?;
     writer.delete_all_documents()?;
     writer.commit()?;
     *content_index = index::recreate_content_on_disk(&config::content_index_dir())?;
     content::clear_content_state()?;
-    Ok((
-        explicit,
-        catalogue::State::empty(
-            &crate::config::state_db_path(),
-            crate::catalogue::NAME_NAMESPACE,
-        ),
-        false,
-    ))
+    Ok((explicit, state, false))
 }
 
 fn clear_content_sidecar(content_index: &tantivy::Index) -> Result<()> {
@@ -660,17 +660,14 @@ fn startup_name_state(empty: bool, content_index: &tantivy::Index) -> catalogue:
     if let Err(e) = ensure_content_state_matches_index(content_index) {
         log::warn!("check content index state: {e:#}");
     }
+    let mut state = catalogue::State::load(
+        &crate::config::state_db_path(),
+        crate::catalogue::NAME_NAMESPACE,
+    );
     if empty {
-        catalogue::State::empty(
-            &crate::config::state_db_path(),
-            crate::catalogue::NAME_NAMESPACE,
-        )
-    } else {
-        catalogue::State::load(
-            &crate::config::state_db_path(),
-            crate::catalogue::NAME_NAMESPACE,
-        )
+        state.clear();
     }
+    state
 }
 
 fn prune_content_at_start(content_index: &tantivy::Index) {

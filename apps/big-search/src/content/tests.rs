@@ -12,7 +12,8 @@ fn pending_batch_reports_more_work() {
     let content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     let batch = pending_batch_with_byte_limit(
         vec![first.clone(), second.clone()],
         &content_state,
@@ -41,7 +42,8 @@ fn forgotten_row_is_read_again() {
     let mut content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     content_state.set(&note, mtime, size);
     assert!(
         pending_batch_with_byte_limit(vec![note.clone()], &content_state, 10, u64::MAX)
@@ -71,7 +73,8 @@ fn pending_batch_stops_at_byte_budget() {
     let content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     let batch =
         pending_batch_with_byte_limit(vec![first.clone(), second], &content_state, 50, 1024 * 1024);
     assert_eq!(batch.files, vec![first]);
@@ -93,7 +96,8 @@ fn pending_batch_prioritizes_low_cost_files() {
     let content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     let batch = pending_batch_with_byte_limit(
         vec![large_pdf, small_note.clone()],
         &content_state,
@@ -122,7 +126,8 @@ fn catalog_batch_defers_recent_edits() {
     std::fs::write(&editing, b"conteudo").unwrap();
 
     let mut catalog =
-        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE)
+            .unwrap();
     catalog.set(&quiet, now - 3_600, 10); // untouched for 1h
     catalog.set(&editing, now - 10, 20); // saved 10s ago
     catalog.persist().unwrap();
@@ -251,7 +256,8 @@ fn skipped_entries_become_tombstones() {
     make_fifo(&pipe);
 
     let mut catalog =
-        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE)
+            .unwrap();
     catalog.set(&movie, 100, 50); // never an extraction candidate
     catalog.set(&note, 100, 10);
     catalog.set(&vanished, 100, 10);
@@ -280,7 +286,8 @@ fn skipped_entries_become_tombstones() {
     let mut content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     for (path, mtime, size) in &batch.non_candidates {
         content_state.set(path, *mtime, *size);
     }
@@ -450,7 +457,8 @@ fn catalog_byte_budget_is_exclusive() {
         std::fs::write(path, b"x").unwrap();
     }
     let mut catalog =
-        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE)
+            .unwrap();
     catalog.set(&a, 1_000, mib);
     catalog.set(&b, 1_000, mib);
     catalog.set(&c, 1_000, mib);
@@ -484,7 +492,8 @@ fn pending_byte_budget_is_exclusive() {
     let content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
 
     let files = vec![first.clone(), second.clone(), third.clone()];
     let batch = pending_batch_with_byte_limit(files.clone(), &content_state, 50, 2 * mib as u64);

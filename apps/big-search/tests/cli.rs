@@ -229,6 +229,33 @@ fn reindex_root_absolute_and_checked() {
     let _ = fs::remove_dir_all(&base);
 }
 
+/// A reindex whose state database will not open is refused before it touches
+/// the name index, since the catalogue it built would be kept nowhere.
+#[test]
+fn reindex_refuses_unopenable_state() {
+    let base = scratch::scratch_dir("bs-cli-state");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&xdg_storage_home).unwrap();
+    fs::write(home.join("alpha.txt"), "a").unwrap();
+    let home_str = home.to_str().unwrap();
+    run(&home, &xdg_storage_home, &["reindex", home_str]);
+    let data = xdg_storage_home.join("big-search");
+    for name in ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"] {
+        let _ = fs::remove_file(data.join(name));
+    }
+    fs::create_dir(data.join("state.sqlite")).unwrap();
+    let index_meta = || fs::read(data.join("index/meta.json")).unwrap();
+    let before = index_meta();
+    for args in [&["reindex"][..], &["reindex", home_str][..]] {
+        let output = big_search(&home, &xdg_storage_home, args).output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(index_meta() == before, "{args:?} rewrote the name index");
+    }
+    let _ = fs::remove_dir_all(&base);
+}
+
 /// `--under` names a folder the way the shell does, relative to where the
 /// command runs, `..` included.
 #[test]

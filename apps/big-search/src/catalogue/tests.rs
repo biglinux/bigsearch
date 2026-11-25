@@ -6,7 +6,7 @@ fn dedup_roundtrip() {
     let file = dir.join("state.sqlite");
     let p = Path::new("/x/y.txt");
 
-    let mut s = State::empty(&file, NAME_NAMESPACE);
+    let mut s = State::empty(&file, NAME_NAMESPACE).unwrap();
     assert!(!s.unchanged(p, 100, 5));
     s.set(p, 100, 5);
     assert!(s.unchanged(p, 100, 5));
@@ -33,7 +33,7 @@ fn full_width_inode_kept() {
     let file = dir.join("state.sqlite");
     let folder = Path::new("/x/folder");
     let inode = u64::MAX - 7;
-    let mut state = State::empty(&file, WATCH_NAMESPACE);
+    let mut state = State::empty(&file, WATCH_NAMESPACE).unwrap();
     state.set(folder, 0, inode);
     state.persist().unwrap();
     let recorded = State::load(&file, WATCH_NAMESPACE).recorded(folder);
@@ -50,7 +50,7 @@ fn cleared_state_hides_persisted_rows() {
     let file = dir.join("state.sqlite");
     let path = Path::new("/x/persisted.md");
 
-    let mut seeded = State::empty(&file, NAME_NAMESPACE);
+    let mut seeded = State::empty(&file, NAME_NAMESPACE).unwrap();
     seeded.set(path, 100, 5);
     seeded.persist().unwrap();
 
@@ -74,7 +74,7 @@ fn cleared_state_hides_persisted_rows() {
     );
 
     // A fresh empty state (clear_before_persist) also denies persisted rows.
-    let empty = State::empty(&file, NAME_NAMESPACE);
+    let empty = State::empty(&file, NAME_NAMESPACE).unwrap();
     assert!(!empty.contains(path));
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -85,7 +85,7 @@ fn cleared_state_hides_persisted_rows() {
 #[test]
 fn scan_changes_ignore_page_size() {
     let dir = crate::test_env::scratch_dir("bs-state-scan");
-    let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
+    let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE).unwrap();
     for (path, mtime) in [("/a", 1), ("/b", 1), ("/d", 1), ("/e", 1), ("/g", 1)] {
         state.set(Path::new(path), mtime, 1);
     }
@@ -124,7 +124,7 @@ fn scan_changes_ignore_page_size() {
 #[test]
 fn children_are_one_level_deep() {
     let dir = crate::test_env::scratch_dir("bs-state-children");
-    let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
+    let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE).unwrap();
     for path in ["/p/ção", "/p/ção/a", "/p/ção/s", "/p/ção/s/b", "/p/ção-2/c"] {
         state.set(Path::new(path), 1, 1);
     }
@@ -141,7 +141,7 @@ fn children_are_one_level_deep() {
 #[test]
 fn removed_tree_spares_its_siblings() {
     let dir = crate::test_env::scratch_dir("bs-state-tree");
-    let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
+    let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE).unwrap();
     for path in ["/p/t", "/p/t/a", "/p/t/s/b", "/p/t-2", "/p/t0"] {
         state.set(Path::new(path), 1, 1);
     }
@@ -174,7 +174,7 @@ fn removed_tree_spares_its_siblings() {
 #[test]
 fn retained_prefix_keeps_accented_paths() {
     let dir = crate::test_env::scratch_dir("bs-state-retain");
-    let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE);
+    let mut state = State::empty(&dir.join("state.sqlite"), NAME_NAMESPACE).unwrap();
     for path in [
         "/run/media/joão/USB",
         "/run/media/joão/USB/a.txt",
@@ -199,7 +199,8 @@ fn retained_prefix_keeps_accented_paths() {
 #[test]
 fn entries_after_merges_pending_rows() {
     let dir = crate::test_env::scratch_dir("bs-state-paths");
-    let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+    let mut state =
+        State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
     state.set(Path::new("/a/kept.md"), 1, 1);
     state.set(Path::new("/b/removed.md"), 1, 1);
     state.persist().unwrap();
@@ -228,7 +229,8 @@ fn entries_after_merges_pending_rows() {
 #[test]
 fn entries_after_pages_pending_rows() {
     let dir = crate::test_env::scratch_dir("bs-state-page-pending");
-    let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+    let mut state =
+        State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
     for path in ["/a", "/b", "/c", "/d/x", "/e"] {
         state.set(Path::new(path), 1, 1);
     }
@@ -267,11 +269,13 @@ fn entries_after_pages_pending_rows() {
 #[test]
 fn stale_entries_stream_pending_work() {
     let dir = crate::test_env::scratch_dir("bs-state-stale");
-    let mut names = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+    let mut names =
+        State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
     let mut content = State::empty(
         &dir.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
 
     names.set(Path::new("/a/extracted.md"), 100, 5);
     names.set(Path::new("/b/changed.md"), 200, 9);
@@ -307,7 +311,8 @@ fn stale_entries_stream_pending_work() {
 #[test]
 fn len_tracks_pending_overlaps_and_removals() {
     let dir = crate::test_env::scratch_dir("bs-state-len");
-    let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+    let mut state =
+        State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
     state.set(Path::new("/p/a.md"), 1, 1);
     state.set(Path::new("/p/b.md"), 1, 1);
     state.persist().unwrap();
@@ -347,7 +352,7 @@ fn on_disk_state_uses_wal_journal() {
     // tune_connection_for_low_memory switches to WAL; the default rollback
     // journal would double write amplification on every persist.
     let dir = crate::test_env::scratch_dir("bs-state-wal");
-    let state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+    let state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
     assert_eq!(state.journal_mode(), "wal");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -359,7 +364,7 @@ fn catalogue_of(
 ) -> (crate::test_env::ScratchDir, CatalogueReader) {
     let dir = crate::test_env::scratch_dir(&format!("bs-catalogue-{label}"));
     let db = dir.join("state.sqlite");
-    let mut names = State::empty(&db, NAME_NAMESPACE);
+    let mut names = State::empty(&db, NAME_NAMESPACE).unwrap();
     for (path, mtime, size) in rows {
         names.set(Path::new(path), *mtime, *size);
     }
@@ -386,7 +391,7 @@ fn newest_first_with_exact_total() {
         ],
     );
     // The content namespace shares the table and must not leak in.
-    let mut content = State::empty(&dir.join("state.sqlite"), CONTENT_NAMESPACE);
+    let mut content = State::empty(&dir.join("state.sqlite"), CONTENT_NAMESPACE).unwrap();
     content.set(Path::new("/p/content-only.jpg"), 999, 1);
     content.persist().unwrap();
 

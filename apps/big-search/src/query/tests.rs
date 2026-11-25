@@ -95,7 +95,7 @@ fn page_names(outcome: &QueryOutcome) -> Vec<String> {
 /// sizes, in a fresh directory under `dir`.
 fn catalogue_with(dir: &Path, files: &[(&Path, i64, u64)]) -> CatalogueReader {
     let db = dir.join("state/state.sqlite");
-    let mut names = State::empty(&db, NAME_NAMESPACE);
+    let mut names = State::empty(&db, NAME_NAMESPACE).unwrap();
     for (path, mtime, size) in files {
         names.set(path, *mtime, *size);
     }

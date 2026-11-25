@@ -57,37 +57,45 @@ enum PendingChange {
 }
 
 impl State {
-    /// The `namespace` rows of the state database at `db_path`, or an empty
-    /// in-memory state if the database cannot be opened.
+    /// The `namespace` rows of the state database at `db_path`.
+    ///
+    /// # Errors
+    ///
+    /// The database cannot be created, opened or given its schema.
+    pub fn open(db_path: &Path, namespace: &str) -> Result<Self> {
+        Ok(State {
+            db_path: db_path.to_path_buf(),
+            namespace: namespace.to_owned(),
+            conn: open_state_db(db_path)?,
+            pending: HashMap::new(),
+            removed_trees: Vec::new(),
+            clear_before_persist: false,
+            dirty: false,
+        })
+    }
+
+    /// [`State::open`], or an empty in-memory state that saves nothing when the
+    /// database cannot be opened, so readers and the service keep going.
     pub fn load(db_path: &Path, namespace: &str) -> Self {
-        match open_state_db(db_path) {
-            Ok(conn) => State {
-                db_path: db_path.to_path_buf(),
-                namespace: namespace.to_owned(),
-                conn,
-                pending: HashMap::new(),
-                removed_trees: Vec::new(),
-                clear_before_persist: false,
-                dirty: false,
-            },
-            Err(error) => {
-                log::warn!(
-                    "state database {} unavailable, nothing will be saved: {error:#}",
-                    db_path.display()
-                );
-                State::in_memory(db_path.to_path_buf(), namespace)
-            }
-        }
+        State::open(db_path, namespace).unwrap_or_else(|error| {
+            log::warn!(
+                "state database {} unavailable, nothing will be saved: {error:#}",
+                db_path.display()
+            );
+            State::in_memory(db_path.to_path_buf(), namespace)
+        })
     }
 
     /// Start empty (used for a forced full rebuild): the first persist replaces
-    /// every row of `namespace`. Falls back as [`State::load`] does.
-    pub fn empty(db_path: &Path, namespace: &str) -> Self {
-        State {
-            clear_before_persist: true,
-            dirty: true,
-            ..State::load(db_path, namespace)
-        }
+    /// every row of `namespace`.
+    ///
+    /// # Errors
+    ///
+    /// As [`State::open`].
+    pub fn empty(db_path: &Path, namespace: &str) -> Result<Self> {
+        let mut state = State::open(db_path, namespace)?;
+        state.clear();
+        Ok(state)
     }
 
     /// Whether `path` is recorded with this exact mtime+size (→ unchanged).

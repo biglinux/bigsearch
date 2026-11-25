@@ -522,7 +522,8 @@ mod tests {
         let mut writer = index.writer(15_000_000).unwrap();
         // The production walk, not a parallel one: `reconcile_subtree_inline` is
         // what the watcher calls when a directory appears.
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let mut dirs = Vec::new();
         let _ = reconcile_subtree_inline(
             &writer,
@@ -562,7 +563,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let mut writer = index.writer(15_000_000).unwrap();
 
         let outcome = reconcile_subtree_inline(
@@ -677,7 +679,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let mut writer = index.writer(15_000_000).unwrap();
         let mut dirs = Vec::new();
         let outcome = reconcile_subtree_inline(
@@ -705,7 +708,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let writer = index.writer(15_000_000).unwrap();
         let first = reconcile_subtree_inline(
             &writer,
@@ -766,7 +770,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let writer = index.writer(15_000_000).unwrap();
 
         let mut dirs = Vec::new();
