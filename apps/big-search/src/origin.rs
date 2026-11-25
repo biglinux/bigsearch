@@ -534,9 +534,22 @@ fn open_writer(path: &Path) -> Result<Connection> {
         "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
         params![SCHEMA_VERSION],
     )?;
-    // No `PRAGMA optimize`: each registration opens this database, and the
-    // ANALYZE it ran failed some with "database is locked", without the busy
-    // wait, beside another connection.
+    // Lookups go by key or by one index and need no statistics: those taken
+    // while the store was small have every lookup read the whole table once it
+    // grows, and the ANALYZE of `PRAGMA optimize` fails a registration beside
+    // another connection ("database is locked") without the busy wait.
+    let has_statistics: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = 'sqlite_stat1')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_statistics {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS sqlite_stat1; DROP TABLE IF EXISTS sqlite_stat4;",
+        )?;
+        // The connection that drops them keeps the statistics it loaded.
+        return open_writer(path);
+    }
     Ok(conn)
 }
 
@@ -886,6 +899,49 @@ mod tests {
                 .origin(Path::new("/missing"))
                 .is_none()
         );
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// Statistics taken while the store held one record would have every
+    /// lookup read the whole table once it grew; opening the store drops them,
+    /// also for a connection already open.
+    #[test]
+    fn open_drops_statistics() {
+        let db = temporary_origin_path("statistics");
+        let insert = "INSERT INTO file_origin(path, dev, ino, kind, confidence, label,
+                                              first_seen_at, updated_at)
+                      VALUES (?1, 1, ?2, 'downloaded', 1, 'x', 0, 0)";
+        {
+            let conn = open_writer(&db).unwrap();
+            conn.execute(insert, params!["/0", 0]).unwrap();
+            conn.execute_batch("ANALYZE").unwrap();
+            for ino in 1..2000 {
+                conn.execute(insert, params![format!("/{ino}"), ino])
+                    .unwrap();
+            }
+        }
+        let plan = |conn: &Connection| -> String {
+            conn.query_row(
+                "EXPLAIN QUERY PLAN SELECT path FROM file_origin
+                  WHERE dev = 1 AND ino = 7 ORDER BY updated_at DESC LIMIT 1",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap()
+        };
+        let watcher = Connection::open(&db).unwrap();
+        assert!(!plan(&watcher).contains("idx_file_origin_dev_ino"));
+        let conn = open_writer(&db).unwrap();
+        // A statement that runs, unlike EXPLAIN, notices the schema changed.
+        watcher
+            .query_row("SELECT count(*) FROM file_origin", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        for conn in [&conn, &watcher] {
+            let plan = plan(conn);
+            assert!(plan.contains("idx_file_origin_dev_ino"), "{plan}");
+        }
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
