@@ -22,7 +22,7 @@ use content_backfill::{ContentBackfill, compact_when_worth_it, run_content_backf
 use event_batch::{WatchBatch, ingest, observe_origin_batch};
 use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::recommended_watcher;
-use reconcile::{evict, reconcile, reconcile_forced};
+use reconcile::{evict, reconcile_batch, reconcile_forced};
 use start::{catch_up_at_start, watch_initial_dirs};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -565,7 +565,7 @@ impl WatchLoop<'_> {
         // state is worth a version, and the search never waits on this.
         let history_paths = std::mem::take(&mut batch.history_paths);
         let history_renames = std::mem::take(&mut batch.history_renames);
-        let mut outcome = reconcile(
+        let mut outcome = reconcile_batch(
             active_index_writer(&mut self.writer),
             &self.f,
             &mut self.watches,

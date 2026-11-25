@@ -15,7 +15,7 @@ use tantivy::IndexWriter;
 /// commit and whether state/content work happened. A changed catalogued
 /// folder among `watched`, which has a pass of its own, only gets its row
 /// refreshed; any other is walked whole.
-pub(super) fn reconcile(
+pub(super) fn reconcile_batch(
     writer: &mut IndexWriter,
     f: &Fields,
     watches: &mut Watches,

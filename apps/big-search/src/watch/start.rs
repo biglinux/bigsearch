@@ -1,7 +1,7 @@
 //! A start's catch-up: the saved or walked folders watched again, and what
 //! changed while no watch covered them compared with the catalogue.
 
-use super::{StartDirs, Watches, active_index_writer, epoch_secs, evict, reconcile};
+use super::{StartDirs, Watches, active_index_writer, epoch_secs, evict, reconcile_batch};
 use crate::catalogue::State;
 use crate::index::Fields;
 use crate::scan;
@@ -228,7 +228,7 @@ pub(super) fn catch_up_at_start(
             continue;
         };
         entries.extend(state.children(&dir)?);
-        outcome.absorb(reconcile(
+        outcome.absorb(reconcile_batch(
             index_writer,
             f,
             watches,
@@ -271,7 +271,7 @@ fn read_replaced_anew(
         ) {
             outcome.removed();
         }
-        outcome.absorb(reconcile(
+        outcome.absorb(reconcile_batch(
             index_writer,
             f,
             watches,
