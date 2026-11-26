@@ -490,8 +490,12 @@ impl WatchLoop<'_> {
             WatchMessage::Heard => {}
         }
         if self.runtime.paused.load(Ordering::Relaxed) {
-            // Dropped while paused; Resume reconciles what was missed.
-            self.heard.take();
+            // Resume reconciles what the index missed; saves and renames still
+            // reach the versions worker, or the next start parks the rows of
+            // documents saved while paused.
+            if let Some(batch) = self.heard.take() {
+                self.send_history(batch.history_renames, batch.history_paths);
+            }
             return Ok(());
         }
         self.index_burst()
@@ -501,15 +505,16 @@ impl WatchLoop<'_> {
     /// after a stop, so a save made just before it still reaches the versions
     /// worker. A request or another stop that arrives meanwhile is dropped.
     fn apply_last_burst(&mut self) -> Result<()> {
-        if self.runtime.paused.load(Ordering::Relaxed) {
-            return Ok(());
-        }
         let deadline = Instant::now() + DEBOUNCE;
         while self.wait_out_burst(deadline).is_some() {}
-        match self.heard.take() {
-            Some(batch) => self.apply_batch(batch),
-            None => Ok(()),
+        let Some(batch) = self.heard.take() else {
+            return Ok(());
+        };
+        if self.runtime.paused.load(Ordering::Relaxed) {
+            self.send_history(batch.history_renames, batch.history_paths);
+            return Ok(());
         }
+        self.apply_batch(batch)
     }
 
     fn reindex_path(&mut self, path: PathBuf) -> Result<()> {
@@ -641,16 +646,7 @@ impl WatchLoop<'_> {
                 folder,
             )?);
         }
-        for (from, to) in history_renames {
-            let _ = self
-                .history_tx
-                .send(crate::history::HistoryEvent::Renamed(from, to));
-        }
-        for path in history_paths {
-            let _ = self
-                .history_tx
-                .send(crate::history::HistoryEvent::Changed(path));
-        }
+        self.send_history(history_renames, history_paths);
         let walk_started = if let Some(cause) = batch.rescan {
             match cause {
                 Rescan::Overflowed => log::warn!("inotify overflow: full rescan"),
@@ -663,6 +659,23 @@ impl WatchLoop<'_> {
             None
         };
         self.finish_batch(outcome, walk_started)
+    }
+
+    fn send_history(
+        &self,
+        renames: Vec<(PathBuf, PathBuf)>,
+        saves: std::collections::HashSet<PathBuf>,
+    ) {
+        for (from, to) in renames {
+            let _ = self
+                .history_tx
+                .send(crate::history::HistoryEvent::Renamed(from, to));
+        }
+        for path in saves {
+            let _ = self
+                .history_tx
+                .send(crate::history::HistoryEvent::Changed(path));
+        }
     }
 
     /// Walk every source against the catalogue on request, as one batch.

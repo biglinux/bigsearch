@@ -701,7 +701,10 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   through the path it was parked from, and expires as a missing document's
   does. So a document moved, or edited, while the service was stopped starts
   a new history where it is; its earlier versions wait, parked or at the
-  path it left, until they expire. At one path, files are told apart by
+  path it left, until they expire. A pause stops indexing, not this: heard
+  saves and renames still reach the versions worker. A folder left unwatched
+  (past `max_user_watches`) hears nothing, so its documents fare as if
+  edited while stopped. At one path, files are told apart by
   `ino` and birth time; the filesystem is its `f_fsid`, which XFS draws from
   the device number, so it serves only to reach a file's rows under other
   paths. It never keeps a version of a file reached through a folder

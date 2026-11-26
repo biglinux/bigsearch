@@ -42,6 +42,47 @@ fn stop_window_keeps_late_rename() {
     );
 }
 
+/// Guards: persisted data: saves and renames heard while paused, before and
+/// after a stop, still reach the versions worker, or the next start parks
+/// those documents' rows.
+#[test]
+fn paused_loop_keeps_history_events() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let base = scratch_dir("bs-watch-paused");
+    let _data = EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap());
+    let _config = EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap());
+    let roots = [base.join("docs")];
+    let (watch_loop, tx, history_rx) = stopping_loop(&base, &roots);
+    watch_loop.runtime.paused.store(true, Ordering::Relaxed);
+    let saved = roots[0].join("a.odt");
+    let (from, to) = (roots[0].join("b.odt"), roots[0].join("c.odt"));
+    let renamed = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+        .add_path(from.clone())
+        .add_path(to.clone());
+    watch_loop.heard.hear(Ok(created(saved.clone())));
+    tx.send(WatchMessage::Stop(0)).unwrap();
+    let heard = Arc::clone(&watch_loop.heard);
+    let late = std::thread::spawn(move || {
+        std::thread::sleep(DEBOUNCE / 5);
+        heard.hear(Ok(renamed));
+    });
+    assert_eq!(watch_loop.run_until_stopped().unwrap(), 0);
+    late.join().unwrap();
+    let heard: Vec<HistoryEvent> = history_rx.try_iter().collect();
+    assert!(
+        heard
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::Changed(path) if *path == saved)),
+        "a save heard while paused never reached the versions worker"
+    );
+    assert!(
+        heard
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::Renamed(a, b) if *a == from && *b == to)),
+        "a rename heard at a stop while paused never reached the versions worker"
+    );
+}
+
 /// A burst past [`MAX_PATHS`] collapses into the folders that hold its
 /// paths, a source standing for itself, and past [`MAX_FOLDERS`] into a walk
 /// of the sources, told apart from a kernel overflow; the loop is woken once
