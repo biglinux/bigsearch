@@ -30,6 +30,7 @@
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
@@ -43,15 +44,15 @@ mod store;
 mod tests;
 mod worker;
 
-pub(crate) use disk::{Refusal, clone_file};
-pub use eligibility::{eligible_metadata, may_be_a_document};
-pub use worker::{HistoryEvent, Pending, run_worker};
+pub(crate) use disk::{Refusal, clone_file, identity};
+pub use eligibility::may_be_a_document;
+pub use worker::{HistoryEvent, Pending, check_kept_paths, run_worker};
 
-use disk::disk_capacity;
-use eligibility::{eligible_name, git_work_tree};
+use disk::{born, disk_capacity};
+use eligibility::{eligible_metadata, eligible_name, work_tree};
 use store::{
-    file_id_for_path, follow_rename, is_live_session, now_secs, object_name, open_store,
-    prepare_store,
+    file_id_for_path, first_stored, follow_renames, is_live_session, kept_at, now_secs,
+    object_name, open_store, park, parked_from, prepare_store, rows_of_file, rows_under,
 };
 
 /// Why a version was written.
@@ -116,20 +117,53 @@ pub struct Version {
 /// One store and one lock: whether this disk can share blocks, and whether
 /// space has run out, are learned by *trying* to write a version, so a second
 /// store would report "not tested yet" forever.
-pub type SharedHistory = std::sync::Arc<std::sync::Mutex<History>>;
+#[derive(Clone)]
+pub struct SharedHistory(Arc<Mutex<History>>);
+
+impl SharedHistory {
+    pub fn new(history: History) -> Self {
+        Self(Arc::new(Mutex::new(history)))
+    }
+
+    /// The store, also after a thread panicked holding it. A panic leaves what
+    /// a crash at that point would: SQLite rolls back the transaction it drops,
+    /// rows whose objects were already removed wait for the next start's sweep,
+    /// and the flags are set again by the next step.
+    pub fn lock(&self) -> MutexGuard<'_, History> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 /// A version [`History::prepare_version`] decided to keep, before its copy.
 struct VersionToCopy {
     path: PathBuf,
     object: PathBuf,
     name: String,
-    file_id: i64,
     metadata: std::fs::Metadata,
     reason: Reason,
 }
 
-fn not_kept_error(why: &str) -> anyhow::Error {
-    anyhow::anyhow!("the current state was not kept: {why}")
+fn not_kept_error(why: &'static str) -> anyhow::Error {
+    anyhow::Error::msg(why).context("the current state was not kept")
+}
+
+/// Now, in the nanoseconds [`born`] counts in.
+fn now_nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+/// The device holding a file, which a refusal to clone is filed against for
+/// this run.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "kept: a refusal lasts this run, on one mount"
+)]
+fn device(metadata: &std::fs::Metadata) -> u64 {
+    metadata.dev()
 }
 
 /// The versions store.
@@ -152,6 +186,10 @@ pub struct History {
     budget_unchecked: bool,
     skip_git_repositories: bool,
     respect_gitignore: bool,
+    /// When this run of the service opened the store, in the nanoseconds
+    /// [`born`] counts in: a file born before it may have reached its path
+    /// while nothing watched.
+    started_at: i64,
 }
 
 impl History {
@@ -173,6 +211,7 @@ impl History {
             budget_unchecked: false,
             skip_git_repositories: settings.skip_git_repositories,
             respect_gitignore: settings.respect_gitignore,
+            started_at: now_nanos(),
         };
         let disabled = |reason| store(None, Support::Unavailable(reason), 0);
         if !settings.enabled {
@@ -219,7 +258,7 @@ impl History {
     ///
     /// A store turned off still holds what it kept before, so it is erased from
     /// disk: the database files and the whole objects directory.
-    pub fn forget_everything(&mut self) -> Result<()> {
+    pub(crate) fn forget_everything(&mut self) -> Result<()> {
         let Some(conn) = &self.conn else {
             match std::fs::remove_dir_all(&self.objects) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => {
@@ -253,8 +292,15 @@ impl History {
         Ok(())
     }
 
-    /// Forget the versions of one document, also from a store turned off.
-    pub fn forget(&mut self, path: &Path) -> Result<()> {
+    /// Forget the versions of one document, also from a store turned off:
+    /// every row kept under one of `spellings` or parked from one of them or
+    /// from `file_at`, and every row recorded for the file at `file_at`. A
+    /// forget errs toward erasing: what is listed through any of them goes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database or the stored copies cannot be changed.
+    pub fn forget(&mut self, spellings: &[impl AsRef<Path>], file_at: Option<&Path>) -> Result<()> {
         let opened;
         let conn = match &self.conn {
             Some(conn) => conn,
@@ -267,53 +313,168 @@ impl History {
                 &opened
             }
         };
-        let Some(file_id) = file_id_for_path(conn, path)? else {
-            return Ok(());
-        };
-        let objects: Vec<String> = conn
-            .prepare("SELECT object FROM versions WHERE file_id = ?1")?
-            .query_map(params![file_id], |row| row.get::<_, String>(0))?
-            .flatten()
-            .collect();
-        for name in &objects {
-            let _ = std::fs::remove_file(self.objects.join(name));
+        let paths: Vec<&Path> = spellings.iter().map(AsRef::as_ref).chain(file_at).collect();
+        let mut file_ids = parked_from(conn, &paths)?;
+        for path in &paths {
+            file_ids.extend(file_id_for_path(conn, path)?);
         }
-        conn.execute("DELETE FROM versions WHERE file_id = ?1", params![file_id])?;
-        conn.execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+        if let Some(file_at) = file_at
+            && let Ok(metadata) = std::fs::symlink_metadata(file_at)
+        {
+            let file = identity(file_at, &metadata)
+                .with_context(|| format!("read {}", file_at.display()))?;
+            file_ids.extend(rows_of_file(conn, file)?);
+        }
+        file_ids.sort_unstable();
+        file_ids.dedup();
+        self.erase_rows(conn, &file_ids)
+    }
+
+    /// Delete these rows with their versions: the objects first, as
+    /// [`Self::forget_everything`] explains.
+    fn erase_rows(&self, conn: &Connection, file_ids: &[i64]) -> Result<()> {
+        for &file_id in file_ids {
+            let objects: Vec<String> = conn
+                .prepare("SELECT object FROM versions WHERE file_id = ?1")?
+                .query_map(params![file_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for name in &objects {
+                let _ = std::fs::remove_file(self.objects.join(name));
+            }
+            conn.execute("DELETE FROM versions WHERE file_id = ?1", params![file_id])?;
+            conn.execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+        }
         Ok(())
     }
 
-    /// Follow a renamed document: keep its history under the destination name.
+    /// Follow a renamed document, or every document in a renamed folder: keep
+    /// their history under the destination name.
     ///
     /// The watcher hears the rename as a pair (the kernel gives both names in
     /// one event), and that pair is the only reliable way to follow a document
     /// that is renamed and then saved: the save replaces the inode, so by the
     /// time anything looks, neither the source name nor its identity is there
     /// to match on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database cannot be written.
     pub fn note_rename(&self, from: &Path, to: &Path) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
+        let mut moves: Vec<(PathBuf, PathBuf)> = rows_under(conn, from)?
+            .into_iter()
+            .filter_map(|(_, kept)| {
+                let moved = to.join(kept.strip_prefix(from).ok()?);
+                Some((kept, moved))
+            })
+            .collect();
+        moves.push((from.to_path_buf(), to.to_path_buf()));
         // Only to a place the versions could be asked for again. A document
         // renamed into a hidden name is on its way out: a file manager deletes
         // for good with one rename to `.something-delete-...` and then an
         // unlink, and following it there would file the history
         // under a name nobody can type, out of reach of the request to forget it.
-        if eligible_name(to).is_none() {
+        moves.retain(|(_, moved)| eligible_name(moved).is_ok());
+        // rename(2) moves a folder only onto an empty one, and nothing lies
+        // below a file, so every row below the destination is a document's
+        // that left it, deleted or moved while the service was stopped:
+        // parked, never handed to one arriving there.
+        let parked = conn.unchecked_transaction()?;
+        for (file_id, _) in rows_under(conn, to)? {
+            park(conn, file_id)?;
+        }
+        parked.commit()?;
+        follow_renames(
+            conn,
+            moves
+                .iter()
+                .map(|(kept, moved)| (kept.as_path(), moved.as_path())),
+        )
+    }
+
+    /// Settle the row at `path` once the watcher heard a change there, before
+    /// its version is due: the file there now is the row's document saved
+    /// again, unless that document was found gone, so another file arrived
+    /// and the row is parked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database cannot be written.
+    pub fn note_change(&self, path: &Path) -> Result<()> {
+        let Some(conn) = &self.conn else {
+            return Ok(());
+        };
+        let Some(kept) = kept_at(conn, path)? else {
+            return Ok(());
+        };
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return Ok(());
+        };
+        if !metadata.is_file() || kept.records(&metadata) {
             return Ok(());
         }
-        follow_rename(conn, from, to)
+        if kept.missing_since.is_some() {
+            return park(conn, kept.id);
+        }
+        let (fs, ino, born) =
+            identity(path, &metadata).with_context(|| format!("read {}", path.display()))?;
+        conn.execute(
+            "UPDATE files SET fs = ?2, ino = ?3, born = ?4 WHERE id = ?1",
+            params![kept.id, fs, ino, born],
+        )?;
+        Ok(())
+    }
+
+    /// Refuse a restore through `spelled`, a path that leads to `resolved`
+    /// now, when versions are kept under `spelled` and a file is at
+    /// `resolved`: they were kept for what was at `spelled`, and the restore
+    /// that follows could write a version of one document over another.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming both paths when refused, and when the versions
+    /// database or `resolved` cannot be read.
+    pub fn check_restore_through(&self, spelled: &Path, resolved: &Path) -> Result<()> {
+        let Some(conn) = &self.conn else {
+            return Ok(());
+        };
+        if file_id_for_path(conn, spelled)?.is_none() {
+            return Ok(());
+        }
+        match std::fs::symlink_metadata(resolved) {
+            Ok(_) => anyhow::bail!(
+                "{} leads to {} now, and nothing shows it is the file its versions were kept from",
+                spelled.display(),
+                resolved.display()
+            ),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error).with_context(|| format!("read {}", resolved.display())),
+        }
     }
 
     /// The earlier versions of one document, newest first.
     ///
     /// The state the document is in right now is left out: the newest version
-    /// is normally a clone of it, and "go back" to it would do nothing.
-    pub fn versions(&self, path: &Path) -> Result<Vec<Version>> {
+    /// is normally a clone of it, and "go back" to it would do nothing. The
+    /// document is the first of `spellings` that has a stored row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database cannot be read.
+    pub fn versions(&self, spellings: &[impl AsRef<Path>]) -> Result<Vec<Version>> {
         let Some(conn) = &self.conn else {
             return Ok(Vec::new());
         };
-        let Some(file_id) = file_id_for_path(conn, path)? else {
+        let Some((file_id, path)) = first_stored(conn, spellings)? else {
             return Ok(Vec::new());
         };
         let live = std::fs::metadata(path).ok();
@@ -335,17 +496,19 @@ impl History {
                 row.get::<_, i64>(7)?,
             ))
         })?;
-        Ok(rows
-            .flatten()
-            .filter(|(version, mtime_s, mtime_ns)| {
-                !live.as_ref().is_some_and(|metadata| {
-                    *mtime_s == metadata.mtime()
-                        && *mtime_ns == metadata.mtime_nsec()
-                        && version.size == metadata.len()
-                })
-            })
-            .map(|(version, _, _)| version)
-            .collect())
+        let mut versions = Vec::new();
+        for row in rows {
+            let (version, mtime_s, mtime_ns) = row?;
+            let is_live = live.as_ref().is_some_and(|metadata| {
+                mtime_s == metadata.mtime()
+                    && mtime_ns == metadata.mtime_nsec()
+                    && version.size == metadata.len()
+            });
+            if !is_live {
+                versions.push(version);
+            }
+        }
+        Ok(versions)
     }
 
     /// Keep the state `path` is in now, if it earns a version.
@@ -355,6 +518,11 @@ impl History {
     ///
     /// Before a restore, a state that exists but could not be kept is an error:
     /// the caller is about to overwrite it, and `Ok` would let it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the versions database or store cannot be written, and before a
+    /// restore when the current state exists but cannot be kept.
     pub fn save_version(&mut self, path: &Path, reason: Reason) -> Result<bool> {
         let Some(version) = self.prepare_version(path, reason)? else {
             return Ok(false);
@@ -370,15 +538,26 @@ impl History {
     /// holding the store's lock, which a file manager's request may be
     /// waiting on.
     fn prepare_version(&mut self, path: &Path, reason: Reason) -> Result<Option<VersionToCopy>> {
-        let not_kept = |why: &str| {
+        let not_kept = |why: &'static str| {
             if reason == Reason::BeforeRestore {
                 Err(not_kept_error(why))
             } else {
                 Ok(None)
             }
         };
-        let Some(metadata) = eligible_metadata(path) else {
-            return Ok(None);
+        let metadata = match eligible_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(why) => {
+                // A restore over no file, or an empty one, loses nothing.
+                let lost = reason == Reason::BeforeRestore
+                    && std::fs::symlink_metadata(path)
+                        .is_ok_and(|metadata| !metadata.is_file() || metadata.len() > 0);
+                return if lost {
+                    Err(not_kept_error(why))
+                } else {
+                    Ok(None)
+                };
+            }
         };
         if self.conn.is_none() {
             return not_kept("versions are turned off");
@@ -388,7 +567,7 @@ impl History {
         if reason != Reason::BeforeRestore && self.left_to_git(path) {
             return Ok(None);
         }
-        if self.hopeless_devices.contains(&metadata.dev()) {
+        if self.hopeless_devices.contains(&device(&metadata)) {
             return not_kept("this disk cannot share blocks");
         }
         // The baseline is allowed even when space is short: it shares the live
@@ -413,13 +592,13 @@ impl History {
             object: self.objects.join(&name),
             name,
             path: path.to_path_buf(),
-            file_id,
             metadata,
             reason,
         }))
     }
 
-    /// Record a version once its copy was attempted.
+    /// Record a version once its copy was attempted, under the row its path
+    /// has now: a request may have moved or forgotten that row during the copy.
     fn finish_version(
         &mut self,
         version: VersionToCopy,
@@ -436,25 +615,41 @@ impl History {
         if self.support == Support::Untested {
             self.support = Support::Ready;
         }
+        let conn = self.conn.as_ref().expect("checked by the caller");
+        let Some(file_id) = file_id_for_path(conn, &version.path)? else {
+            let _ = std::fs::remove_file(&version.object);
+            return if version.reason == Reason::BeforeRestore {
+                Err(not_kept_error(
+                    "its versions were forgotten during the copy",
+                ))
+            } else {
+                Ok(false)
+            };
+        };
         self.record_version(
-            version.file_id,
+            file_id,
             &version.path,
             &version.metadata,
             &version.name,
             version.reason,
         )?;
-        self.prune_file(version.file_id)?;
         self.budget_unchecked = true;
+        if let Err(error) = self.prune_file(file_id) {
+            log::warn!(
+                "kept a version of {}, but could not thin its older ones: {error:#}",
+                version.path.display()
+            );
+        }
         Ok(true)
     }
 
-    /// Whether git, not this store, looks after `path`, as far as the settings
-    /// say to leave it there.
+    /// Whether git or Jujutsu, not this store, looks after `path`, as far as
+    /// the settings say to leave it there.
     fn left_to_git(&self, path: &Path) -> bool {
         if !self.skip_git_repositories && !self.respect_gitignore {
             return false;
         }
-        git_work_tree(path).is_some()
+        work_tree(path).is_some()
             && (self.skip_git_repositories || crate::scan::repo_ignored(path, false))
     }
 
@@ -527,60 +722,45 @@ impl History {
             .collect()
     }
 
-    /// Find or create the catalogue row for this document.
-    ///
-    /// Two rules, in order. The path comes first because that is what an atomic
-    /// save looks like: same name, brand-new inode. Identity comes second, and
-    /// only when the row's path is gone; otherwise two hard links to one inode
-    /// would take turns renaming each other's history. Identity includes the
-    /// birth time where the filesystem records one: XFS hands a deleted
-    /// document's inode number to the next new file, which must not inherit
-    /// that document's versions. A row without one (written before it was
-    /// recorded, or on a filesystem without it) matches on `(dev, ino)` alone.
+    /// Find or create the row for this document: the row at its path, unless it
+    /// records another file that arrived unheard, which parks it (DESIGN.md, section 11).
     fn upsert_file(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<i64> {
         let conn = self.conn.as_ref().expect("checked by the caller");
         let key = path.to_string_lossy().into_owned();
-        let born = metadata
-            .created()
-            .ok()
-            .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
-            .and_then(|since| i64::try_from(since.as_nanos()).ok());
-        let (dev, ino) = (metadata.dev() as i64, metadata.ino() as i64);
-        if let Some(id) = file_id_for_path(conn, path)? {
-            // Only on a change: an UPDATE that rewrites the same values still
-            // writes the page to the WAL, and every save passes through here.
-            conn.execute(
-                "UPDATE files SET dev = ?2, ino = ?3, born = ?4, missing_since = NULL
-                  WHERE id = ?1 AND (dev IS NOT ?2 OR ino IS NOT ?3 OR born IS NOT ?4
-                                     OR missing_since IS NOT NULL)",
-                params![id, dev, ino, born],
-            )?;
-            return Ok(id);
-        }
-        let renamed: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT id, current_path FROM files
-                  WHERE dev = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)
-                  ORDER BY created_at DESC LIMIT 1",
-                params![dev, ino, born],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((id, previous)) = renamed
-            && !Path::new(&previous).exists()
-        {
-            conn.execute(
-                "UPDATE files SET current_path = ?2, born = ?3, missing_since = NULL WHERE id = ?1",
-                params![id, key, born],
-            )?;
-            return Ok(id);
-        }
-        conn.execute(
-            "INSERT INTO files(current_path, dev, ino, born, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![key, dev, ino, born, now_secs()],
-        )?;
-        Ok(conn.last_insert_rowid())
+        let (fs, ino, born) =
+            identity(path, metadata).with_context(|| format!("read {}", path.display()))?;
+        let transaction = conn.unchecked_transaction()?;
+        let id = match kept_at(conn, path)? {
+            Some(kept)
+                if kept.records(metadata)
+                    || (kept.missing_since.is_none()
+                        && born.is_none_or(|born| born >= self.started_at)) =>
+            {
+                // Only on a change: an UPDATE that rewrites the same values
+                // still writes the page to the WAL, and every save passes
+                // through here.
+                conn.execute(
+                    "UPDATE files SET fs = ?2, ino = ?3, born = ?4, missing_since = NULL
+                      WHERE id = ?1 AND (fs IS NOT ?2 OR ino IS NOT ?3 OR born IS NOT ?4
+                                         OR missing_since IS NOT NULL)",
+                    params![kept.id, fs, ino, born],
+                )?;
+                kept.id
+            }
+            arrived_over => {
+                if let Some(kept) = arrived_over {
+                    park(conn, kept.id)?;
+                }
+                conn.execute(
+                    "INSERT INTO files(current_path, fs, ino, born, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![key, fs, ino, born, now_secs()],
+                )?;
+                conn.last_insert_rowid()
+            }
+        };
+        transaction.commit()?;
+        Ok(id)
     }
 
     fn record_version(
@@ -617,7 +797,7 @@ impl History {
         match refusal {
             // The whole device cannot do this. One answer for every file on it.
             Refusal::Device(reason) => {
-                self.hopeless_devices.push(metadata.dev());
+                self.hopeless_devices.push(device(metadata));
                 if self.support == Support::Untested {
                     self.support = Support::Unavailable(reason);
                     log::info!("file history is not available here: {}", reason.as_str());

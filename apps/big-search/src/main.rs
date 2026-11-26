@@ -147,10 +147,10 @@ fn colored_usage() -> String {
     let color = cyan("Color");
     format!(
         "{title}: fast local search of file names and contents\n\n\
-{usage}:\n  big-search [--color auto|always|never] <query>\n  big-search content <query>           search inside the indexed files\n  big-search both <query>              names and contents, without duplicates\n  big-search config show               the effective profile\n  big-search config preset low-memory  the profile for a weak machine\n  big-search reindex [ROOT...]         rebuild the index\n\n\
+{usage}:\n  big-search [--color auto|always|never] <query>\n  big-search content <query>           search inside the indexed files\n  big-search both <query>              names and contents, without duplicates\n  big-search config show               the effective profile\n  big-search config preset low-memory  the profile for a weak machine\n  big-search reindex                   rebuild the index of the searched folders\n  big-search reindex ROOT...           an index of only these folders, until the\n                                       next reindex or service start\n\n\
 {commands}:\n  count           count catalogued entries; takes --under DIR\n  list            list paths; takes --under DIR and -n N\n  daemon          the service: local server and change watcher; run it from\n                  big-search.service, which restarts it when a source comes or goes\n  status          what the service is doing\n  pause/resume    pause or resume background indexing\n  rescan          look for changes made while the service was stopped\n  rebuild         ask the service to rebuild\n  origin          where a file came from\n  versions        the earlier versions kept of a file\n  forget-versions forget the versions kept of a file\n  capabilities    what the running service offers\n\n\
 {origin}:\n  register-created PATH [APP_ID]           created by a program\n  register-copy SOURCE TARGET [APP_ID]     a copy\n  register-move SOURCE TARGET [APP_ID]     moved or renamed\n  register-derived SOURCE TARGET [APP_ID]  made from another file\n\n\
-{search}:\n  -n, --limit N      at most N results\n  -a, --all          up to 100000 results\n  --under DIR        only inside DIR\n  -e, --ext EXT      only this extension; may repeat\n  -p, --pages        show matching pages or slides of the visible hits\n  --origin           show where each file came from\n  --                 end of options; the rest is the query, as written\n  -V, --version      print the version\n\n\
+{search}:\n  -n, --limit N      at most N results\n  -a, --all          all results, up to {ceiling}\n  --under DIR        only inside DIR\n  -e, --ext EXT      only this extension; may repeat\n  -p, --pages        show matching pages or slides of the visible hits\n  --origin           show where each file came from\n  --                 end of options; the rest is the query, as written\n  -V, --version      print the version\n\n\
 {config}:\n  config show\n  config path\n  config set KEY VALUE   `big-search config --help` lists the keys\n  config preset names-only|low-memory|balanced|complete\n\n\
 {color}:\n  --color auto|always|never, --no-color. NO_COLOR, CLICOLOR_FORCE and CLICOLOR are honored.\n\n\
 {examples}:\n  big-search contract --ext pdf --under ~/Documents\n  big-search both goncalves report -n 20 --origin\n  big-search config preset names-only && big-search reindex\n\n\
@@ -158,6 +158,7 @@ fn colored_usage() -> String {
         dim(
             "Hidden files and anything a .gitignore excludes are not indexed. Control and\nbidirectional characters in names print as escapes (\\u{1b})."
         ),
+        ceiling = big_indexd_client::CANDIDATE_CEILING,
     )
 }
 
@@ -268,7 +269,7 @@ fn parse_query(tokens: &[String]) -> Search {
             "-a" | "--all" => limit = 100_000,
             "-p" | "--pages" => pages = true,
             "--origin" => include_origin = true,
-            "--under" => under = it.next().cloned(),
+            "--under" => under = it.next().map(|dir| folder_from_cwd(dir)),
             "--ext" | "-e" => {
                 if let Some(e) = it.next() {
                     ext.push(e.trim_start_matches('.').to_ascii_lowercase());
@@ -293,12 +294,35 @@ fn parse_query(tokens: &[String]) -> Search {
     }
 }
 
+/// `dir` as an absolute folder, relative ones read against the working
+/// directory as the shell would, `..` dropping the component before it like
+/// `cd`; catalogued paths are all absolute. Lexical, so the folder of an
+/// unplugged disk still names its offline entries.
+fn folder_from_cwd(dir: &str) -> String {
+    // No working directory, or one whose name is not UTF-8: as typed.
+    let Ok(absolute) = std::path::absolute(dir) else {
+        return dir.to_owned();
+    };
+    let mut folder = PathBuf::new();
+    for part in absolute.components() {
+        if part == std::path::Component::ParentDir {
+            folder.pop();
+        } else {
+            folder.push(part);
+        }
+    }
+    folder
+        .into_os_string()
+        .into_string()
+        .unwrap_or_else(|_| dir.to_owned())
+}
+
 /// `count`: print how many files are cataloged. `--under DIR` scopes the tally.
 fn cmd_count(tokens: &[String]) -> Result<()> {
     let s = parse_query(tokens);
     let index = index::open_read_only(&config::index_dir())?;
     let n = match s.under.as_deref() {
-        None => query::count(&index.reader()?)?,
+        None => query::count(&index.reader()?),
         Some(dir) => query::list_paths(&index.reader()?, usize::MAX, Some(dir))?.len() as u64,
     };
     println!("{n}");
@@ -355,7 +379,7 @@ fn cmd_status() -> Result<()> {
                 println!(
                     "{}",
                     yellow(&format!(
-                        "content pending: {} recently edited file(s)",
+                        "content pending: {} file(s) recently edited or busy in another program",
                         s.pending_content
                     ))
                 );
@@ -418,9 +442,11 @@ fn cmd_versions(tokens: &[String]) -> Result<()> {
         return Ok(());
     };
     let client = daemon_client()?;
-    let answer = client
-        .versions(path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let answer = match client.versions(path) {
+        Ok(answer) => answer,
+        Err(big_indexd_client::ClientError::Io(_)) => return Err(no_daemon()),
+        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+    };
     if let Some(reason) = answer.unavailable {
         println!("{path}: {}", dim(explain_unavailable(reason)));
         return Ok(());
@@ -451,9 +477,11 @@ fn cmd_forget_versions(tokens: &[String]) -> Result<()> {
         return Ok(());
     };
     let client = daemon_client()?;
-    client
-        .forget_versions(path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    match client.forget_versions(path) {
+        Ok(()) => {}
+        Err(big_indexd_client::ClientError::Io(_)) => return Err(no_daemon()),
+        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+    }
     println!("{} {path}", green("forgotten"));
     Ok(())
 }
@@ -644,27 +672,63 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
     } else {
         client.query(&s.query, mode, filter.clone(), page.clone())
     };
-    let outcome = match daemon_query {
-        Ok(outcome) => outcome,
-        Err(big_indexd_client::ClientError::Io(_)) => {
-            query_without_daemon(&s, mode, &filter, &page)?
+    // A running daemon searches with the profile it started with, which may
+    // differ from the configuration on disk now.
+    let (outcome, content_on) = match daemon_query {
+        Ok(outcome) => {
+            // A status that fails after the query answered leaves the note out.
+            let content_on = mode == "name"
+                || !client.status().is_ok_and(|status| {
+                    status
+                        .capabilities
+                        .iter()
+                        .any(|c| c == big_indexd_client::NAMES_ONLY)
+                });
+            (outcome, content_on)
         }
+        Err(big_indexd_client::ClientError::Io(_)) => (
+            query_without_daemon(&s, mode, &filter, &page)?,
+            settings::content_index_enabled(),
+        ),
         Err(e) => return Err(anyhow::anyhow!(e.to_string())),
     };
 
     print_hits(&s, &outcome);
-    // "Loading" hint: recently-edited files are still being extracted (this very
-    // search already told the daemon to prioritize them, bypassing the cooldown).
+    print_search_notes(&outcome, mode != "name" && !content_on);
+    Ok(())
+}
+
+/// What may be missing from a search, on stderr: content search off in this
+/// profile, matches past the candidate ceiling, files not yet extracted.
+fn print_search_notes(outcome: &big_indexd_client::QueryOutcome, content_off: bool) {
+    if content_off {
+        eprintln!(
+            "{}",
+            dim(
+                "content search is off in this profile; `big-search config preset balanced` turns it on"
+            )
+        );
+    }
+    if outcome.truncated {
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "the search read only the first {} matches, so some may be missing; add words to narrow it",
+                big_indexd_client::CANDIDATE_CEILING
+            ))
+        );
+    }
+    // "Loading" hint: files recently edited or busy in another program are not
+    // extracted yet (this very search already told the daemon to try them now).
     if outcome.content_pending > 0 {
         eprintln!(
             "{}",
             dim(&format!(
-                "the content of {} recently edited file(s) is still being indexed; search again in a moment",
+                "the content of {} file(s) recently edited or busy in another program is not indexed yet; search again in a moment",
                 outcome.content_pending
             ))
         );
     }
-    Ok(())
 }
 
 /// The same query against the index files, read-only, when no daemon listens.

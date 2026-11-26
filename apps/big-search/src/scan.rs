@@ -6,38 +6,39 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::io::ErrorKind::{NotFound, PermissionDenied};
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
 mod scope;
-pub use scope::{Scope, is_hidden, repo_ignored, seed_user_ignore, write_effective_ignore};
+pub(crate) use scope::work_tree_root;
+pub use scope::{Scope, repo_ignored, seed_user_ignore, write_effective_ignore};
 
 const STATE_FLUSH_ROWS: usize = 2048;
 /// Paths read from each side per page when a pass compares the disk with the
 /// catalogue: bounded memory on a catalogue of millions.
 const SCAN_PAGE: usize = 2048;
 
-/// `ignore` walker: skip hidden + every gitignore source + our effective ignore.
-/// Symlinks are never followed during the walk (`follow_links(false)`); symlinked
-/// directories the user placed at a scan root are instead resolved
-/// into separate roots by [`crate::scan_roots::resolve_roots_with_policy`], which avoids chasing the thousands
-/// of deep symlinks a tree contains (and the loops/duplication that brings).
-fn walker(root: &Path) -> ignore::Walk {
+/// `ignore` walker over what `scope` keeps, its own filters off so the walk,
+/// the watcher and a reindex read the same rules; it never follows a symlink
+/// (one at the top of a source is a source of its own).
+fn walker(root: &Path, scope: &Scope) -> ignore::Walk {
+    // The walk is sequential; the lock only meets `filter_entry`'s `Sync`.
+    let filter = std::sync::Mutex::new(scope.walk_filter(root));
     let mut b = WalkBuilder::new(root);
-    b.hidden(true) // skip dotfiles/dirs: churny and never indexed
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(true)
-        .follow_links(false);
-    let eff = crate::config::effective_ignore();
-    if eff.exists() {
-        b.add_ignore(&eff); // highest precedence, prunes the noise dirs everywhere
-    }
+    b.standard_filters(false)
+        .follow_links(false)
+        .filter_entry(move |entry| {
+            filter.lock().unwrap_or_else(PoisonError::into_inner).keeps(
+                entry.path(),
+                entry.depth(),
+                entry.file_type().is_some_and(|t| t.is_dir()),
+            )
+        });
     b.build()
 }
 
 /// Index one entry by name only (no content extraction): the fast scan path.
-pub fn add_name_only(
+pub(crate) fn add_name_only(
     writer: &IndexWriter,
     f: &Fields,
     path: &Path,
@@ -112,7 +113,7 @@ pub fn delete_tree(writer: &IndexWriter, f: &Fields, path: &Path) {
 /// Replace the document for `path` by name only. Content/metadata extraction is
 /// deferred to the throttled background backfill; doing it here
 /// would make inotify bursts read large files synchronously.
-pub fn upsert_path(
+pub(crate) fn upsert_path(
     writer: &IndexWriter,
     f: &Fields,
     path: &Path,
@@ -181,7 +182,7 @@ pub struct SyncOutcome {
 ///
 /// `on_dir` gets each visible subdirectory as the walk reaches it, before its
 /// entries are read, so a watch placed there misses nothing created later.
-pub fn reconcile_subtree_inline(
+pub(crate) fn reconcile_subtree_inline(
     writer: &IndexWriter,
     f: &Fields,
     state: &mut State,
@@ -192,10 +193,15 @@ pub fn reconcile_subtree_inline(
     let mut outcome = ReconcileOutcome::default();
     // The walker exempts its own root from the ignore rules, so an excluded
     // directory would otherwise be indexed whole the moment it is created.
-    if scope.excluded(root, true) || (!state.contains(root) && repo_ignored(root, true)) {
+    let skipped = if state.contains(root) {
+        scope.excluded(root, true)
+    } else {
+        scope.walk_skips(root, true)
+    };
+    if skipped {
         return Ok(outcome);
     }
-    for entry in walker(root) {
+    for entry in walker(root, scope) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -235,7 +241,7 @@ pub fn reconcile_subtree_inline(
 /// Every visible directory in `root` including `root` itself (watch targets).
 pub fn visible_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    for entry in walker(root).flatten() {
+    for entry in walker(root, &Scope::compile()).flatten() {
         if entry.file_type().is_some_and(|t| t.is_dir()) {
             dirs.push(entry.path().to_path_buf());
         }
@@ -248,11 +254,16 @@ pub fn visible_dirs(root: &Path) -> Vec<PathBuf> {
 /// Returns content/metadata candidate count plus visible directories found during
 /// the same walk; the content pass reads the catalogue from SQLite in bounded
 /// batches instead of receiving a huge Vec.
+///
+/// # Errors
+///
+/// Returns an error when the catalogue cannot be read or written, or the index cannot be
+/// committed.
 pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncOutcome> {
     let f = crate::index::fields(index)?;
     let mut writer = crate::index::bulk_writer(index)?;
     let mut visible_dirs = Vec::new();
-    let outcome = reconcile_roots(&mut writer, &f, state, roots, &mut |dir| {
+    let outcome = reconcile_roots(&mut writer, &f, state, roots, None, &mut |dir| {
         visible_dirs.push(dir.to_path_buf())
     })?;
     state.persist()?;
@@ -267,19 +278,41 @@ pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncO
 /// to recover from an inotify queue overflow (`need_rescan`) and by lifecycle
 /// rebuild/resume. `on_dir` gets every directory walked: after an overflow or
 /// a pause, folders created meanwhile have no watch yet.
-pub fn reconcile_inline(
+pub(crate) fn reconcile_inline(
     writer: &mut IndexWriter,
     f: &Fields,
     state: &mut State,
     roots: &[PathBuf],
     on_dir: &mut dyn FnMut(&Path),
 ) -> Result<ReconcileOutcome> {
-    reconcile_roots(writer, f, state, roots, on_dir)
+    reconcile_roots(writer, f, state, roots, None, on_dir)
+}
+
+/// The full pass limited to `folder`, a catalogued folder in scope: what left
+/// it, or left the scope, goes with its rows, as a walk of the sources would
+/// drop it. The sources nested in it are walked as their own roots, since the
+/// rules anchored at them may let in what the folder's walk leaves out.
+pub(crate) fn reconcile_folder(
+    writer: &mut IndexWriter,
+    f: &Fields,
+    state: &mut State,
+    folder: &Path,
+    on_dir: &mut dyn FnMut(&Path),
+) -> Result<ReconcileOutcome> {
+    let mut roots = vec![folder.to_path_buf()];
+    roots.extend(
+        crate::settings::available_sources()
+            .into_iter()
+            .map(|source| source.path.clone())
+            .filter(|source| source != folder && source.starts_with(folder)),
+    );
+    reconcile_roots(writer, f, state, &roots, Some(folder), on_dir)
 }
 
 /// One pass over `roots`: walk the disk recording each entry's `(mtime, size)`,
 /// then compare that with the catalogue in path order (see
-/// [`State::scan_changes_after`]) and update name documents and `state`.
+/// [`State::scan_changes_after`]) and update name documents and `state`. With
+/// `within`, only the catalogue rows below that folder are compared.
 /// `on_dir` gets every directory walked.
 ///
 /// The index is committed inside the pass, before the catalogue: a catalogue
@@ -289,24 +322,36 @@ fn reconcile_roots(
     f: &Fields,
     state: &mut State,
     roots: &[PathBuf],
+    within: Option<&Path>,
     on_dir: &mut dyn FnMut(&Path),
 ) -> Result<ReconcileOutcome> {
     let mut outcome = ReconcileOutcome::default();
+    let scope = Scope::compile();
     state.scan_pass(|state| {
         // The comparison reads the catalogue as persisted.
         state.persist()?;
         state.begin_scan()?;
-        outcome.unread = mark_walked_entries(state, roots, on_dir)?;
+        outcome.unread = mark_walked_entries(state, &scope, roots, on_dir)?;
         // Offline removable/network sources: keep their catalogue rather than treat
         // the unmounted tree as deleted, so their files stay findable (and, later,
         // are reported as living on that device).
-        state.mark_seen_prefixes(&retained_offline_roots())?;
+        let mut offline = retained_offline_roots();
+        offline.retain(|root| within.is_none_or(|folder| root.starts_with(folder)));
+        state.mark_seen_prefixes(&offline)?;
 
-        let mut after = Some(String::new());
-        while let Some(cursor) = after {
+        // The rows below a folder sort from `<folder>/` to the first one
+        // outside it.
+        let mut after = Some(within.map_or_else(String::new, |folder| {
+            format!("{}/", folder.to_string_lossy().trim_end_matches('/'))
+        }));
+        'pages: while let Some(cursor) = after {
             let (changes, next) = state.scan_changes_after(&cursor, SCAN_PAGE)?;
             after = next;
             for change in changes {
+                let (ScanChange::Seen { path, .. } | ScanChange::Gone(path)) = &change;
+                if within.is_some_and(|folder| !path.starts_with(folder)) {
+                    break 'pages;
+                }
                 apply_scan_change(writer, f, state, change, &mut outcome)?;
                 persist_state_if_needed(state)?;
             }
@@ -326,13 +371,14 @@ fn reconcile_roots(
 /// folder is no evidence that its files are gone.
 fn mark_walked_entries(
     state: &mut State,
+    scope: &Scope,
     roots: &[PathBuf],
     on_dir: &mut dyn FnMut(&Path),
 ) -> Result<bool> {
     let mut unread = false;
     for root in roots {
         on_dir(root);
-        for entry in walker(root) {
+        for entry in walker(root, scope) {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -366,7 +412,6 @@ fn mark_walked_entries(
                         continue;
                     }
                     // A failed lookup is no evidence the file is gone.
-                    state.mark_seen(path, None)?;
                     state.mark_seen(path, None)?;
                     unread |= kind != Some(PermissionDenied);
                     continue;
@@ -475,7 +520,8 @@ mod tests {
         let mut writer = index.writer(15_000_000).unwrap();
         // The production walk, not a parallel one: `reconcile_subtree_inline` is
         // what the watcher calls when a directory appears.
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let mut dirs = Vec::new();
         let _ = reconcile_subtree_inline(
             &writer,
@@ -502,8 +548,6 @@ mod tests {
         delete_path(&writer, &f, &tree.join("sub/nested.md"));
         writer.commit().unwrap();
         assert_eq!(name_hits(&index, "nested"), 0);
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -515,7 +559,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let mut writer = index.writer(15_000_000).unwrap();
 
         let outcome = reconcile_subtree_inline(
@@ -531,10 +576,7 @@ mod tests {
         writer.commit().unwrap();
         drop(writer);
         state.persist().unwrap();
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            2
-        );
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 2);
 
         let mut writer = index.writer(15_000_000).unwrap();
         let outcome = reconcile_subtree_inline(
@@ -549,12 +591,7 @@ mod tests {
         assert!(!outcome.any());
         writer.commit().unwrap();
         drop(writer);
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            2
-        );
-
-        std::fs::remove_dir_all(&base).ok();
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 2);
     }
 
     #[test]
@@ -582,10 +619,33 @@ mod tests {
         let report = repo_ignored(&repo.join("cache/report.txt"), false);
         let secret = repo_ignored(&worktree.join("notes.secret"), false);
         let plain = repo_ignored(&worktree.join("notes.txt"), false);
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
         assert!(report, "a file in an ignored folder came back");
         assert!(secret, "the worktree skipped the shared exclude file");
         assert!(!plain);
+    }
+
+    /// A Jujutsu repository with no `.git` is a work tree, as the `ignore`
+    /// crate's walker treats it.
+    #[test]
+    fn jj_repository_reads_its_gitignore() {
+        let base = scratch_dir("lsearch-scan-jj");
+        let repo = base.join("jjrepo");
+        std::fs::create_dir_all(repo.join(".jj")).unwrap();
+        std::fs::create_dir_all(repo.join("generated")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "generated/\n").unwrap();
+        std::fs::write(repo.join("generated/out.txt"), b"x").unwrap();
+        std::fs::write(repo.join("kept.txt"), b"x").unwrap();
+
+        let generated = repo_ignored(&repo.join("generated"), true);
+        let inside = repo_ignored(&repo.join("generated/out.txt"), false);
+        let kept = repo_ignored(&repo.join("kept.txt"), false);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            generated && inside,
+            "the jj repository's .gitignore was skipped"
+        );
+        assert!(!kept);
     }
 
     #[test]
@@ -613,7 +673,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let mut writer = index.writer(15_000_000).unwrap();
         let mut dirs = Vec::new();
         let outcome = reconcile_subtree_inline(
@@ -627,11 +688,7 @@ mod tests {
         .unwrap();
         assert!(dirs.is_empty() && !outcome.any());
         writer.commit().unwrap();
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            0
-        );
-        std::fs::remove_dir_all(&base).ok();
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 0);
     }
 
     #[test]
@@ -644,7 +701,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let writer = index.writer(15_000_000).unwrap();
         let first = reconcile_subtree_inline(
             &writer,
@@ -674,16 +732,6 @@ mod tests {
             "metadata-only change must not rewrite the name index"
         );
         assert!(second.state_changed, "content work must still be scheduled");
-
-        std::fs::remove_dir_all(&base).ok();
-    }
-
-    #[test]
-    fn hidden_detection() {
-        assert!(is_hidden(Path::new("/home/u/.cache/x")));
-        assert!(is_hidden(Path::new("/home/u/.config")));
-        assert!(!is_hidden(Path::new("/home/u/docs/file.txt")));
-        assert!(!is_hidden(Path::new("/home/u/Report.md")));
     }
 
     /// The `ignore` walker exempts its own root, so a `target/` created after
@@ -713,7 +761,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let writer = index.writer(15_000_000).unwrap();
 
         let mut dirs = Vec::new();
@@ -740,8 +789,6 @@ mod tests {
         )
         .unwrap();
         assert!(in_scope.index_changed);
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -765,8 +812,6 @@ mod tests {
         std::fs::write(&path, "github/\n").unwrap();
         seed_user_ignore();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "github/\n");
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -802,7 +847,5 @@ mod tests {
             !paths.iter().any(|path| path.contains("/build/")),
             "build directories should be pruned: {paths:?}"
         );
-
-        std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -9,7 +9,12 @@ use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{IndexReader, TantivyDocument, Term};
 
 /// Substring filename search. Returns up to `limit` paths whose file name contains
-/// `q` (case-insensitive). Queries shorter than 2 chars yield nothing (ngram floor).
+/// `q` (case-insensitive). A word of one or two letters matches only a whole word
+/// of the name.
+///
+/// # Errors
+///
+/// Returns an error when the index cannot be read.
 pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
     // A snapshot of the long-lived reader: a reader per query would re-open and
     // mmap every segment.

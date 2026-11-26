@@ -4,6 +4,8 @@
 //! process to spawn, nothing to hang when a network mount is gone, and the
 //! answer is the mount namespace this service actually runs in.
 
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 /// The mount a path lives on.
@@ -17,20 +19,20 @@ pub struct Mount {
 /// The mount holding `path`, or `None` when the table cannot be read.
 pub fn mount_for(path: &Path) -> Option<Mount> {
     let path = std::fs::canonicalize(path).ok()?;
-    let table = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let table = std::fs::read("/proc/self/mountinfo").ok()?;
     innermost(&table, &path)
 }
 
 /// The deepest mount point above `path`. Among equal points the last wins:
 /// that is the mount stacked on top, the one a lookup actually reaches.
-fn innermost(table: &str, path: &Path) -> Option<Mount> {
+fn innermost(table: &[u8], path: &Path) -> Option<Mount> {
     innermost_entry(table, path).map(|(_, mount)| mount)
 }
 
-fn innermost_entry(table: &str, path: &Path) -> Option<(PathBuf, Mount)> {
+fn innermost_entry(table: &[u8], path: &Path) -> Option<(PathBuf, Mount)> {
     // The later of two mounts at one depth is the one on top.
     let mut best: Option<(usize, PathBuf, Mount)> = None;
-    for line in table.lines() {
+    for line in table.split(|&byte| byte == b'\n') {
         let Some((point, mount)) = parse_line(line) else {
             continue;
         };
@@ -55,17 +57,17 @@ fn innermost_entry(table: &str, path: &Path) -> Option<(PathBuf, Mount)> {
 pub fn detachable(root: &Path) -> bool {
     let (Ok(root), Ok(table)) = (
         std::fs::canonicalize(root),
-        std::fs::read_to_string("/proc/self/mountinfo"),
+        std::fs::read("/proc/self/mountinfo"),
     ) else {
         return true;
     };
     detachable_in(&table, &root)
 }
 
-fn detachable_in(table: &str, root: &Path) -> bool {
+fn detachable_in(table: &[u8], root: &Path) -> bool {
     innermost_entry(table, root).is_some_and(|(point, mount)| detachable_mount(&point, &mount))
         || table
-            .lines()
+            .split(|&byte| byte == b'\n')
             .filter_map(parse_line)
             .any(|(point, mount)| point.starts_with(root) && detachable_mount(&point, &mount))
 }
@@ -104,13 +106,16 @@ impl MountTable {
     /// The table cannot be read.
     pub fn points(&mut self) -> std::io::Result<Vec<(PathBuf, u64)>> {
         use std::io::{Read, Seek};
-        let mut table = String::new();
+        let mut table = Vec::new();
         self.file.rewind()?;
-        self.file.read_to_string(&mut table)?;
+        self.file.read_to_end(&mut table)?;
         let mut mounts: Vec<(PathBuf, u64)> = table
-            .lines()
+            .split(|&byte| byte == b'\n')
             .filter_map(|line| {
-                let id = line.split(' ').next()?.parse().ok()?;
+                let id = std::str::from_utf8(line.split(|&byte| byte == b' ').next()?)
+                    .ok()?
+                    .parse()
+                    .ok()?;
                 Some((parse_line(line)?.0, id))
             })
             .collect();
@@ -144,42 +149,45 @@ impl MountTable {
     }
 }
 
-/// `id parent major:minor root mount-point options [optional…] - fstype source super-options`
-fn parse_line(line: &str) -> Option<(PathBuf, Mount)> {
-    let (left, right) = line.split_once(" - ")?;
-    let point = left.split(' ').nth(4)?;
-    let mut right = right.split(' ');
+/// `id parent major:minor root mount-point options [optional…] - fstype source super-options`,
+/// in bytes: a mount point need not be UTF-8.
+fn parse_line(line: &[u8]) -> Option<(PathBuf, Mount)> {
+    let separator = line.windows(3).position(|window| window == b" - ")?;
+    let (left, right) = line.split_at(separator);
+    let point = left.split(|&byte| byte == b' ').nth(4)?;
+    let mut right = right.get(3..)?.split(|&byte| byte == b' ');
     let fstype = right.next()?;
     let source = right.next()?;
     Some((
-        PathBuf::from(unescape_octal(point)),
+        PathBuf::from(OsString::from_vec(unescape_octal(point))),
         Mount {
-            fstype: fstype.to_owned(),
-            source: unescape_octal(source),
+            fstype: String::from_utf8_lossy(fstype).into_owned(),
+            source: String::from_utf8_lossy(&unescape_octal(source)).into_owned(),
         },
     ))
 }
 
 /// The kernel writes space, tab, newline and backslash in mount fields as
 /// `\ooo` octal escapes.
-fn unescape_octal(field: &str) -> String {
-    let mut out = String::with_capacity(field.len());
+fn unescape_octal(field: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(field.len());
     let mut rest = field;
-    while let Some(at) = rest.find('\\') {
-        out.push_str(&rest[..at]);
-        let code = rest.get(at + 1..at + 4);
-        match code.and_then(|digits| u8::from_str_radix(digits, 8).ok()) {
+    while let Some((&first, tail)) = rest.split_first() {
+        let decoded = (first == b'\\')
+            .then(|| tail.get(..3))
+            .flatten()
+            .and_then(|digits| u8::from_str_radix(std::str::from_utf8(digits).ok()?, 8).ok());
+        match decoded {
             Some(byte) => {
-                out.push(char::from(byte));
-                rest = &rest[at + 4..];
+                out.push(byte);
+                rest = &tail[3..];
             }
             None => {
-                out.push('\\');
-                rest = &rest[at + 1..];
+                out.push(first);
+                rest = tail;
             }
         }
     }
-    out.push_str(rest);
     out
 }
 
@@ -225,6 +233,7 @@ fn unescape_udev(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStrExt;
 
     const TABLE: &str = "\
 22 1 0:21 / / rw,noatime shared:1 - btrfs /dev/nvme1n1p2 rw,compress-force=zstd:5,subvol=/@
@@ -237,12 +246,13 @@ mod tests {
 
     #[test]
     fn the_deepest_and_topmost_mount_answers() {
-        let at = |path: &str| innermost(TABLE, Path::new(path)).map(|mount| mount.fstype);
+        let at =
+            |path: &str| innermost(TABLE.as_bytes(), Path::new(path)).map(|mount| mount.fstype);
         assert_eq!(at("/etc/fstab").as_deref(), Some("btrfs"));
         assert_eq!(at("/proc/self").as_deref(), Some("proc"));
         assert_eq!(at("/home/p/My Share/doc.odt").as_deref(), Some("cifs"));
         assert_eq!(
-            innermost(TABLE, Path::new("/home/p/notes.md")).map(|mount| mount.source),
+            innermost(TABLE.as_bytes(), Path::new("/home/p/notes.md")).map(|mount| mount.source),
             Some("/dev/nvme1n1p2".to_owned())
         );
         // Component-wise: `/proclaim` is not under `/proc`.
@@ -256,7 +266,7 @@ mod tests {
             "{TABLE}50 30 0:50 / /home/p/stick rw - vfat /dev/sdc1 rw\n\
              51 22 0:51 / /run/media/p/BACKUP rw - ext4 /dev/sdd1 rw\n"
         );
-        let at = |root: &str| detachable_in(&table, Path::new(root));
+        let at = |root: &str| detachable_in(table.as_bytes(), Path::new(root));
         assert!(!at("/home/p/Documents"));
         assert!(at("/home/p"), "holds a network share and a FAT disk");
         assert!(at("/home/p/My Share"));
@@ -265,11 +275,26 @@ mod tests {
         assert!(!at("/etc"));
     }
 
+    /// Guards: regression: a mount point that is not UTF-8 (a FAT label in
+    /// Latin-1) is read, and every other line of the table with it.
+    #[test]
+    fn non_utf8_mount_point_reads() {
+        let mut table = TABLE.as_bytes().to_vec();
+        table.extend_from_slice(b"60 30 0:60 / /home/p/caf\xe9 rw - vfat /dev/sde1 rw\n");
+        let point = Path::new(std::ffi::OsStr::from_bytes(b"/home/p/caf\xe9"));
+        assert!(detachable_in(&table, point));
+        assert!(!detachable_in(&table, Path::new("/home/p/Documents")));
+        assert_eq!(
+            innermost(&table, &point.join("photo.jpg")).map(|mount| mount.fstype),
+            Some("vfat".to_owned())
+        );
+    }
+
     #[test]
     fn escapes_decode_and_malformed_stay() {
-        assert_eq!(unescape_octal("a\\040b\\011c"), "a b\tc");
-        assert_eq!(unescape_octal("trailing\\"), "trailing\\");
-        assert_eq!(unescape_octal("bad\\9zz"), "bad\\9zz");
+        assert_eq!(unescape_octal(b"a\\040b\\011c"), b"a b\tc");
+        assert_eq!(unescape_octal(b"trailing\\"), b"trailing\\");
+        assert_eq!(unescape_octal(b"bad\\9zz"), b"bad\\9zz");
         assert_eq!(unescape_udev("My\\x20Disk"), "My Disk");
         assert_eq!(unescape_udev("x\\xZZ"), "x\\xZZ");
         assert_eq!(unescape_udev("end\\x2"), "end\\x2");

@@ -16,7 +16,7 @@
 //!   BIG_SEARCH_META_VIDEO      mkv/webm/mp4 duration (symphonia)
 //!   BIG_SEARCH_META_IMAGE      image dimensions (imagesize)
 //!   BIG_SEARCH_META_MAX_MB     skip metadata parse above this size (default 64)
-use crate::extract::ext_of;
+use crate::extract::{ext_of, open_regular};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -240,7 +240,8 @@ pub fn metadata_text(path: &Path, with_content: bool) -> Option<String> {
     let mut sniffed_mime: Option<String> = None;
     if kind.is_none()
         && metadata_config.sniff_type
-        && let Ok(fmt) = file_format::FileFormat::from_file(path)
+        && let Some(file) = open_regular(path)
+        && let Ok(fmt) = file_format::FileFormat::from_reader(file)
     {
         let mime = fmt.media_type();
         if mime != "application/octet-stream" {
@@ -294,7 +295,7 @@ fn media_text(path: &Path) -> Vec<String> {
     use symphonia::core::units::{Duration, Timestamp};
 
     let mut out = Vec::new();
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some(file) = open_regular(path) else {
         return out;
     };
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -345,7 +346,10 @@ fn media_text(path: &Path) -> Vec<String> {
 
 /// Image dimensions via imagesize (header only, no decode).
 fn image_text(path: &Path) -> Vec<String> {
-    match imagesize::size(path) {
+    let Some(file) = open_regular(path) else {
+        return Vec::new();
+    };
+    match imagesize::reader_size(std::io::BufReader::new(file)) {
         Ok(size) => vec![format!("{}x{}", size.width, size.height)],
         Err(_) => Vec::new(),
     }
@@ -406,8 +410,6 @@ pub(crate) mod tag_tests {
                 "a tagged file must be indexed whatever its type"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -457,7 +459,25 @@ mod tests {
         let path = dir.join("pic.png");
         std::fs::write(&path, minimal_png(320, 240)).unwrap();
         assert_eq!(image_text(&path), vec!["320x240".to_string()]);
-        std::fs::remove_file(&path).ok();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Guards: bound: the kind word and tags joined to a capped body keep the
+    /// whole text within the extraction cap.
+    #[test]
+    fn metadata_text_within_cap() {
+        use crate::test_env::{ENV_LOCK, EnvVarGuard};
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _cap = EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
+        let dir = crate::test_env::scratch_dir("bsmeta-cap");
+        let path = dir.join("script");
+        let mut script = b"#!/bin/sh\n".to_vec();
+        script.extend(b"echo x\n".repeat(300_000));
+        std::fs::write(&path, script).unwrap();
+        let text = metadata_text(&path, true).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(text.starts_with("document #!/bin/sh"), "{}", &text[..40]);
+        assert_eq!(text.len(), 1 << 20);
     }
 
     #[test]
@@ -467,7 +487,7 @@ mod tests {
         std::fs::write(&path, "#!/bin/sh\necho segredo\n").unwrap();
         let with = metadata_text(&path, true).unwrap_or_default();
         let without = metadata_text(&path, false).unwrap_or_default();
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(with.contains("segredo"), "{with:?}");
         assert_eq!(without, "document");
     }

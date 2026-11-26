@@ -528,8 +528,7 @@ mod tests {
         assert_eq!(text.len(), crate::extract::max_extract_bytes());
         assert!(text.bytes().all(|byte| byte == b'a'));
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&bin).ok();
+        let _ = std::fs::remove_dir_all(&bin);
     }
 
     /// A `.doc` is read by what it holds: OLE2 through `antiword` (argv checked by
@@ -574,8 +573,7 @@ mod tests {
         assert_eq!(rtf_described.declared_title.as_deref(), Some("Ata"));
         assert!(other_text.is_none());
         assert_eq!(plain_text.as_deref(), Some("Keymap notes\n"));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&bin).ok();
+        let _ = std::fs::remove_dir_all(&bin);
     }
 
     /// Work is bounded by CPU time: an extractor that spins is stopped by
@@ -610,8 +608,7 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "CPU limit not enforced: took {elapsed:?}"
         );
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&bin).ok();
+        let _ = std::fs::remove_dir_all(&bin);
     }
 
     #[test]
@@ -639,7 +636,6 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "deadline not enforced: took {elapsed:?}"
         );
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&bin).ok();
+        let _ = std::fs::remove_dir_all(&bin);
     }
 }

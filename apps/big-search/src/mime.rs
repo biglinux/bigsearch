@@ -225,8 +225,7 @@ fn sniff(path: &Path) -> Option<String> {
     // Room for the whole head up front: an empty Vec makes `read_to_end` probe
     // with a tiny read and then grow, several syscalls for every file sniffed.
     let mut head = Vec::with_capacity(HEAD_BYTES as usize);
-    std::fs::File::open(path)
-        .ok()?
+    crate::extract::open_regular(path)?
         .take(HEAD_BYTES)
         .read_to_end(&mut head)
         .ok()?;
@@ -410,7 +409,6 @@ mod tests {
             db.of(&write("odd.ts", &png), None).as_deref(),
             Some("image/png")
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -444,7 +442,6 @@ mod tests {
                 .as_deref(),
             Some("text/plain")
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -472,7 +469,6 @@ mod tests {
             assert_eq!(db.of(path, Some(&metadata)).as_deref(), Some(inode));
             assert_eq!(db.of(path, None).as_deref(), Some(inode));
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

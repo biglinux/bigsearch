@@ -1,6 +1,60 @@
 use super::*;
 use std::io::Write;
 
+/// The content worker checks a path is a regular file before the readers open
+/// it; a FIFO renamed into place between the two gets no text instead of a wait.
+#[test]
+fn readers_pass_over_fifo() {
+    let dir = temporary_extract_dir("fifo");
+    for name in [
+        "a.txt", "a.html", "a.docx", "a.epub", "a.eml", "a.rtf", "a.doc",
+    ] {
+        let path = dir.join(name);
+        crate::test_env::make_fifo(&path);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader_path = path.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(content(&reader_path));
+        });
+        let text = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{name}: the reader waits on the FIFO"));
+        assert_eq!(text, None, "{name}");
+    }
+    let file = dir.join("b.txt");
+    std::fs::write(&file, "beta").unwrap();
+    let link = dir.join("link.txt");
+    std::os::unix::fs::symlink(&file, &link).unwrap();
+    for opened in [&file, &link] {
+        let mut text = String::new();
+        open_regular(opened)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "beta", "{}", opened.display());
+    }
+    assert!(open_regular_with(&link, libc::O_NOFOLLOW).is_err());
+    assert!(open_regular(&dir).is_none());
+}
+
+/// A write lease held by another process (a Samba oplock, an NFS delegation)
+/// skips the file at once instead of waiting `lease-break-time` for its break.
+#[test]
+fn readers_pass_over_write_lease() {
+    let dir = temporary_extract_dir("lease");
+    let path = dir.join("shared.txt");
+    std::fs::write(&path, "beta").unwrap();
+    let mut holder = crate::test_env::hold_write_lease(&path);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(open_regular(&path).is_none());
+    });
+    let skipped = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    assert_eq!(skipped, Ok(true), "the reader waits on the lease break");
+}
+
 #[test]
 fn pages_and_markdown_name_titles() {
     assert_eq!(
@@ -55,25 +109,11 @@ fn html_page_indexed_as_text() {
     assert_eq!(page.declared_title.as_deref(), Some("Ata"));
     assert_eq!(page.prominent, ["Reunião"]);
     assert!(page.text.contains("Relatório"));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn unclosed_script_hides_the_rest() {
     assert_eq!(html_text("<p>kept<script>a<script>b<style>c"), "\nkept");
-}
-
-#[test]
-fn composed_text_stops_at_extraction_cap() {
-    let _lock = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _cap = crate::test_env::EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
-    let cap = max_extract_bytes();
-    // U+FDFA is 3 bytes and 33 under NFKC.
-    let text = "\u{FDFA}".repeat(cap / 3);
-    let composed = compose(&text);
-    assert!(composed.len() <= cap && composed.len() > cap - 33);
 }
 
 /// Paragraphs become lines, a word Word split across runs stays whole, and
@@ -89,34 +129,6 @@ fn office_lines_keep_whole_words() {
     let mut out = String::new();
     xml_text_lines(odt, &mut out);
     assert_eq!(out, "Ata da reunião\nPauta\t1 item\n");
-}
-
-/// What a person types matches what the name or page writes, in every script
-/// the folding covers; other scripts pass through untouched.
-#[test]
-fn folding_matches_what_people_type() {
-    for (written, typed) in [
-        ("Relatório FINAL 2026", "relatorio final 2026"),
-        ("Relato\u{301}rio", "relatorio"),
-        ("ÇÃO çao ÑÖÜ", "cao cao nou"),
-        ("Straße GROSS", "strasse gross"),
-        ("Łódź Ørsted Æble", "lodz orsted aeble"),
-        ("İstanbul ılık", "istanbul ilik"),
-        ("Отчёт ЁЛКА", "отчет елка"),
-        ("Αναφορά ΟΔΟΣ οδός", "αναφορα οδοσ οδοσ"),
-        ("أحمد مُحَمَّد مستشفى", "احمد محمد مستشفي"),
-        ("مدرسة کتاب فارسی", "مدرسه كتاب فارسي"),
-        ("中文内容 ABC", "中文内容 abc"),
-        ("會議記錄 资料庫", "会议记录 资料库"),
-        ("\u{1112}\u{1161}\u{11AB}\u{1100}\u{116E}\u{11A8}", "한국"),
-        ("テ\u{3099}ータ ﾃﾞｰﾀ", "データ データ"),
-        ("ＡＢＣ１２ ﬁle", "abc12 file"),
-        ("ﻣﺮﺣﺒﺎ \u{F900}", "مرحبا 岂"),
-        ("🙂 EMOJI", "🙂 emoji"),
-        ("", ""),
-    ] {
-        assert_eq!(fold_lower(written), typed, "for {written:?}");
-    }
 }
 
 fn temporary_extract_dir(label: &str) -> crate::test_env::ScratchDir {
@@ -141,7 +153,6 @@ fn text_file_and_binary_reject() {
     let unknown = dir.join("thing.xyz");
     std::fs::write(&unknown, b"data").unwrap();
     assert!(content(&unknown).is_none()); // not content-eligible
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -156,7 +167,6 @@ fn office_skips_oversized_input() {
     file.set_len(2 * 1024 * 1024).unwrap();
     drop(file);
     assert!(exceeds_input_cap(&path));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -172,7 +182,6 @@ fn text_skips_oversized_input() {
     drop(file);
     assert!(text_input_size(&path).is_none());
     assert!(content(&path).is_none());
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// An office archive in memory holding `parts`.
@@ -348,7 +357,6 @@ fn docx_zip_xml_extraction() {
     let text = content(&path).unwrap();
     assert!(text.contains("quarterly"));
     assert!(text.contains("budget"));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// An EPUB reads in its spine's order, from the package `container.xml`
@@ -398,7 +406,6 @@ fn epub_reads_spine_in_order() {
         first < second && text.contains("Uma noite destas…"),
         "{text:?}"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -424,7 +431,6 @@ fn docx_page_split_by_rendered_break() {
     assert_eq!(pages_with(&path, &["betaword".to_string()]), vec![2]);
     assert_eq!(pages_with(&path, &["relatorio".to_string()]), vec![2]);
     assert!(pages_with(&path, &["missing".to_string()]).is_empty());
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -442,7 +448,6 @@ fn docx_without_breaks_reports_no_page() {
     }
     // term is present, but no cached page breaks → no page reported (no guess).
     assert!(pages_with(&path, &["soloword".to_string()]).is_empty());
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

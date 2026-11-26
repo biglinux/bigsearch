@@ -31,10 +31,16 @@ pub fn fingerprint(roots: &[PathBuf], ignore_rules: &str, git_excludes: &[u8]) -
 /// When the last run started, if its record in `watch_list` carries
 /// `fingerprint`: every folder it listed was watched from then on.
 pub fn saved_run_started(watch_list: &State, fingerprint: i64) -> Option<SystemTime> {
-    if watch_list.meta(RUN_FINGERPRINT)? != fingerprint {
+    let read = |key| {
+        watch_list.meta(key).unwrap_or_else(|error| {
+            log::warn!("cannot read the saved run's record, so this start walks: {error}");
+            None
+        })
+    };
+    if read(RUN_FINGERPRINT)? != fingerprint {
         return None;
     }
-    let secs = u64::try_from(watch_list.meta(RUN_STARTED)?).ok()?;
+    let secs = u64::try_from(read(RUN_STARTED)?).ok()?;
     UNIX_EPOCH.checked_add(Duration::from_secs(secs))
 }
 
@@ -48,6 +54,10 @@ pub(super) fn epoch_secs(time: SystemTime) -> i64 {
 }
 
 /// Drop the last run's record, so the next start walks.
+///
+/// # Errors
+///
+/// Returns an error when the saved record cannot be deleted.
 pub fn forget_saved_run(watch_list: &State) -> Result<()> {
     watch_list.set_meta(RUN_FINGERPRINT, None)
 }
@@ -77,6 +87,26 @@ pub(super) struct Watches {
 }
 
 impl Watches {
+    /// No watch placed yet; `dirs` holds the list saved for the next start.
+    pub(super) fn new(
+        watcher: RecommendedWatcher,
+        runtime: &super::WatchRuntime,
+        dirs: State,
+        fingerprint: Option<i64>,
+    ) -> Self {
+        Self {
+            watcher,
+            failed: Arc::clone(&runtime.unwatched_dirs),
+            dirs,
+            fingerprint,
+            recorded: true,
+            run_started: None,
+            missed: false,
+            unreadable: HashSet::new(),
+            paused: Arc::clone(&runtime.paused),
+        }
+    }
+
     /// Watch a folder a walk or an event reached, and list it, also when this
     /// user cannot read it (see [`Self::unreadable`]).
     pub(super) fn watch(&mut self, dir: &Path) -> bool {
@@ -135,6 +165,68 @@ impl Watches {
             );
         }
         false
+    }
+
+    /// Unlist `dir` and the folders under it, still on disk but out of the
+    /// index, and drop their watches: the kernel keeps a watch until its
+    /// folder is deleted, and with it a share of `max_user_watches`.
+    pub(super) fn forget_tree(&mut self, dir: &Path) {
+        match self.dirs.tree(dir) {
+            Ok(listed) => {
+                for folder in listed {
+                    self.unwatch(&folder);
+                }
+            }
+            Err(error) => log::warn!(
+                "cannot list the folders watched under {}: their watches stay until a restart: {error:#}",
+                dir.display()
+            ),
+        }
+        self.dirs.remove_tree(dir);
+    }
+
+    /// Run `walk`, which watches each folder it reaches, as the whole list
+    /// under `tops`: a listed folder it does not reach loses its watch, except
+    /// one below a folder this user cannot read, where the walk could not look.
+    pub(super) fn relist<'a, T>(
+        &mut self,
+        tops: impl IntoIterator<Item = &'a Path>,
+        walk: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let mut listed = Vec::new();
+        for top in tops {
+            for folder in self.dirs.tree(top)? {
+                let row = self.dirs.recorded(&folder);
+                listed.push((folder, row));
+            }
+            self.dirs.remove_tree(top);
+        }
+        let walked = walk(self)?;
+        for (folder, row) in listed {
+            if self.dirs.recorded(&folder).is_some() {
+                continue;
+            }
+            let below_unreadable = !self.unreadable.is_empty()
+                && folder
+                    .ancestors()
+                    .skip(1)
+                    .any(|above| self.unreadable.contains(above));
+            match row {
+                Some((mtime, size)) if below_unreadable => self.dirs.set(&folder, mtime, size),
+                _ => self.unwatch(&folder),
+            }
+        }
+        Ok(walked)
+    }
+
+    /// Drop the watch on `dir`. A folder deleted, moved or never watched has
+    /// no watch left to drop.
+    pub(super) fn unwatch(&mut self, dir: &Path) {
+        if let Err(error) = self.watcher.unwatch(dir)
+            && !matches!(error.kind, notify::ErrorKind::WatchNotFound)
+        {
+            log::warn!("cannot stop watching {}: {error}", dir.display());
+        }
     }
 
     /// Save the folder list, before the catalogue at every persist site, two

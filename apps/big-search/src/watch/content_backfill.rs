@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tantivy::{Index, IndexWriter};
 /// Longest wait after content backfill batches keep failing (a full disk, a
-/// damaged index): the daemon must not wake every few seconds to fail again.
+/// damaged index) or passes keep finding every file busy (a process out of
+/// descriptors): the daemon must not wake every few seconds to fail again.
 const MAX_BACKFILL_RETRY: Duration = Duration::from_secs(600);
 
 pub(super) struct ContentBackfill {
@@ -36,8 +37,21 @@ pub(super) struct ContentBackfill {
     /// content search (see [`Self::warm`]). A deadline, not a delay: file
     /// events and searches that arrive meanwhile must not keep pushing it back.
     pub(super) next_batch_at: Option<Instant>,
-    /// Shared gauge read by the IPC thread: files currently deferred by the
-    /// cooldown (the "content results may be incomplete" hint).
+    /// Files this pass has left unread so far, counted over every batch: a
+    /// file an early batch left keeps the pass pending as much as one the last
+    /// batch left.
+    pass_deferred: usize,
+    pass_busy: usize,
+    /// This pass read or refused at least one file rather than leaving it busy.
+    pass_settled_any: bool,
+    /// Passes in a row that left files busy and settled none; each one doubles
+    /// the wait before the next.
+    busy_passes: u32,
+    /// Time until the earliest file this pass deferred leaves its cooldown.
+    pass_retry_in: Option<Duration>,
+    /// Shared gauge read by the IPC thread: files the pass left unread, by the
+    /// cooldown or because another process held them busy (the "content
+    /// results may be incomplete" hint).
     deferred_gauge: Arc<AtomicU64>,
     /// A catalogue row was removed since the last orphan prune, so there may be
     /// content documents left behind. Nothing else can create an orphan.
@@ -57,6 +71,11 @@ impl ContentBackfill {
             bypass_cooldown: false,
             snooze_until: None,
             next_batch_at: None,
+            pass_deferred: 0,
+            pass_busy: 0,
+            pass_settled_any: false,
+            busy_passes: 0,
+            pass_retry_in: None,
             deferred_gauge,
             // The first pass after a start prunes unconditionally: deletions may
             // have happened while the daemon was down.
@@ -70,11 +89,14 @@ impl ContentBackfill {
     pub(super) fn retry_after_failure(&mut self) {
         self.request();
         self.failures = self.failures.saturating_add(1);
-        let wait = self
-            .idle_delay
-            .saturating_mul(1 << self.failures.min(10))
-            .min(MAX_BACKFILL_RETRY);
-        self.snooze_until = Some(Instant::now() + wait);
+        self.snooze_until = Some(Instant::now() + self.doubled_delay(self.failures));
+    }
+
+    /// The idle delay doubled `times` times, at most [`MAX_BACKFILL_RETRY`].
+    fn doubled_delay(&self, times: u32) -> Duration {
+        self.idle_delay
+            .saturating_mul(1 << times.min(10))
+            .min(MAX_BACKFILL_RETRY)
     }
 
     pub(super) fn note_deletion(&mut self) {
@@ -110,11 +132,19 @@ impl ContentBackfill {
         self.is_pending = false;
     }
 
+    fn reset_pass(&mut self) {
+        self.cursor = None;
+        self.bypass_cooldown = false;
+        self.pass_deferred = 0;
+        self.pass_busy = 0;
+        self.pass_settled_any = false;
+        self.pass_retry_in = None;
+    }
+
     /// End-of-pass bookkeeping: `true` when the backfill is fully done, `false`
     /// when a change arrived mid-pass and one more pass must run.
     fn finish_pass(&mut self) -> bool {
-        self.cursor = None;
-        self.bypass_cooldown = false;
+        self.reset_pass();
         if self.rescan_requested {
             self.rescan_requested = false;
             return false;
@@ -123,11 +153,10 @@ impl ContentBackfill {
         true
     }
 
-    /// End of a pass that deferred cooldown-protected files: stay pending and
-    /// sleep until the earliest one becomes eligible.
+    /// End of a pass that left files unread: stay pending and sleep for
+    /// `retry_in`.
     fn finish_pass_deferred(&mut self, retry_in: Duration) {
-        self.cursor = None;
-        self.bypass_cooldown = false;
+        self.reset_pass();
         if self.rescan_requested {
             self.rescan_requested = false;
             return; // fresh work exists; the next idle tick runs at normal cadence
@@ -170,15 +199,21 @@ pub(super) fn run_content_backfill_batch(
         None
     } else {
         let attempted = batch.files.len();
-        let indexed = content::index_content_limited_with_writer(
+        let read = content::index_content_limited_with_writer(
             open_content_writer(content_index, writer)?,
             f,
             batch.files,
             Some(content_backfill.batch_limit),
         )?;
         crate::throttle::release_idle_memory();
-        Some((attempted, indexed))
+        content_backfill.pass_busy += read.busy;
+        content_backfill.pass_settled_any |= read.busy < attempted;
+        Some((attempted, read.indexed))
     };
+    content_backfill.deferred_gauge.store(
+        (content_backfill.pass_deferred + content_backfill.pass_busy) as u64,
+        Ordering::Relaxed,
+    );
     let work = started.elapsed();
     // Mid-pass the writer stays open, so a batch costs its own commit and not a
     // wait for every merge the pass has started so far; the rest before the
@@ -199,7 +234,7 @@ pub(super) fn run_content_backfill_batch(
         content_backfill.next_batch_at = Some(Instant::now() + pause);
         return Ok(false);
     }
-    end_pass(writer, content_backfill, batch.deferred, batch.retry_in)
+    end_pass(writer, content_backfill)
 }
 
 /// The next files to read, the cursor moved past them; the files the policy
@@ -216,9 +251,12 @@ fn next_batch(content_backfill: &mut ContentBackfill) -> Result<content::Pending
         cooldown,
     )?;
     content_backfill.cursor = next_cursor;
-    content_backfill
-        .deferred_gauge
-        .store(batch.deferred as u64, Ordering::Relaxed);
+    content_backfill.pass_deferred += batch.deferred;
+    content_backfill.pass_retry_in = content_backfill
+        .pass_retry_in
+        .into_iter()
+        .chain(batch.retry_in)
+        .min();
     content::record_skipped_candidates(&batch.non_candidates)
         .context("record policy-skipped entries")?;
     Ok(batch)
@@ -257,30 +295,40 @@ fn prune_orphans_after_deletion(
 }
 
 /// A batch that reached the end of the catalogue: close the writer, then
-/// either sleep until a cooldown-deferred file is eligible or finish the pass.
-/// `true` when the backfill is fully done.
+/// either sleep until a file the pass left unread may be read or finish the
+/// pass. `true` when the backfill is fully done.
 fn end_pass(
     writer: &mut Option<IndexWriter>,
     content_backfill: &mut ContentBackfill,
-    deferred: usize,
-    retry_in: Option<Duration>,
 ) -> Result<bool> {
     close_index_writer(writer).context("close content writer")?;
     crate::throttle::release_idle_memory();
-    if deferred > 0 {
-        // Only cooldown-protected files remain: sleep until the earliest one
-        // becomes eligible (or a content search warms the backfill sooner).
-        let retry_in = retry_in.unwrap_or(content_backfill.idle_delay);
+    let deferred = content_backfill.pass_deferred;
+    let busy = content_backfill.pass_busy;
+    if busy > 0 && !content_backfill.pass_settled_any {
+        content_backfill.busy_passes = content_backfill.busy_passes.saturating_add(1);
+    } else {
+        content_backfill.busy_passes = 0;
+    }
+    if deferred > 0 || busy > 0 {
+        // A busy file is tried again after the idle delay, doubled for each pass
+        // in a row that settled nothing; a deferred one once the earliest leaves
+        // its cooldown. A file change or a content search asks again sooner.
+        let busy_retry_in =
+            (busy > 0).then(|| content_backfill.doubled_delay(content_backfill.busy_passes));
+        let retry_in = busy_retry_in
+            .into_iter()
+            .chain(content_backfill.pass_retry_in)
+            .min()
+            .unwrap_or(content_backfill.idle_delay);
         log::info!(
-            "content backfill: {} file(s) deferred by edit cooldown; retry in ~{}s",
-            deferred,
+            "content backfill: {deferred} file(s) deferred by edit cooldown, {busy} busy in another process; retry in ~{}s",
             retry_in.as_secs()
         );
         content_backfill.finish_pass_deferred(retry_in);
         return Ok(false);
     }
     if content_backfill.finish_pass() {
-        content_backfill.deferred_gauge.store(0, Ordering::Relaxed);
         log::info!("content backfill: complete");
         crate::index::mark_content_state_synced(&crate::config::content_index_dir())
             .context("mark content index synced")?;
@@ -334,7 +382,111 @@ pub(super) fn compact_when_worth_it(index: &Index, writer: &mut IndexWriter, lab
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalogue::{self, NAME_NAMESPACE};
     use crate::index::fields;
+    use crate::test_env::{ENV_LOCK, EnvVarGuard};
+    use std::path::{Path, PathBuf};
+
+    /// Isolated settings and data for one backfill test.
+    fn backfill_env(base: &Path, batch: &str, cooldown_secs: &str) -> [EnvVarGuard; 6] {
+        [
+            EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
+            EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap()),
+            EnvVarGuard::set("BIG_SEARCH_DAEMON_CONTENT_BATCH", batch),
+            EnvVarGuard::set("BIG_SEARCH_CONTENT_COOLDOWN_SECS", cooldown_secs),
+            EnvVarGuard::unset("BIG_SEARCH_DEDUP_CONTENT"),
+            EnvVarGuard::unset("BIG_SEARCH_NAMES_ONLY"),
+        ]
+    }
+
+    fn catalogue_files(files: &[PathBuf]) {
+        let mut catalog = catalogue::State::load(&crate::config::state_db_path(), NAME_NAMESPACE);
+        for path in files {
+            let (mtime, size) = catalogue::meta(path).unwrap();
+            catalog.set(path, mtime, size);
+        }
+        catalog.persist().unwrap();
+    }
+
+    /// A file another process holds busy keeps the backfill pending, so a
+    /// later pass reads it although the file never changes again; passes that
+    /// read nothing wait longer each time.
+    #[test]
+    fn busy_file_keeps_the_backfill_pending() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let base = crate::test_env::scratch_dir("bs-backfill-busy");
+        let _env = backfill_env(&base, "250", "0");
+        let shared = base.join("shared.md");
+        std::fs::write(&shared, b"leased body").unwrap();
+        catalogue_files(std::slice::from_ref(&shared));
+        let index =
+            crate::index::open_content_or_create(&crate::config::content_index_dir()).unwrap();
+        let f = crate::index::content_fields(&index).unwrap();
+        let gauge = Arc::new(AtomicU64::new(0));
+        let mut backfill = ContentBackfill::new(gauge.clone());
+        backfill.request();
+        let mut writer = None;
+
+        let mut holder = crate::test_env::hold_write_lease(&shared);
+        let under_lease = run_content_backfill_batch(&index, &mut writer, &f, &mut backfill);
+        let first_wait = backfill.wait_before_batch();
+        let still_leased = run_content_backfill_batch(&index, &mut writer, &f, &mut backfill);
+        let second_wait = backfill.wait_before_batch();
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        assert!(
+            !under_lease.unwrap(),
+            "a pass that left a file unread is not complete"
+        );
+        assert!(!still_leased.unwrap());
+        assert!(
+            second_wait > first_wait,
+            "{second_wait:?} after {first_wait:?}"
+        );
+        assert_eq!(gauge.load(Ordering::Relaxed), 1);
+        assert!(backfill.should_run_when_idle(&AtomicBool::new(false)));
+
+        assert!(run_content_backfill_batch(&index, &mut writer, &f, &mut backfill).unwrap());
+        assert_eq!(gauge.load(Ordering::Relaxed), 0);
+        let hits = crate::query::search_content(&index.reader().unwrap(), "leased", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    /// A file the cooldown deferred in an early batch of a pass still keeps the
+    /// pass pending when the last batch defers nothing.
+    #[test]
+    fn early_deferral_keeps_pass_pending() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let base = crate::test_env::scratch_dir("bs-backfill-deferred");
+        let _env = backfill_env(&base, "1", "3600");
+        let files = ["a.md", "b.md", "c.md"].map(|name| base.join(name));
+        for path in &files {
+            std::fs::write(path, b"note body").unwrap();
+        }
+        // a.md was just edited; b.md and c.md are old and fill one batch each.
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        for path in &files[1..] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        catalogue_files(&files);
+        let index =
+            crate::index::open_content_or_create(&crate::config::content_index_dir()).unwrap();
+        let f = crate::index::content_fields(&index).unwrap();
+        let gauge = Arc::new(AtomicU64::new(0));
+        let mut backfill = ContentBackfill::new(gauge.clone());
+        backfill.request();
+        let mut writer = None;
+
+        assert!(!run_content_backfill_batch(&index, &mut writer, &f, &mut backfill).unwrap());
+        assert!(!run_content_backfill_batch(&index, &mut writer, &f, &mut backfill).unwrap());
+        assert_eq!(gauge.load(Ordering::Relaxed), 1);
+        assert!(backfill.should_run_when_idle(&AtomicBool::new(false)));
+    }
 
     /// Searches typed faster than the idle delay must not keep restarting it,
     /// or the bodies they ask for are never extracted.
@@ -397,6 +549,5 @@ mod tests {
         let mut sizes: Vec<u32> = metas.iter().map(|meta| meta.max_doc()).collect();
         sizes.sort_unstable();
         assert_eq!(sizes, vec![2, 24]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

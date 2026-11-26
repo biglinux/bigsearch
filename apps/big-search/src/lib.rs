@@ -8,6 +8,7 @@
 //!   checked against.
 //! - `content`, `content_dedupe`, `extract`, `extract_pdf`, `extract_mail`,
 //!   `extract_rtf`, `prominent`, `meta`, `mime`: reading what files say.
+//! - `fold`: the one form names, pages and content words are compared in.
 //! - `cjk_tokenizer`, `simplified_chinese`: indexing scripts written without spaces.
 //! - `query`, `ipc`: answering searches, in-process and over the socket.
 //! - `origin`, `browser_downloads`, `history`: where a file came from and its
@@ -23,6 +24,7 @@ pub mod extract;
 mod extract_mail;
 mod extract_pdf;
 mod extract_rtf;
+pub mod fold;
 pub mod history;
 pub mod index;
 pub mod ipc;

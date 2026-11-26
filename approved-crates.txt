@@ -147,6 +147,8 @@ serde_json
 serde_spanned
 serde-tuple-vec-map
 shlex
+signal-hook
+signal-hook-registry
 simd-adler32
 sketches-ddsketch
 slab

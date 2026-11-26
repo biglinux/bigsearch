@@ -60,7 +60,7 @@ impl Candidate {
 /// the same score (`alpha.md` and `alpha_alpha.md` tie for `alpha`). The name
 /// band is therefore mostly one big tie, and the path is what actually orders
 /// it. The content band does rank, because the body field keeps frequencies.
-pub fn search_both(
+pub(crate) fn search_both(
     reader: &IndexReader,
     content_reader: &IndexReader,
     q: &str,

@@ -1,0 +1,40 @@
+id: rust-sqlite-rows-dropped
+language: Rust
+severity: error
+message: flatten() or filter_map(Result::ok) on SQLite rows drops each row's error, so a read comes back short with no report; collect into rusqlite::Result or take `row?` in the loop.
+utils:
+  rows-dropped:
+    any:
+      - pattern: $ROWS.flatten()
+      - pattern: $ROWS.filter_map(Result::ok)
+      - pattern: $ROWS.filter_map(|$R| $R.ok())
+rule:
+  all:
+    - matches: rows-dropped
+    - any:
+        # conn.prepare(..)?.query_map(..)?.flatten()
+        - has:
+            field: function
+            has:
+              field: value
+              regex: '\.query_map\('
+        # let rows = statement.query_map(..)?; rows.flatten()
+        - has:
+            field: function
+            has:
+              field: value
+              pattern: $ROWS
+              kind: identifier
+              inside:
+                stopBy: end
+                kind: function_item
+                has:
+                  stopBy: end
+                  kind: let_declaration
+                  all:
+                    - has:
+                        field: pattern
+                        pattern: $ROWS
+                    - has:
+                        field: value
+                        regex: '\.query_map\('

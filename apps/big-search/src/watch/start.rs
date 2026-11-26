@@ -1,7 +1,7 @@
 //! A start's catch-up: the saved or walked folders watched again, and what
 //! changed while no watch covered them compared with the catalogue.
 
-use super::{StartDirs, Watches, active_index_writer, epoch_secs, evict, reconcile};
+use super::{StartDirs, Watches, active_index_writer, epoch_secs, evict, reconcile_batch};
 use crate::catalogue::State;
 use crate::index::Fields;
 use crate::scan;
@@ -205,7 +205,7 @@ fn listed_entries(dir: &Path, watches: &mut Watches) -> Option<HashSet<PathBuf>>
 /// entries; a new folder among them is walked whole, a vanished one leaves
 /// with its tree. A replaced folder leaves with its tree, and what took its
 /// place is indexed: a folder walked whole. A file rewritten in place changes
-/// no folder and waits for `big-search rescan`.
+/// no folder and waits for the walk a minute after the start.
 pub(super) fn catch_up_at_start(
     writer: &mut Option<IndexWriter>,
     f: &Fields,
@@ -228,7 +228,7 @@ pub(super) fn catch_up_at_start(
             continue;
         };
         entries.extend(state.children(&dir)?);
-        outcome.absorb(reconcile(
+        outcome.absorb(reconcile_batch(
             index_writer,
             f,
             watches,
@@ -250,7 +250,7 @@ pub(super) fn catch_up_at_start(
 
 /// Each replaced folder leaves with its tree, then is read as new.
 fn read_replaced_anew(
-    index_writer: &IndexWriter,
+    index_writer: &mut IndexWriter,
     f: &Fields,
     watches: &mut Watches,
     state: &mut State,
@@ -271,7 +271,7 @@ fn read_replaced_anew(
         ) {
             outcome.removed();
         }
-        outcome.absorb(reconcile(
+        outcome.absorb(reconcile_batch(
             index_writer,
             f,
             watches,

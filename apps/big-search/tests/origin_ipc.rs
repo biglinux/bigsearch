@@ -11,6 +11,7 @@
     reason = "integration test spawns the built big-search binary under test"
 )]
 
+mod daemon;
 mod scratch;
 
 use std::io::{BufRead, BufReader, Write};
@@ -30,15 +31,8 @@ impl Drop for KillOnDrop {
 }
 
 fn env_cmd(args: &[&str], home: &Path, xdg_storage_home: &Path, run: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_big-search"));
-    command
-        .args(args)
-        .env("RUST_LOG", "off")
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", xdg_storage_home)
-        .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", run)
-        .env("BIG_SEARCH_ORIGIN_WATCH", "0");
+    let mut command = daemon::env_cmd(args, home, xdg_storage_home, run);
+    command.env("BIG_SEARCH_ORIGIN_WATCH", "0");
     command
 }
 
@@ -121,14 +115,20 @@ fn register_created_then_query_origin() {
         note_path
     );
     assert!(send_daemon_request(&sock, &register).contains(r#""kind":"ok""#));
-    // A path no source holds is no file of this index: the origin store refuses it.
+    // A path no source holds is no file of this index, nor one reached
+    // through a symlink inside a source: the origin store refuses both.
     let outside = base.join("elsewhere/note.txt");
-    let refused = format!(
-        r#"{{"v":2,"cmd":"register_created","path":"{}"}}"#,
-        outside.to_string_lossy()
-    );
-    let reply = send_daemon_request(&sock, &refused);
-    assert!(reply.contains(r#""kind":"error""#), "{reply}");
+    std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+    std::fs::write(&outside, "elsewhere").unwrap();
+    std::os::unix::fs::symlink(base.join("elsewhere"), home.join("docs/link")).unwrap();
+    for asked in [outside, home.join("docs/link/note.txt")] {
+        let refused = format!(
+            r#"{{"v":2,"cmd":"register_created","path":"{}"}}"#,
+            asked.to_string_lossy()
+        );
+        let reply = send_daemon_request(&sock, &refused);
+        assert!(reply.contains(r#""kind":"error""#), "{reply}");
+    }
 
     let origin = format!(r#"{{"v":2,"cmd":"origin","path":"{}"}}"#, note_path);
     let origin_reply = send_daemon_request(&sock, &origin);
@@ -150,8 +150,6 @@ fn register_created_then_query_origin() {
     assert!(query_reply.contains(r#""kind":"query""#), "{query_reply}");
     assert!(query_reply.contains(r#""origin""#), "{query_reply}");
     assert!(query_reply.contains(r#""app_created""#), "{query_reply}");
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -194,6 +192,4 @@ fn cli_exposes_origin_commands() {
         capabilities.contains("file_origin_register"),
         "{capabilities}"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }

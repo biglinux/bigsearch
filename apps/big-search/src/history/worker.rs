@@ -12,50 +12,89 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use super::disk::{clone_file, disk_capacity, low_disk_threshold, recovered_disk_target};
-use super::store::now_secs;
+use super::store::{Kept, all_rows, kept_at, now_secs, park};
 use super::{Reason, SharedHistory, Support, Unavailable};
 
 /// How long a file is kept in the catalogue after its path disappears.
 const MISSING_GRACE_SECONDS: i64 = 7 * 24 * 60 * 60;
 
-/// Forget documents whose file has been gone long enough.
+/// Check every row against the file at its key: park one whose key holds a
+/// file born before this run began that the row does not record, or reaches
+/// its file through a folder replaced by a link (both arrived while nothing
+/// watched), count one whose file is gone missing, and forget those gone
+/// long enough, parked ones included. The watcher runs it before its first
+/// watch, so what changed while the service was stopped is settled before
+/// any change is heard; the worker, once an hour.
 ///
-/// The store is locked to read the catalogue and to write the outcome, not
-/// while the filesystem is asked about every document: the worker runs at idle
-/// priority, and a file manager's request for a version waits on the same lock.
-/// A row renamed or saved in between stops matching what was checked and is
-/// left for the next sweep.
-fn expire_missing(history: &SharedHistory) -> Result<()> {
-    let files: Vec<(i64, String, Option<i64>)> = {
-        let store = history.lock().expect("versions store lock");
+/// The store is locked to read the rows and to write the outcome, not while
+/// the filesystem is asked about every document: both callers run at low
+/// priority, and a file manager's request for a version waits on the same
+/// lock. A row renamed or saved in between stops matching what was checked
+/// and is left for the next sweep.
+///
+/// # Errors
+///
+/// Returns an error when the versions database cannot be read or written.
+pub fn check_kept_paths(history: &SharedHistory) -> Result<()> {
+    let (rows, started_at) = {
+        let store = history.lock();
         let Some(conn) = &store.conn else {
             return Ok(());
         };
-        conn.prepare("SELECT id, current_path, missing_since FROM files")?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?
+        (all_rows(conn)?, store.started_at)
     };
-    let checked: Vec<_> = files
+    let mut real_folders: HashMap<PathBuf, bool> = HashMap::new();
+    let checked: Vec<_> = rows
         .into_iter()
-        .map(|(id, path, missing_since)| {
-            let exists = Path::new(&path).exists();
-            (id, path, missing_since, exists)
+        .map(|(path, kept)| {
+            let found = path.as_deref().map(|path| {
+                let path = Path::new(path);
+                let unwatched = std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+                    super::born(&metadata).is_some_and(|born| born < started_at)
+                        && !(kept.records(&metadata) && is_real(path, &mut real_folders))
+                });
+                (path.exists(), unwatched)
+            });
+            (path, kept, found)
         })
         .collect();
 
     let now = now_secs();
-    let mut store = history.lock().expect("versions store lock");
+    let store = history.lock();
     let Some(conn) = &store.conn else {
         return Ok(());
     };
-    let mut expired: Vec<String> = Vec::new();
-    for (id, path, missing_since, exists) in checked {
-        if note_presence(conn, id, &path, missing_since, exists, now)? {
-            expired.push(path);
+    let mut expired = Vec::new();
+    for (path, kept, found) in checked {
+        let (exists, unwatched) = found.unwrap_or((false, false));
+        if unwatched {
+            park_if_unchanged(conn, &kept, path.as_deref())?;
+        } else if note_presence(conn, &kept, path.as_deref(), exists, now)? {
+            expired.push(kept.id);
         }
     }
-    for path in expired {
-        store.forget(Path::new(&path))?;
+    store.erase_rows(conn, &expired)
+}
+
+/// Whether `path`'s folder is a real path, as its key was when kept:
+/// asked once per folder.
+fn is_real(path: &Path, real_folders: &mut HashMap<PathBuf, bool>) -> bool {
+    let Some(folder) = path.parent() else {
+        return false;
+    };
+    *real_folders
+        .entry(folder.to_path_buf())
+        .or_insert_with(|| std::fs::canonicalize(folder).is_ok_and(|real| real == folder))
+}
+
+/// Park the row checked as `kept` under `path`, if it is still that row.
+fn park_if_unchanged(conn: &rusqlite::Connection, kept: &Kept, path: Option<&str>) -> Result<()> {
+    let now_kept = match path {
+        Some(path) => kept_at(conn, Path::new(path))?,
+        None => None,
+    };
+    if now_kept.is_some_and(|now_kept| now_kept == *kept) {
+        park(conn, kept.id)?;
     }
     Ok(())
 }
@@ -65,23 +104,23 @@ fn expire_missing(history: &SharedHistory) -> Result<()> {
 /// grace has run out and the row is still the one that was checked.
 fn note_presence(
     conn: &rusqlite::Connection,
-    id: i64,
-    path: &str,
-    missing_since: Option<i64>,
+    kept: &Kept,
+    path: Option<&str>,
     exists: bool,
     now: i64,
 ) -> Result<bool> {
-    match (exists, missing_since) {
+    let id = kept.id;
+    match (exists, kept.missing_since) {
         (true, Some(_)) => {
             conn.execute(
-                "UPDATE files SET missing_since = NULL WHERE id = ?1 AND current_path = ?2",
+                "UPDATE files SET missing_since = NULL WHERE id = ?1 AND current_path IS ?2",
                 params![id, path],
             )?;
         }
         (false, None) => {
             conn.execute(
                 "UPDATE files SET missing_since = ?3
-                  WHERE id = ?1 AND current_path = ?2 AND missing_since IS NULL",
+                  WHERE id = ?1 AND current_path IS ?2 AND missing_since IS NULL",
                 params![id, path, now],
             )?;
         }
@@ -89,7 +128,7 @@ fn note_presence(
             let unchanged: Option<i64> = conn
                 .query_row(
                     "SELECT id FROM files
-                      WHERE id = ?1 AND current_path = ?2 AND missing_since = ?3",
+                      WHERE id = ?1 AND current_path IS ?2 AND missing_since = ?3",
                     params![id, path, since],
                     |row| row.get(0),
                 )
@@ -215,10 +254,7 @@ const DROP_BATCH: usize = 16;
 /// Drop `versions`, objects first, a batch per hold of the lock.
 fn drop_in_batches(history: &SharedHistory, versions: &[(i64, String)]) -> Result<()> {
     for batch in versions.chunks(DROP_BATCH) {
-        history
-            .lock()
-            .expect("versions store lock")
-            .drop_versions(batch)?;
+        history.lock().drop_versions(batch)?;
     }
     Ok(())
 }
@@ -228,9 +264,9 @@ fn drop_in_batches(history: &SharedHistory, versions: &[(i64, String)]) -> Resul
 /// Two passes, because size and age answer different questions: first no
 /// document may hold more than a tenth of the budget, then the oldest go.
 fn enforce_budget(history: &SharedHistory) -> Result<()> {
-    let hogs = history.lock().expect("versions store lock").budget_hogs()?;
+    let hogs = history.lock().budget_hogs()?;
     drop_in_batches(history, &hogs)?;
-    let oldest = history.lock().expect("versions store lock").over_budget()?;
+    let oldest = history.lock().over_budget()?;
     drop_in_batches(history, &oldest)
 }
 
@@ -241,14 +277,14 @@ fn enforce_budget(history: &SharedHistory) -> Result<()> {
 /// because these versions are still holding the superseded blocks, and the
 /// person has no idea this store exists.
 fn watch_free_space(history: &SharedHistory) -> Result<()> {
-    if history.lock().expect("versions store lock").conn.is_none() {
+    if history.lock().conn.is_none() {
         return Ok(());
     }
     let Ok(capacity) = disk_capacity(&crate::config::data_dir()) else {
         return Ok(());
     };
     let (paused, cost) = {
-        let store = history.lock().expect("versions store lock");
+        let store = history.lock();
         (store.paused_for_space, store.total_bytes()?)
     };
     // Once paused, the store waits for the recovered target, not the threshold.
@@ -258,23 +294,14 @@ fn watch_free_space(history: &SharedHistory) -> Result<()> {
         low_disk_threshold(cost)
     };
     if capacity.available_bytes >= resume_at {
-        history
-            .lock()
-            .expect("versions store lock")
-            .paused_for_space = false;
+        history.lock().paused_for_space = false;
         return Ok(());
     }
-    history
-        .lock()
-        .expect("versions store lock")
-        .paused_for_space = true;
+    history.lock().paused_for_space = true;
     log::info!("little disk space left: giving kept versions back");
     let (available, target) = give_space_back(history, capacity.available_bytes, cost)?;
     if available >= target {
-        history
-            .lock()
-            .expect("versions store lock")
-            .paused_for_space = false;
+        history.lock().paused_for_space = false;
     }
     Ok(())
 }
@@ -291,7 +318,6 @@ fn give_space_back(history: &SharedHistory, mut available: u64, cost: u64) -> Re
         // ceiling on what comes back, never the amount.
         let dropped = history
             .lock()
-            .expect("versions store lock")
             .oldest_versions_totaling(target - available)?;
         if dropped.is_empty() {
             break;
@@ -305,7 +331,7 @@ fn give_space_back(history: &SharedHistory, mut available: u64, cost: u64) -> Re
         }
         available = now.available_bytes;
         // Fewer versions lower what they need left free.
-        target = recovered_disk_target(history.lock().expect("versions store lock").total_bytes()?);
+        target = recovered_disk_target(history.lock().total_bytes()?);
     }
     Ok((available, target))
 }
@@ -316,7 +342,7 @@ fn give_space_back(history: &SharedHistory, mut available: u64, cost: u64) -> Re
 /// failure here must never be able to stop the watcher.
 pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<HistoryEvent>) {
     crate::throttle::lower_priority();
-    report_and_tidy(history);
+    run_step(|| report_and_tidy(history));
     let mut pending = Pending::new();
     let mut next_housekeeping = std::time::Instant::now() + HOUSEKEEPING;
     let mut next_missing_sweep = std::time::Instant::now() + MISSING_SWEEP;
@@ -329,33 +355,46 @@ pub fn run_worker(history: &SharedHistory, events: std::sync::mpsc::Receiver<His
         if received.is_ok() {
             housekeeping_owed = true;
         }
-        match received {
-            Ok(event) => queue_event(history, &mut pending, event),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        let event = match received {
+            Ok(event) => Some(event),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-        }
+        };
+        run_step(|| {
+            if let Some(event) = event {
+                queue_event(history, &mut pending, event);
+            }
+            if save_due_versions(history, &mut pending) {
+                housekeeping_owed = true;
+            }
+            if housekeeping_owed && std::time::Instant::now() >= next_housekeeping {
+                housekeeping_owed = false;
+                next_housekeeping = std::time::Instant::now() + HOUSEKEEPING;
+                keep_house(history, &mut next_missing_sweep);
+            }
+        });
+    }
+}
 
-        if save_due_versions(history, &mut pending) {
-            housekeeping_owed = true;
-        }
-
-        if housekeeping_owed && std::time::Instant::now() >= next_housekeeping {
-            housekeeping_owed = false;
-            next_housekeeping = std::time::Instant::now() + HOUSEKEEPING;
-            keep_house(history, &mut next_missing_sweep);
-        }
+/// Run one step of the worker. A panic costs that step, not the versions of
+/// the rest of the run: the store's lock outlives it ([`SharedHistory::lock`]),
+/// and a document due in it was taken off [`Pending`] before its save began.
+fn run_step(step: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)).is_err() {
+        log::error!("a step of the versions worker panicked; the worker carries on");
     }
 }
 
 /// Say once why versions are not kept here, and remove what a crash left.
 fn report_and_tidy(history: &SharedHistory) {
-    let mut store = history.lock().expect("versions store lock");
-    if let Support::Unavailable(reason) = store.support()
+    let support = history.lock().support();
+    if let Support::Unavailable(reason) = support
         && reason != Unavailable::Disabled
     {
         log::info!("earlier versions are not kept here: {}", reason.as_str());
     }
-    if let Err(error) = store.sweep_orphans() {
+    let swept = history.lock().sweep_orphans();
+    if let Err(error) = swept {
         log::warn!("could not tidy the versions store: {error:#}");
     }
 }
@@ -386,15 +425,16 @@ fn next_event(
 /// Turn one watcher event into documents waiting for their version.
 fn queue_event(history: &SharedHistory, pending: &mut Pending, event: HistoryEvent) {
     match event {
-        HistoryEvent::Changed(path) => pending.note(path, QUIET_PERIOD),
+        HistoryEvent::Changed(path) => {
+            note_change(history, &path);
+            pending.note(path, QUIET_PERIOD);
+        }
         HistoryEvent::Renamed(from, to) => {
-            if let Err(error) = history
-                .lock()
-                .expect("versions store lock")
-                .note_rename(&from, &to)
-            {
+            let noted = history.lock().note_rename(&from, &to);
+            if let Err(error) = noted {
                 log::debug!("could not follow a rename: {error:#}");
             }
+            note_change(history, &to);
             pending.note(to, QUIET_PERIOD);
         }
         // The pass that covers what no event could: the queue overflowed, or
@@ -402,11 +442,21 @@ fn queue_event(history: &SharedHistory, pending: &mut Pending, event: HistoryEve
         // start's catch-up recorded it. A document whose newest version
         // matches its catalogue entry is skipped without touching the disk.
         HistoryEvent::Catalogued(entries) => {
-            let unkept = history.lock().expect("versions store lock").unkept(entries);
+            let unkept = history.lock().unkept(entries);
             for path in unkept {
                 pending.note(path, std::time::Duration::ZERO);
             }
         }
+    }
+}
+
+/// [`super::History::note_change`] at once, not when the version is due: a
+/// stop before then would leave the row recording a file the next start
+/// takes for one that arrived while nothing watched.
+fn note_change(history: &SharedHistory, path: &Path) {
+    let noted = history.lock().note_change(path);
+    if let Err(error) = noted {
+        log::warn!("could not note a change of {}: {error:#}", path.display());
     }
 }
 
@@ -424,7 +474,7 @@ fn save_due_versions(history: &SharedHistory, pending: &mut Pending) -> bool {
                 kept_any = true;
             }
             Ok(false) => {}
-            Err(error) => log::debug!("no version of {}: {error:#}", path.display()),
+            Err(error) => log::warn!("no version of {}: {error:#}", path.display()),
         }
     }
     kept_any
@@ -434,17 +484,11 @@ fn save_due_versions(history: &SharedHistory, pending: &mut Pending) -> bool {
 /// idle priority it can wait a long time for the disk, and the file manager's
 /// request before a restore must not wait with it.
 fn save_version_unlocked(history: &SharedHistory, path: &Path) -> Result<bool> {
-    let prepared = history
-        .lock()
-        .expect("versions store lock")
-        .prepare_version(path, Reason::Saved);
+    let prepared = history.lock().prepare_version(path, Reason::Saved);
     match prepared {
         Ok(Some(version)) => {
             let copied = clone_file(path, &version.object);
-            history
-                .lock()
-                .expect("versions store lock")
-                .finish_version(version, copied)
+            history.lock().finish_version(version, copied)
         }
         Ok(None) => Ok(false),
         Err(error) => Err(error),
@@ -460,35 +504,30 @@ fn keep_house(history: &SharedHistory, next_missing_sweep: &mut std::time::Insta
     if let Err(error) = watch_free_space(history) {
         log::warn!("could not check the free space: {error:#}");
     }
-    let unchecked = std::mem::take(
-        &mut history
-            .lock()
-            .expect("versions store lock")
-            .budget_unchecked,
-    );
+    let unchecked = std::mem::take(&mut history.lock().budget_unchecked);
     if unchecked && let Err(error) = enforce_budget(history) {
-        history
-            .lock()
-            .expect("versions store lock")
-            .budget_unchecked = true;
+        history.lock().budget_unchecked = true;
         log::warn!("could not keep versions inside the budget: {error:#}");
     }
     if std::time::Instant::now() >= *next_missing_sweep {
         *next_missing_sweep = std::time::Instant::now() + MISSING_SWEEP;
-        if let Err(error) = expire_missing(history) {
-            log::warn!("could not retire missing documents: {error:#}");
+        if let Err(error) = check_kept_paths(history) {
+            log::warn!("could not check the kept documents: {error:#}");
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+
     use super::*;
     use crate::history::store::open_store;
     use crate::history::tests::store_with;
 
     /// A document gone past the grace period is forgotten; one that came back
-    /// stops counting as missing; one just gone starts its grace period.
+    /// stops counting as missing; one just gone starts its grace period. A
+    /// row with no key is gone like any other.
     #[test]
     fn missing_documents_expire_after_the_grace() {
         let dir = crate::test_env::scratch_dir("bs-history-missing");
@@ -497,9 +536,15 @@ mod tests {
         let conn = open_store(&dir.join("history.sqlite")).unwrap();
         let long_ago = now_secs() - MISSING_GRACE_SECONDS - 1;
         for (id, path, missing_since) in [
-            (1, present.to_string_lossy().into_owned(), Some(long_ago)),
-            (2, "/gone/old.md".to_string(), Some(long_ago)),
-            (3, "/gone/new.md".to_string(), None),
+            (
+                1,
+                Some(present.to_string_lossy().into_owned()),
+                Some(long_ago),
+            ),
+            (2, Some("/gone/old.md".to_string()), Some(long_ago)),
+            (3, Some("/gone/new.md".to_string()), None),
+            (4, None, Some(long_ago)),
+            (5, None, Some(now_secs())),
         ] {
             conn.execute(
                 "INSERT INTO files(id, current_path, created_at, missing_since)
@@ -508,11 +553,10 @@ mod tests {
             )
             .unwrap();
         }
-        let history: SharedHistory =
-            std::sync::Arc::new(std::sync::Mutex::new(store_with(conn, &dir)));
-        expire_missing(&history).unwrap();
+        let history = SharedHistory::new(store_with(conn, &dir));
+        check_kept_paths(&history).unwrap();
 
-        let store = history.lock().unwrap();
+        let store = history.lock();
         let rows: Vec<(i64, Option<i64>)> = store
             .conn
             .as_ref()
@@ -523,10 +567,139 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows.len(), 3, "{rows:?}");
         assert_eq!(rows[0], (1, None));
         assert!(rows[1].0 == 3 && rows[1].1.is_some(), "{rows:?}");
-        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(rows[2].0, 5, "{rows:?}");
+    }
+
+    /// Rows recording `real/own.odt`: at its key, at `real/other.odt`, at
+    /// `alias/own.odt` through a link to `real`, and at a key with no file.
+    fn rows_of_own(name: &str) -> (crate::test_env::ScratchDir, SharedHistory) {
+        let dir = crate::test_env::scratch_dir(name);
+        std::fs::create_dir(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+        let (own, other) = (dir.join("real/own.odt"), dir.join("real/other.odt"));
+        std::fs::write(&own, b"own").unwrap();
+        std::fs::write(&other, b"other").unwrap();
+        let metadata = std::fs::metadata(&own).unwrap();
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        for (id, key) in [
+            (1, own),
+            (2, other),
+            (3, dir.join("alias/own.odt")),
+            (4, dir.join("real/gone.odt")),
+        ] {
+            conn.execute(
+                "INSERT INTO files(id, current_path, ino, born, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 0)",
+                params![
+                    id,
+                    key.to_str().unwrap(),
+                    metadata.ino().cast_signed(),
+                    crate::history::born(&metadata)
+                ],
+            )
+            .unwrap();
+        }
+        let history = SharedHistory::new(store_with(conn, &dir));
+        (dir, history)
+    }
+
+    /// Each row as (id, parked, missing).
+    fn row_states(history: &SharedHistory) -> Vec<(i64, bool, bool)> {
+        history
+            .lock()
+            .conn
+            .as_ref()
+            .unwrap()
+            .prepare(
+                "SELECT id, parked_from IS NOT NULL, missing_since IS NOT NULL
+                   FROM files ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// After a start, a row is parked when its key holds a file born before
+    /// the run that it does not record, or reaches its file through a folder
+    /// replaced by a link; its own file keeps it, a gone one counts it missing.
+    #[test]
+    fn kept_paths_checked_after_start() {
+        let (_dir, history) = rows_of_own("bs-history-kept-after-start");
+        history.lock().started_at = i64::MAX;
+        check_kept_paths(&history).unwrap();
+        assert_eq!(
+            row_states(&history),
+            [
+                (1, false, false),
+                (2, true, true),
+                (3, true, true),
+                (4, false, true)
+            ]
+        );
+    }
+
+    /// A file born during the run is left to the change the watcher hears.
+    #[test]
+    fn kept_paths_born_during_run() {
+        let (_dir, history) = rows_of_own("bs-history-kept-during-run");
+        check_kept_paths(&history).unwrap();
+        assert_eq!(
+            row_states(&history),
+            [
+                (1, false, false),
+                (2, false, false),
+                (3, false, false),
+                (4, false, true)
+            ]
+        );
+    }
+
+    /// A thread that panicked holding the store leaves it usable to the
+    /// worker's next step and to every request.
+    #[test]
+    fn store_outlives_panic_under_lock() {
+        let dir = crate::test_env::scratch_dir("bs-history-poisoned");
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        let history = SharedHistory::new(store_with(conn, &dir));
+        let held = history.clone();
+        let panicked = std::thread::spawn(move || {
+            let _store = held.lock();
+            panic!("a step panicked holding the store");
+        })
+        .join();
+        assert!(panicked.is_err());
+        check_kept_paths(&history).unwrap();
+        assert!(
+            history
+                .lock()
+                .versions(&[dir.join("a.odt")])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Guards: recovery: a step that panics holding the store costs that step
+    /// alone; the worker's next step still reaches the store.
+    #[test]
+    fn worker_outlives_panicking_step() {
+        let dir = crate::test_env::scratch_dir("bs-history-step-panic");
+        let conn = open_store(&dir.join("history.sqlite")).unwrap();
+        let history = SharedHistory::new(store_with(conn, &dir));
+        run_step(|| {
+            let _store = history.lock();
+            panic!("a step panicked holding the store");
+        });
+        let mut swept = false;
+        run_step(|| {
+            check_kept_paths(&history).unwrap();
+            swept = true;
+        });
+        assert!(swept);
     }
 
     #[test]

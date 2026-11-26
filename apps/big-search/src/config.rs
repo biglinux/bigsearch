@@ -23,11 +23,16 @@ pub fn data_dir() -> PathBuf {
 /// complete list of every path in their home, and the content index holds the
 /// extracted *text* of their documents. SQLite and the walker create their files
 /// through the process umask, typically `0022`, which leaves `state.sqlite` and
-/// `content-signatures.json` readable by every local account. Tantivy creates
-/// `index/` as 0700 on its own; nothing else does.
+/// `content-signatures.json` readable by every local account, and the
+/// index directories are created the same way.
 ///
 /// Restricting the directory covers every file inside it, present and future,
 /// without having to remember a mode at each creation site.
+///
+/// # Errors
+///
+/// Returns the I/O error of creating the data directory, reading its mode or
+/// restricting it.
 pub fn ensure_private_data_dir() -> std::io::Result<()> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
@@ -127,7 +132,6 @@ mod tests {
         ensure_private_data_dir().unwrap();
         let mode = std::fs::metadata(data_dir()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

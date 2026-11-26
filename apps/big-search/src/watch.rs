@@ -8,24 +8,26 @@
 //! upsert, gone → delete it and everything under it.
 mod content_backfill;
 mod event_batch;
+mod reconcile;
 mod start;
+#[cfg(test)]
+mod tests;
 mod watches;
 
-use crate::catalogue::{self, State};
+use crate::catalogue::State;
 use crate::content;
 use crate::index::{ContentFields, Fields, content_fields, fields};
 use crate::origin;
 use crate::scan;
 use anyhow::{Context, Result};
 use content_backfill::{ContentBackfill, compact_when_worth_it, run_content_backfill_batch};
-use event_batch::{WatchBatch, ingest, observe_origin_batch};
-use notify::event::{AccessKind, AccessMode, EventKind};
-use notify::recommended_watcher;
+use event_batch::{Heard, MAX_FOLDERS, Rescan, WatchBatch, observe_origin_batch};
+use notify::{Config, EventKindMask, RecommendedWatcher, Watcher};
+use reconcile::{evict, reconcile_batch, reconcile_forced};
 use start::{catch_up_at_start, watch_initial_dirs};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime};
 use tantivy::{Index, IndexWriter};
@@ -36,13 +38,19 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
 /// How often an idle watcher offers the versions worker another catalogue page.
 /// Slow on purpose: the first-version pass must be an unnoticed trickle.
 const HISTORY_PASS_TICK: Duration = Duration::from_millis(750);
-/// Filesystem events waiting for the watcher, at most. Past it they are
-/// dropped and the loop rescans, as the kernel does when its own queue fills:
-/// a backup or a recursive copy must not queue its whole tree in memory.
-const MAX_QUEUED_EVENTS: usize = 16_384;
 pub const ACTIVITY_IDLE: u8 = 0;
 pub const ACTIVITY_INDEXING: u8 = 1;
 pub const ACTIVITY_BACKFILLING: u8 = 2;
+
+/// How long after a start from the saved folder list the sources are walked
+/// once, for what changed while the daemon was stopped and moved no folder: a
+/// file rewritten in place, an edited `.gitignore`. The walk waits out the
+/// busiest minute of a session's start.
+fn saved_start_check_delay() -> Duration {
+    crate::settings::test_seam("BIG_SEARCH_SAVED_START_CHECK_MS")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(Duration::from_secs(60), Duration::from_millis)
+}
 
 pub fn activity_label(paused: bool, activity: u8) -> &'static str {
     if paused {
@@ -122,10 +130,16 @@ pub enum WatchControlCommand {
     WarmContent,
 }
 
-/// What the watcher loop consumes: a filesystem event or a control command.
+/// What the watcher loop consumes: a wake for what the inotify thread heard,
+/// a control command or a stop.
 pub enum WatchMessage {
-    Fs(notify::Result<notify::Event>),
+    /// The inotify thread heard the first event since the loop last took
+    /// what it heard.
+    Heard,
     ControlCommand(WatchControlCommand),
+    /// End [`run`], which returns this exit status, once the events heard
+    /// before the stop are applied and the versions worker has noted them.
+    Stop(i32),
 }
 
 struct ContentIndexWrite<'a> {
@@ -133,20 +147,25 @@ struct ContentIndexWrite<'a> {
     writer: &'a mut Option<IndexWriter>,
 }
 
-/// Watch `roots` and keep `index` (and the `state` cache) in sync until the channel
-/// closes. `paused` mirrors the runtime state for the IPC `status` reply. `tx`/`rx`
-/// are the shared `WatchMessage` channel: `tx` is cloned into the inotify callback, and the
-/// IPC thread holds another clone to deliver control commands. Blocking.
+/// Watch `roots` and keep `index` (and the `state` cache) in sync until a
+/// [`WatchMessage::Stop`], and return its exit status. `paused` mirrors the runtime
+/// state for the IPC `status` reply. `rx` receives what `inotify` hears and what
+/// the IPC thread sends. Blocking.
+///
+/// # Errors
+///
+/// Returns an error when the index writers cannot be started, or a batch cannot
+/// be committed; the caller ends the daemon.
 pub fn run(
     index: Index,
     content_index: Index,
     scope: WatchScope<'_>,
     mut state: State,
     runtime: WatchRuntime,
-    tx: Sender<WatchMessage>,
+    inotify: Inotify,
     rx: Receiver<WatchMessage>,
     history: crate::history::SharedHistory,
-) -> Result<()> {
+) -> Result<i32> {
     let f = fields(&index)?;
     let content_fields = content_fields(&content_index)?;
     // Resident for the daemon's whole life, so size it at tantivy's minimum arena
@@ -158,8 +177,15 @@ pub fn run(
     // uses, so the two cannot disagree about what belongs in the index.
     let path_scope = scan::Scope::compile();
 
-    let (mut watches, queued, overflowed) =
-        start_inotify(tx, &runtime, scope.watch_list, scope.fingerprint)?;
+    let check_sources_at = matches!(scope.dirs, StartDirs::Saved(..))
+        .then(|| Instant::now() + saved_start_check_delay());
+    let (history_tx, history_worker) = spawn_history_worker(&history);
+    let mut watches = Watches::new(
+        inotify.watcher,
+        &runtime,
+        scope.watch_list,
+        scope.fingerprint,
+    );
     let catch_up = watch_initial_dirs(&mut watches, scope.roots, scope.dirs, scope.started);
     catch_up_at_start(
         &mut writer,
@@ -171,21 +197,21 @@ pub fn run(
     )?;
     watches.record_run(scope.started)?;
     let origin_writer = open_origin_writer();
-    let history_tx = spawn_history_worker(&history);
 
     let mut content_backfill = ContentBackfill::new(runtime.pending_content.clone());
     content_backfill.request();
     runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
 
-    WatchLoop {
+    let status = WatchLoop {
+        check_sources_at,
         content_backfill,
+        stop_status: None,
         history_pass_done: false,
         history_cursor: None,
         history_tx,
         origin_writer,
         watches,
-        overflowed,
-        queued,
+        heard: inotify.heard,
         path_scope,
         content_writer: None,
         writer,
@@ -198,51 +224,43 @@ pub fn run(
         content_index,
         index,
     }
-    .run_until_closed()
+    .run_until_stopped()?;
+    // The loop took the worker's queue with it: the worker notes each change
+    // still queued, then returns.
+    if let Some(worker) = history_worker
+        && worker.join().is_err()
+    {
+        log::error!("the versions worker panicked while stopping");
+    }
+    Ok(status)
 }
 
-/// Start inotify. Returns the watches, the count of events the callback has
-/// sent and the loop not yet received, and the flag it raises when it had to
-/// drop one.
-fn start_inotify(
-    tx: Sender<WatchMessage>,
-    runtime: &WatchRuntime,
-    watch_list: State,
-    fingerprint: Option<i64>,
-) -> Result<(Watches, Arc<AtomicUsize>, Arc<AtomicBool>)> {
-    let fs_tx = tx;
-    let queued = Arc::new(AtomicUsize::new(0));
-    let overflowed = Arc::new(AtomicBool::new(false));
-    let (callback_queued, callback_overflowed) = (Arc::clone(&queued), Arc::clone(&overflowed));
-    let watcher = recommended_watcher(move |watcher_result: notify::Result<notify::Event>| {
-        // notify always asks for IN_OPEN; a read changes nothing and must not
-        // wake the indexer. A close after writing is how a save ends.
-        if let Ok(event) = &watcher_result
-            && matches!(event.kind, EventKind::Access(kind)
-                if kind != AccessKind::Close(AccessMode::Write))
-        {
-            return;
-        }
-        if callback_queued.fetch_add(1, Ordering::Relaxed) >= MAX_QUEUED_EVENTS {
-            callback_queued.fetch_sub(1, Ordering::Relaxed);
-            callback_overflowed.store(true, Ordering::Relaxed);
-            return;
-        }
-        let _ = fs_tx.send(WatchMessage::Fs(watcher_result));
-    })
-    .context("inotify init")?;
-    let watches = Watches {
-        watcher,
-        failed: Arc::clone(&runtime.unwatched_dirs),
-        dirs: watch_list,
-        fingerprint,
-        recorded: true,
-        run_started: None,
-        missed: false,
-        unreadable: HashSet::new(),
-        paused: Arc::clone(&runtime.paused),
-    };
-    Ok((watches, queued, overflowed))
+/// The file watcher, with no watch yet, and what its thread hears for [`run`].
+pub struct Inotify {
+    watcher: RecommendedWatcher,
+    heard: Arc<Heard>,
+}
+
+/// Start inotify for the sources `roots`; the first event heard after the
+/// watcher loop takes a batch wakes it through `wake`. notify's reader thread
+/// takes its caller's policy, nice value and cgroup: the daemon calls this
+/// through [`crate::throttle::spawn_lowered`].
+///
+/// # Errors
+///
+/// Returns an error when inotify cannot be initialized.
+pub fn start_inotify(wake: Sender<WatchMessage>, roots: Vec<PathBuf>) -> Result<Inotify> {
+    let heard = Arc::new(Heard::new(roots, wake));
+    let hearing = Arc::clone(&heard);
+    // Without IN_OPEN, which notify asks for by default: every read under a
+    // source, the indexer's own included, would cost the reader an event.
+    // A close after writing is how a save ends.
+    let config =
+        Config::default().with_event_kinds(EventKindMask::CORE | EventKindMask::ACCESS_CLOSE);
+    let watcher =
+        RecommendedWatcher::new(move |watcher_result| hearing.hear(watcher_result), config)
+            .context("inotify init")?;
+    Ok(Inotify { watcher, heard })
 }
 
 /// The origin database, with what the browsers already know imported into it.
@@ -264,21 +282,42 @@ fn open_origin_writer() -> origin::OriginWriter {
 /// Separate on purpose: a version that cannot be written must never delay the
 /// search, and the store it writes to is the person's data rather than a
 /// cache this service can rebuild.
+///
+/// Called before any watch: what changed while the service was stopped is
+/// settled here before a change is heard, and the start's walk catches the
+/// rest. The worker returns once the sender is dropped and the queue drained.
 fn spawn_history_worker(
     history: &crate::history::SharedHistory,
-) -> Sender<crate::history::HistoryEvent> {
+) -> (
+    Sender<crate::history::HistoryEvent>,
+    Option<std::thread::JoinHandle<()>>,
+) {
+    if let Err(error) = crate::history::check_kept_paths(history) {
+        log::warn!("could not check the kept documents: {error:#}");
+    }
     let (history_tx, history_rx) = std::sync::mpsc::channel::<crate::history::HistoryEvent>();
-    let history_store = std::sync::Arc::clone(history);
-    std::thread::Builder::new()
+    let history_store = history.clone();
+    let spawned = std::thread::Builder::new()
         .name("history".into())
-        .spawn(move || crate::history::run_worker(&history_store, history_rx))
-        .ok();
-    history_tx
+        .spawn(move || crate::history::run_worker(&history_store, history_rx));
+    let worker = match spawned {
+        Ok(worker) => Some(worker),
+        Err(e) => {
+            log::error!("no versions are kept: the history thread did not start: {e}");
+            None
+        }
+    };
+    (history_tx, worker)
 }
 
 /// What the watcher loop owns between messages.
 struct WatchLoop<'a> {
+    /// When a start from the saved list walks the sources once
+    /// ([`saved_start_check_delay`]).
+    check_sources_at: Option<Instant>,
     content_backfill: ContentBackfill,
+    /// The exit status of the [`WatchMessage::Stop`] taken, which ends the loop.
+    stop_status: Option<i32>,
     history_pass_done: bool,
     /// Where the pass over the catalogue has got to. It covers what no event
     /// could: the bursts that overflowed the kernel's queue, and saves made
@@ -288,10 +327,7 @@ struct WatchLoop<'a> {
     history_tx: Sender<crate::history::HistoryEvent>,
     origin_writer: origin::OriginWriter,
     watches: Watches,
-    /// Set by the inotify callback when it dropped an event.
-    overflowed: Arc<AtomicBool>,
-    /// Events the inotify callback sent and the loop has not received yet.
-    queued: Arc<AtomicUsize>,
+    heard: Arc<Heard>,
     path_scope: scan::Scope,
     content_writer: Option<IndexWriter>,
     writer: Option<IndexWriter>,
@@ -306,51 +342,72 @@ struct WatchLoop<'a> {
 }
 
 impl WatchLoop<'_> {
-    fn run_until_closed(mut self) -> Result<()> {
-        while let Some(message) = self.next_message() {
+    fn run_until_stopped(mut self) -> Result<i32> {
+        loop {
+            let message = self.next_message()?;
             self.handle(message)?;
+            if let Some(status) = self.stop_status {
+                return Ok(status);
+            }
         }
-        Ok(())
     }
 
     /// Wait for the next message, doing idle work (a content backfill batch,
-    /// a page of the versions pass) each time the wait runs out. `None` once
-    /// the channel is closed.
-    fn next_message(&mut self) -> Option<WatchMessage> {
+    /// a page of the versions pass) each time the wait runs out, and the walk
+    /// a start from the saved list owes once its time comes.
+    fn next_message(&mut self) -> Result<WatchMessage> {
         loop {
-            if self
-                .content_backfill
-                .should_run_when_idle(&self.runtime.paused)
-            {
-                match self
-                    .rx
-                    .recv_timeout(self.content_backfill.wait_before_batch())
-                {
-                    Ok(message) => return Some(message),
-                    Err(RecvTimeoutError::Timeout) => self.idle_backfill_turn(),
-                    Err(RecvTimeoutError::Disconnected) => return None,
-                }
-            } else if self.history_pass_done || self.runtime.paused.load(Ordering::Relaxed) {
-                // Paused stops the versions pass too; Resume picks it up.
-                return self.rx.recv().ok();
-            } else {
-                // The pass over the catalogue also runs when there is no indexing
-                // left to do, which is most of the time: blocking on the channel
-                // would make the first version of anything wait for the next file
-                // to change.
-                match self.rx.recv_timeout(HISTORY_PASS_TICK) {
-                    Ok(message) => return Some(message),
-                    Err(RecvTimeoutError::Timeout) => {
-                        self.history_pass_done = send_history_page(
-                            &self.state,
-                            &self.history_tx,
-                            &mut self.history_cursor,
-                        );
-                    }
-                    Err(RecvTimeoutError::Disconnected) => return None,
+            if self.check_due() {
+                self.check_sources_at = None;
+                // A paused watcher drops events; `resume` walks.
+                if !self.runtime.paused.load(Ordering::Relaxed) {
+                    log::info!("checking the sources for changes made while stopped");
+                    self.walk_sources()?;
                 }
             }
+            let backfill = self
+                .content_backfill
+                .should_run_when_idle(&self.runtime.paused);
+            // The pass over the catalogue also runs when there is no indexing
+            // left to do, which is most of the time: blocking on the channel
+            // would make the first version of anything wait for the next file
+            // to change. Paused stops it too; Resume picks it up.
+            let history_page = !backfill
+                && !self.history_pass_done
+                && !self.runtime.paused.load(Ordering::Relaxed);
+            let idle_wait = if backfill {
+                Some(self.content_backfill.wait_before_batch())
+            } else if history_page {
+                Some(HISTORY_PASS_TICK)
+            } else {
+                None
+            };
+            let check_wait = self
+                .check_sources_at
+                .map(|at| at.saturating_duration_since(Instant::now()));
+            let received = match idle_wait.into_iter().chain(check_wait).min() {
+                Some(wait) => self.rx.recv_timeout(wait),
+                None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match received {
+                Ok(message) => return Ok(message),
+                Err(RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("every sender of the watcher's messages is gone")
+                }
+                // The wait ran out for the walk, not for idle work.
+                Err(RecvTimeoutError::Timeout) if self.check_due() => {}
+                Err(RecvTimeoutError::Timeout) if backfill => self.idle_backfill_turn(),
+                Err(RecvTimeoutError::Timeout) if history_page => {
+                    self.history_pass_done =
+                        send_history_page(&self.state, &self.history_tx, &mut self.history_cursor);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
         }
+    }
+
+    fn check_due(&self) -> bool {
+        self.check_sources_at.is_some_and(|at| at <= Instant::now())
     }
 
     /// Nothing arrived before the next backfill batch was due: one page of the
@@ -397,7 +454,7 @@ impl WatchLoop<'_> {
     }
 
     fn handle(&mut self, message: WatchMessage) -> Result<()> {
-        let first = match message {
+        match message {
             WatchMessage::ControlCommand(WatchControlCommand::WarmContent) => {
                 self.content_backfill.warm();
                 return Ok(());
@@ -426,49 +483,70 @@ impl WatchLoop<'_> {
                 return self.walk_sources();
             }
             WatchMessage::ControlCommand(command) => return self.apply_control(command),
-            WatchMessage::Fs(watcher_result) => {
-                self.queued.fetch_sub(1, Ordering::Relaxed);
-                watcher_result
+            WatchMessage::Stop(status) => {
+                self.stop_status = Some(status);
+                return self.apply_last_burst();
             }
+            WatchMessage::Heard => {}
+        }
+        if self.runtime.paused.load(Ordering::Relaxed) {
+            // Resume reconciles what the index missed; saves and renames still
+            // reach the versions worker, or the next start parks the rows of
+            // documents saved while paused.
+            if let Some(batch) = self.heard.take() {
+                self.send_history(batch.history_renames, batch.history_paths);
+            }
+            return Ok(());
+        }
+        self.index_burst()
+    }
+
+    /// Apply what the inotify thread hears within one more [`DEBOUNCE`]
+    /// after a stop, so a save made just before it still reaches the versions
+    /// worker. A request or another stop that arrives meanwhile is dropped.
+    fn apply_last_burst(&mut self) -> Result<()> {
+        let deadline = Instant::now() + DEBOUNCE;
+        while self.wait_out_burst(deadline).is_some() {}
+        let Some(batch) = self.heard.take() else {
+            return Ok(());
         };
         if self.runtime.paused.load(Ordering::Relaxed) {
-            return Ok(()); // dropped while paused; Resume reconciles what was missed
+            self.send_history(batch.history_renames, batch.history_paths);
+            return Ok(());
         }
-        self.index_burst(first)
+        self.apply_batch(batch)
     }
 
     fn reindex_path(&mut self, path: PathBuf) -> Result<()> {
-        // The socket refuses these; this guards against the sources having
-        // changed since.
-        if self.runtime.paused.load(Ordering::Relaxed)
-            || !path.is_absolute()
-            || !self.roots.iter().any(|root| path.starts_with(root))
-        {
-            log::warn!("reindex of {} refused: outside the roots", path.display());
+        // The socket refuses these; this guards against the sources, or a
+        // folder on the way, having changed since.
+        let key = crate::settings::sources()
+            .resolved_client_path(&path)
+            .filter(|key| self.roots.iter().any(|root| key.starts_with(root)));
+        if self.runtime.paused.load(Ordering::Relaxed) {
+            log::warn!("reindex of {} refused: indexing is paused", path.display());
             return Ok(());
         }
+        let Some(path) = key else {
+            log::warn!("reindex of {} refused: outside the roots", path.display());
+            return Ok(());
+        };
         self.runtime
             .activity
             .store(ACTIVITY_INDEXING, Ordering::Relaxed);
-        // Forgetting the path is what forces the work: the reconcile
-        // below then sees it as new instead of unchanged.
-        self.state.remove(&path);
         // The content index keeps its own record of the same path, and
         // the only reason to ask for a forced reindex is a change the
         // file's size and modification time do not show, such as a tag. Left
-        // in place, that record makes the content pass skip the file and
+        // as it is, that record makes the content pass skip the file and
         // the tag never becomes searchable.
-        content::forget_content_state(&path).context("forget content state")?;
-        let mut forced = std::collections::HashSet::new();
-        forced.insert(path);
-        let outcome = reconcile(
+        content::mark_content_stale(&path).context("mark content stale")?;
+        let outcome = reconcile_forced(
             active_index_writer(&mut self.writer),
             &self.f,
             &mut self.watches,
             &mut self.state,
             &self.path_scope,
-            forced,
-            None,
+            &path,
         )?;
         if outcome.index_changed {
             active_index_writer(&mut self.writer)
@@ -476,6 +554,9 @@ impl WatchLoop<'_> {
                 .context("commit forced reindex")?;
             recycle_background_writer(&self.index, &mut self.writer)
                 .context("recycle index writer")?;
+        }
+        if outcome.deleted {
+            self.content_backfill.note_deletion();
         }
         self.watches.persist()?;
         if outcome.state_changed {
@@ -510,56 +591,47 @@ impl WatchLoop<'_> {
         Ok(())
     }
 
-    /// Index a burst of filesystem events that begins with `first`, then run
+    /// Index what the inotify thread hears within one [`DEBOUNCE`], then run
     /// the control command that ended the burst early, if one did.
-    fn index_burst(&mut self, first: notify::Result<notify::Event>) -> Result<()> {
+    fn index_burst(&mut self) -> Result<()> {
         self.runtime
             .activity
             .store(ACTIVITY_INDEXING, Ordering::Relaxed);
-        let mut batch = WatchBatch::new();
-        let mut rescan = ingest(&mut batch, first);
-        let deferred_control_command = self.coalesce_burst(&mut batch, &mut rescan);
-        self.apply_batch(batch, rescan)?;
+        let deferred = self.wait_out_burst(Instant::now() + DEBOUNCE);
+        if let Some(batch) = self.heard.take() {
+            self.apply_batch(batch)?;
+        }
         self.runtime
             .activity
             .store(ACTIVITY_IDLE, Ordering::Relaxed);
-        if let Some(command) = deferred_control_command {
-            self.handle(WatchMessage::ControlCommand(command))?;
+        if let Some(message) = deferred {
+            self.handle(message)?;
         }
         Ok(())
     }
 
-    /// Coalesce a burst; a control command breaks the window and runs after the
-    /// batch commits (no reordering of fs work, no lost command).
-    fn coalesce_burst(
-        &self,
-        batch: &mut WatchBatch,
-        rescan: &mut bool,
-    ) -> Option<WatchControlCommand> {
-        let deadline = Instant::now() + DEBOUNCE;
+    /// Let a burst gather until `deadline`. A control command or a stop ends
+    /// it early and is returned, for the caller to run after the batch commits.
+    fn wait_out_burst(&self, deadline: Instant) -> Option<WatchMessage> {
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match self.rx.recv_timeout(remaining) {
-                Ok(WatchMessage::Fs(event_result)) => {
-                    self.queued.fetch_sub(1, Ordering::Relaxed);
-                    *rescan |= ingest(batch, event_result);
-                }
-                Ok(WatchMessage::ControlCommand(command)) => return Some(command),
+                Ok(WatchMessage::Heard) => {}
+                Ok(message) => return Some(message),
                 Err(_) => break,
             }
         }
         None
     }
 
-    /// Reconcile one coalesced batch, commit the name index and persist the
-    /// catalogue when they changed, and hand the saves it saw to the versions
-    /// worker.
-    fn apply_batch(&mut self, mut batch: WatchBatch, rescan: bool) -> Result<()> {
+    /// Reconcile one batch, commit the name index and persist the catalogue
+    /// when they changed, and hand the saves it saw to the versions worker.
+    fn apply_batch(&mut self, mut batch: WatchBatch) -> Result<()> {
         observe_origin_batch(&self.origin_writer, &batch);
         // Reconciled first, history second: only a file that reached a coherent
         // state is worth a version, and the search never waits on this.
         let history_paths = std::mem::take(&mut batch.history_paths);
         let history_renames = std::mem::take(&mut batch.history_renames);
-        let mut outcome = reconcile(
+        let mut outcome = reconcile_batch(
             active_index_writer(&mut self.writer),
             &self.f,
             &mut self.watches,
@@ -568,26 +640,46 @@ impl WatchLoop<'_> {
             batch.paths,
             None,
         )?;
-        for (from, to) in history_renames {
-            let _ = self
-                .history_tx
-                .send(crate::history::HistoryEvent::Renamed(from, to));
+        for folder in &batch.folders {
+            outcome.absorb(reconcile_forced(
+                active_index_writer(&mut self.writer),
+                &self.f,
+                &mut self.watches,
+                &mut self.state,
+                &self.path_scope,
+                folder,
+            )?);
         }
-        for path in history_paths {
-            let _ = self
-                .history_tx
-                .send(crate::history::HistoryEvent::Changed(path));
-        }
-        let overflowed = self.overflowed.swap(false, Ordering::Relaxed);
-        let walk_started = if rescan || overflowed {
-            if overflowed {
-                log::warn!("inotify overflow: full rescan");
+        self.send_history(history_renames, history_paths);
+        let walk_started = if let Some(cause) = batch.rescan {
+            match cause {
+                Rescan::Overflowed => log::warn!("inotify overflow: full rescan"),
+                Rescan::Collapsed => {
+                    log::info!("changes in over {MAX_FOLDERS} folders at once: full rescan");
+                }
             }
             Some(self.rescan_sources(&mut outcome)?)
         } else {
             None
         };
         self.finish_batch(outcome, walk_started)
+    }
+
+    fn send_history(
+        &self,
+        renames: Vec<(PathBuf, PathBuf)>,
+        saves: std::collections::HashSet<PathBuf>,
+    ) {
+        for (from, to) in renames {
+            let _ = self
+                .history_tx
+                .send(crate::history::HistoryEvent::Renamed(from, to));
+        }
+        for path in saves {
+            let _ = self
+                .history_tx
+                .send(crate::history::HistoryEvent::Changed(path));
+        }
     }
 
     /// Walk every source against the catalogue on request, as one batch.
@@ -609,19 +701,26 @@ impl WatchLoop<'_> {
     fn rescan_sources(&mut self, outcome: &mut scan::ReconcileOutcome) -> Result<SystemTime> {
         let started = SystemTime::now();
         self.watches.walk_begins()?;
+        // This walk is the one a start from the saved list owes.
+        self.check_sources_at = None;
         // The versions worker cannot trust what it heard either, so its pass
         // over the catalogue starts again from the top.
         self.history_pass_done = false;
         self.history_cursor = None;
-        let walked = scan::reconcile_inline(
-            active_index_writer(&mut self.writer),
-            &self.f,
-            &mut self.state,
-            self.roots,
-            &mut |dir| {
-                self.watches.watch(dir);
-            },
-        )?;
+        let roots = self.roots;
+        let walked = self
+            .watches
+            .relist(roots.iter().map(PathBuf::as_path), |watches| {
+                scan::reconcile_inline(
+                    active_index_writer(&mut self.writer),
+                    &self.f,
+                    &mut self.state,
+                    roots,
+                    &mut |dir| {
+                        watches.watch(dir);
+                    },
+                )
+            })?;
         // A folder the walk could not read leaves this run unable to vouch
         // for it.
         self.watches.missed |= walked.unread;
@@ -691,7 +790,7 @@ fn open_content_writer<'a>(
 }
 
 /// Apply a lifecycle command the run loop leaves to this function: Pause
-/// flips the shared flag; Rebuild wipes the index/cache and re-indexes names
+/// forgets the run record; Rebuild wipes the index/cache and re-indexes names
 /// from scratch, then schedules content backfill. Whether the index changed.
 fn apply_control_command(
     command: WatchControlCommand,
@@ -705,9 +804,12 @@ fn apply_control_command(
 ) -> Result<bool> {
     match command {
         WatchControlCommand::Pause => {
-            // The flag was set when the command was accepted, so a request
-            // right after it already sees it. Events are dropped while
-            // paused, so the next start must walk.
+            // The flag was set when the command was accepted; cleared again,
+            // a resume accepted after this pause is waiting in the queue.
+            if !runtime.paused.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            // Events are dropped while paused, so the next start must walk.
             watches.forget_run()?;
             runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
             log::info!("indexing paused");
@@ -750,8 +852,10 @@ fn rebuild(
     close_index_writer(content.writer).context("close content writer after rebuild clear")?;
     state.clear();
     content::clear_content_state().context("clear content state for rebuild")?;
-    let walked = scan::reconcile_inline(writer, f, state, roots, &mut |dir| {
-        watches.watch(dir);
+    let walked = watches.relist(roots.iter().map(PathBuf::as_path), |watches| {
+        scan::reconcile_inline(writer, f, state, roots, &mut |dir| {
+            watches.watch(dir);
+        })
     })?;
     watches.missed |= walked.unread;
     // The clear above must reach disk even when the walk found nothing.
@@ -761,185 +865,6 @@ fn rebuild(
     watches.record_run(started)?;
     runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
     Ok(true)
-}
-
-/// Apply one coalesced batch. The outcome says whether the name index needs a
-/// commit and whether state/content work happened. A changed catalogued
-/// folder among `watched`, which has a pass of its own, only gets its row
-/// refreshed; any other is walked whole.
-fn reconcile(
-    writer: &IndexWriter,
-    f: &Fields,
-    watches: &mut Watches,
-    state: &mut State,
-    scope: &scan::Scope,
-    batch: HashSet<PathBuf>,
-    watched: Option<&HashSet<PathBuf>>,
-) -> Result<scan::ReconcileOutcome> {
-    let mut pass = ReconcilePass {
-        writer,
-        f,
-        scope,
-        watched,
-        outcome: scan::ReconcileOutcome::default(),
-        offline_sources: None,
-    };
-    for path in batch {
-        pass.path(watches, state, &path)?;
-    }
-    // A folder the pass could not read leaves this run unable to vouch for it.
-    watches.missed |= pass.outcome.unread;
-    Ok(pass.outcome)
-}
-
-/// One batch's reconcile: what stays the same from path to path.
-struct ReconcilePass<'a> {
-    writer: &'a IndexWriter,
-    f: &'a Fields,
-    scope: &'a scan::Scope,
-    watched: Option<&'a HashSet<PathBuf>>,
-    outcome: scan::ReconcileOutcome,
-    offline_sources: Option<crate::query::OfflineSources>,
-}
-
-impl ReconcilePass<'_> {
-    fn path(&mut self, watches: &mut Watches, state: &mut State, path: &Path) -> Result<()> {
-        // Catalogue keys are text: a name with invalid bytes shares its key
-        // with others, and acting on it would touch theirs.
-        if path.to_str().is_none() {
-            return Ok(());
-        }
-        let stat = std::fs::symlink_metadata(path);
-        let gone = matches!(&stat, Err(error) if error.kind() == std::io::ErrorKind::NotFound);
-        // A lookup that failed otherwise leaves the path unread, and what the
-        // catalogue holds for it stays.
-        self.outcome.unread |= matches!(&stat, Err(error) if !matches!(
-            error.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-        ));
-        let metadata = stat.ok();
-        let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
-        let recorded = state.recorded(path);
-        let out_of_scope = self.scope.excluded(path, is_dir)
-            || (recorded.is_none() && scan::repo_ignored(path, is_dir));
-        if out_of_scope && recorded.is_none() {
-            return Ok(()); // out of scope and never catalogued: nothing to do
-        }
-        // Below this line an excluded path is treated exactly like a vanished
-        // one, so the rules also evict what an earlier version indexed before
-        // they covered it. Skipping it instead would strand those documents.
-        if let Some(metadata) = metadata.filter(|_| !out_of_scope) {
-            return self.present(watches, state, path, &metadata, recorded);
-        }
-        if recorded.is_some()
-            && (gone || out_of_scope)
-            && evict(
-                self.writer,
-                self.f,
-                state,
-                watches,
-                path,
-                gone,
-                &mut self.offline_sources,
-            )
-        {
-            self.outcome.removed();
-        }
-        // Otherwise never catalogued, or not readable now (EACCES, EIO on a
-        // disk going away): nothing to drop on that evidence.
-        Ok(())
-    }
-
-    /// A path that exists and is in scope: index what changed about it.
-    fn present(
-        &mut self,
-        watches: &mut Watches,
-        state: &mut State,
-        path: &Path,
-        metadata: &std::fs::Metadata,
-        mut recorded: Option<(i64, u64)>,
-    ) -> Result<()> {
-        // A folder renamed over a listed one can match its time and size (a
-        // small ext4 folder is one block): the inode tells them apart, and the
-        // old folder's rows leave before the new one is read.
-        if recorded.is_some() && watches.listed_as_other(path, metadata) {
-            evict(
-                self.writer,
-                self.f,
-                state,
-                watches,
-                path,
-                false,
-                &mut self.offline_sources,
-            );
-            self.outcome.removed();
-            recorded = None;
-        }
-        let (mtime, size) = catalogue::meta_pair(metadata);
-        // A listed folder this user could not read may have been made
-        // readable (chmod, chown): only its change time moved.
-        let reopened = metadata.is_dir() && watches.unreadable.contains(path);
-        if recorded == Some((mtime, size)) && !reopened {
-            return Ok(()); // metadata-only event (e.g. ATTRIB): nothing to reindex
-        }
-        if scan::name_doc_stale(recorded, mtime) {
-            // A new path, or one changed on another day: (re)index its name.
-            // A file rewritten the same day keeps its name doc (content work
-            // is scheduled through the state change below).
-            scan::upsert_path(self.writer, self.f, path, Some(metadata))?;
-            self.outcome.index_changed = true;
-        }
-        state.set(path, mtime, size);
-        self.outcome.state_changed = true;
-        let own_pass =
-            recorded.is_some() && self.watched.is_some_and(|watched| watched.contains(path));
-        if metadata.is_dir() && !own_pass {
-            // New or moved-in dir: watch it before reading it, and each
-            // subfolder as the walk reaches it, so an entry created during the
-            // walk is either read or reported.
-            watches.watch(path);
-            let subtree_outcome = scan::reconcile_subtree_inline(
-                self.writer,
-                self.f,
-                state,
-                self.scope,
-                path,
-                &mut |dir| {
-                    watches.watch(dir);
-                },
-            )?;
-            self.outcome.absorb(subtree_outcome);
-        }
-        Ok(())
-    }
-}
-
-/// Drop a catalogued path that vanished or left the scope, with its tree.
-/// `false` when it is kept: a vanished path on an unplugged source.
-fn evict(
-    writer: &IndexWriter,
-    f: &Fields,
-    state: &mut State,
-    watches: &mut Watches,
-    path: &Path,
-    gone: bool,
-    offline_sources: &mut Option<crate::query::OfflineSources>,
-) -> bool {
-    // An unplugged removable or network source keeps its catalogue;
-    // its files are reported as offline, not deleted.
-    if gone
-        && offline_sources
-            .get_or_insert_with(crate::query::OfflineSources::default)
-            .is_retained_offline(path)
-    {
-        return false;
-    }
-    // A folder moved away, to the trash included, is one event naming
-    // the folder and none for what it held: its whole tree goes.
-    scan::delete_tree(writer, f, path);
-    state.remove_tree(path);
-    watches.dirs.remove_tree(path);
-    true
 }
 
 /// Offer the versions worker one page of the catalogue.
@@ -955,8 +880,12 @@ fn send_history_page(
     cursor: &mut Option<String>,
 ) -> bool {
     const PAGE: usize = 256;
-    let Ok(entries) = state.entries_after(cursor.as_deref(), PAGE) else {
-        return true;
+    let entries = match state.entries_after(cursor.as_deref(), PAGE) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::warn!("the versions pass stopped: cannot read the catalogue: {error:#}");
+            return true;
+        }
     };
     if entries.is_empty() {
         return true;

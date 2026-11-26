@@ -28,20 +28,26 @@ pub(crate) const INDEXER_UTIL_MAX: u32 = 512;
 /// still gets the others.
 ///
 /// - The indexer's cgroup ([`prepare_idle_cgroup`]), when the daemon has one:
-///   it runs on CPU time nobody else wants, against every other program, while
-///   the query thread keeps a normal program's share.
-/// - `SCHED_IDLE`: the thread runs on CPU time nobody else wants, and a normal
-///   task that wakes preempts it at once. A thread's policy only counts inside
-///   its cgroup, though: without the indexer's cgroup it only puts the indexer
-///   behind the query thread, and a program sharing a core with the indexer
-///   still loses a large share of it.
-/// - The utilization clamp (`INDEXER_UTIL_MAX`) holds the clock down where
-///   the frequency driver follows the scheduler (`schedutil`); drivers that pick
-///   frequencies in hardware (`intel_pstate`/`amd-pstate` active) ignore it.
+///   it runs only on CPU time the query threads leave. Against other programs
+///   the unit as a whole, indexing included, competes at its own CPU weight.
+/// - `SCHED_IDLE`: a normal task of the same cgroup that wakes preempts the
+///   thread at once. A thread's policy only counts inside its cgroup, so
+///   without the indexer's cgroup it still puts the indexer behind the query
+///   threads, and a program sharing a core with the indexer loses a large
+///   share of it either way.
+/// - The utilization clamp (`INDEXER_UTIL_MAX`), on the thread and on the
+///   indexer's cgroup, holds the clock down where the frequency driver follows
+///   the scheduler (`schedutil`); drivers that pick frequencies in hardware
+///   (`intel_pstate`/`amd-pstate` active) ignore it.
 /// - nice 19 for kernels that refuse `SCHED_IDLE`, and idle I/O priority, which
 ///   the BFQ disk scheduler honors.
 pub fn lower_priority() {
-    let mut attr = SchedAttr {
+    // A test daemon at idle priority gets no CPU on a loaded machine and
+    // misses every wait its test sets.
+    if crate::settings::test_seam("BIG_SEARCH_KEEP_PRIORITY").is_some() {
+        return;
+    }
+    let attr = SchedAttr {
         size: std::mem::size_of::<SchedAttr>() as u32,
         sched_policy: libc::SCHED_IDLE as u32,
         sched_flags: libc::SCHED_FLAG_UTIL_CLAMP_MAX as u64,
@@ -53,34 +59,110 @@ pub fn lower_priority() {
         sched_util_min: 0,
         sched_util_max: INDEXER_UTIL_MAX,
     };
-    // SAFETY: priority syscalls on the calling thread (pid/who = 0); `attr`
-    // outlives the call and its `size` is the size of the struct passed.
-    unsafe {
-        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
-        if libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0) != 0 {
-            // A kernel built without utilization clamping: SCHED_IDLE alone.
-            attr.sched_flags = 0;
-            libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0);
-        }
-        // ioprio_set(IOPRIO_WHO_PROCESS = 1, who = 0, IOPRIO_CLASS_IDLE = 3 << 13)
-        libc::syscall(libc::SYS_ioprio_set, 1, 0, 3i64 << 13);
+    // Every thread meets the same kernel and sandbox: only the first one
+    // lowered reports what they refuse.
+    let report = !PRIORITY_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: setpriority on the calling thread (who = 0).
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 19) } != 0 && report {
+        let error = std::io::Error::last_os_error();
+        log::warn!("indexer threads keep their nice value: {error}");
     }
-    if let Some(index) = IDLE_CGROUP.get() {
+    // ioprio_set(IOPRIO_WHO_PROCESS = 1, who = 0, IOPRIO_CLASS_IDLE = 3 << 13)
+    // SAFETY: ioprio_set on the calling thread, with integer arguments only.
+    if unsafe { libc::syscall(libc::SYS_ioprio_set, 1, 0, 3i64 << 13) } != 0 && report {
+        let error = std::io::Error::last_os_error();
+        log::warn!("indexer threads keep their I/O priority: {error}");
+    }
+    // SAFETY: sched_setattr on the calling thread (pid = 0); `attr` outlives
+    // the call, and `attr.size` is the size of the struct.
+    if unsafe { libc::syscall(libc::SYS_sched_setattr, 0, &raw const attr, 0) } != 0 {
+        let refused = std::io::Error::last_os_error();
+        lower_policy_unclamped(&refused, report);
+    }
+    if let Some(cgroup) = IDLE_CGROUP.get() {
         // SAFETY: gettid has no preconditions.
         let tid = unsafe { libc::gettid() };
-        if let Err(e) = std::fs::write(index.join("cgroup.threads"), tid.to_string()) {
+        if let Err(e) = std::fs::write(cgroup.dir.join("cgroup.threads"), tid.to_string()) {
             log::warn!("indexer thread stays in the service's cgroup: {e}");
         }
     }
 }
 
-/// The cgroup indexing threads join, once [`prepare_idle_cgroup`] made it.
-static IDLE_CGROUP: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// Set once a thread lowered by [`lower_priority`] has reported what failed.
+static PRIORITY_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Make the indexer a cgroup of its own that runs only on CPU time nobody else
-/// wants, so searching keeps a normal program's share while indexing takes
-/// what is left. Returns how, for the log; `None` leaves every thread where
-/// it is.
+/// `SCHED_IDLE` without the thread's clamp, after `sched_setattr` was refused
+/// with EPERM (the unit's seccomp filter) or EOPNOTSUPP (a kernel without
+/// utilization clamping); any other refusal leaves the policy as it is.
+fn lower_policy_unclamped(refused: &std::io::Error, report: bool) {
+    if !matches!(refused.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP)) {
+        if report {
+            log::warn!("indexer threads keep their scheduling policy: sched_setattr: {refused}");
+        }
+        return;
+    }
+    let idle = libc::sched_param { sched_priority: 0 };
+    // SAFETY: sched_setscheduler on the calling thread (pid = 0); `idle`
+    // outlives the call.
+    if unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &raw const idle) } != 0 {
+        if report {
+            let error = std::io::Error::last_os_error();
+            log::warn!(
+                "indexer threads keep their scheduling policy: sched_setattr: {refused}; \
+                 sched_setscheduler: {error}"
+            );
+        }
+        return;
+    }
+    if !report {
+        return;
+    }
+    if IDLE_CGROUP.get().is_some_and(|cgroup| cgroup.clamped) {
+        log::info!(
+            "indexer threads run SCHED_IDLE under their cgroup's clamp \
+             (sched_setattr: {refused})"
+        );
+    } else {
+        log::warn!(
+            "indexer threads run SCHED_IDLE with the clock unclamped: no cgroup \
+             clamp, and sched_setattr: {refused}"
+        );
+    }
+}
+
+/// Run `start` on a short-lived thread lowered by [`lower_priority`] and
+/// return what it returns, so the threads `start` spawns take the indexer's
+/// class while the caller keeps its own: an unprivileged thread cannot raise
+/// its nice value back once lowered.
+///
+/// # Errors
+///
+/// Returns an error when the thread cannot be spawned.
+pub fn spawn_lowered<T: Send>(start: impl FnOnce() -> T + Send) -> std::io::Result<T> {
+    std::thread::scope(|scope| {
+        let starter = std::thread::Builder::new().spawn_scoped(scope, || {
+            lower_priority();
+            start()
+        })?;
+        Ok(starter
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+    })
+}
+
+/// The cgroup indexing threads join, once [`prepare_idle_cgroup`] made it.
+struct IdleCgroup {
+    dir: std::path::PathBuf,
+    /// Its `cpu.uclamp.max` holds the indexer's clamp.
+    clamped: bool,
+}
+
+static IDLE_CGROUP: std::sync::OnceLock<IdleCgroup> = std::sync::OnceLock::new();
+
+/// Make the indexer a cgroup of its own that runs only on CPU time the query
+/// threads leave. `cpu.idle` ranks a group only against its siblings: against
+/// other programs the unit, indexing included, competes at its own CPU weight.
+/// Returns how, for the log; `None` leaves every thread where it is.
 ///
 /// Only under systemd delegation: the unit's `Delegate=cpu` and
 /// `DelegateSubgroup=main` put the daemon in `<unit>.service/main`, a group
@@ -134,8 +216,32 @@ pub fn prepare_idle_cgroup() -> Option<&'static str> {
         )?;
         "lowest weight"
     };
-    IDLE_CGROUP.set(index).ok()?;
+    let clamped = clamp_cgroup(&index);
+    IDLE_CGROUP
+        .set(IdleCgroup {
+            dir: index,
+            clamped,
+        })
+        .ok()?;
     Some(how)
+}
+
+/// Give the indexer's cgroup `index` the clamp of every indexer thread, which
+/// the service's sandbox refuses a thread of its own (`lower_priority`).
+/// Whether it holds; absent on a kernel built without cgroup utilization
+/// clamping.
+fn clamp_cgroup(index: &std::path::Path) -> bool {
+    let percent = f64::from(INDEXER_UTIL_MAX) * 100.0 / 1024.0;
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .open(index.join("cpu.uclamp.max"))
+        .and_then(|mut file| file.write_all(format!("{percent:.2}").as_bytes()));
+    if let Err(e) = &written
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("indexer cgroup keeps the clock unclamped: {e}");
+    }
+    written.is_ok()
 }
 
 /// This process's cgroup, when systemd delegated it as `<unit>.service/main`.
@@ -163,7 +269,7 @@ pub fn release_idle_memory() {
     }
 }
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -256,21 +362,8 @@ struct Signals {
     on_battery: bool,
 }
 
-/// Classify how much this service would be in the way.
-///
-/// CPU time is not the question: the indexer only runs on CPU time nobody else
-/// wants (`SCHED_IDLE`, its `cpu.idle` cgroup), and a program that wakes takes
-/// its CPU back at once, so its own CPU stall only says others are busy, and on
-/// a CPU without SMT that harms nobody. What still harms is a shared core: on
-/// an SMT CPU a worker on the sibling thread of a busy program's core slows it
-/// however low its priority. The scheduler gives each busy program a core of
-/// its own while it can, so the free cores are the cores minus the CPUs the
-/// others keep busy; with fewer free cores than workers, some worker shares
-/// one.
-///
-/// Memory is system-wide, because page cache this service fills stalls
-/// everyone else, and so is the disk: most disk schedulers ignore I/O priority.
-/// Running on battery counts as busy: the charge is theirs.
+/// How much this service would be in the way where the unit's CPU weight cannot
+/// see it: an SMT sibling, memory, disk and battery (DESIGN.md section 7).
 fn classify_load(signals: Signals) -> Load {
     let Signals {
         own_io,
@@ -353,9 +446,9 @@ fn pause_after(work: Duration, load: Load) -> Duration {
 ///
 /// The duty cycle is kept on the CPU time the service used in the batch, not
 /// on the batch's wall time: at idle priority on a busy machine most of that
-/// time is spent waiting for a CPU nobody else wants, which harms nobody, and
-/// resting four times as long as that waiting would turn a half-minute batch
-/// into a two-minute pause.
+/// time is spent waiting for a CPU, which harms nobody, and resting four times
+/// as long as that waiting would turn a half-minute batch into a two-minute
+/// pause.
 pub fn backfill_pace(work: Duration) -> (Load, Duration) {
     let cgroup = own_cgroup_dir();
     let own = |name: &str| {
@@ -588,8 +681,8 @@ mod tests {
         assert_eq!(classify_load(with(2.5, idle)), Load::Busy);
         // Every core busy: each worker would share one.
         assert_eq!(classify_load(with(4.0, idle)), Load::Heavy);
-        // Without SMT a busy machine is no reason to wait: the idle class
-        // already hands every CPU back the moment someone wants it.
+        // Without SMT a busy machine is no reason to wait: a worker takes no
+        // more of a program's CPU than the unit's weight gives it.
         let no_smt = Signals { smt: false, ..idle };
         assert_eq!(classify_load(with(4.0, no_smt)), Load::Calm);
         // One SMT core and one worker: background noise already shares it.

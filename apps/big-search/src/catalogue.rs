@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use big_indexd_client::Filter;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ pub struct State {
     dirty: bool,
 }
 
-/// A difference a reconciliation pass found (see [`State::scan_changes_after`]).
+/// A difference a reconciliation pass found (see `State::scan_changes_after`).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ScanChange {
     /// On disk with this `(mtime, size)`, which the catalogue records otherwise
@@ -57,47 +57,45 @@ enum PendingChange {
 }
 
 impl State {
-    /// The `namespace` rows of the state database at `db_path`, or an empty
-    /// in-memory state if the database cannot be opened.
+    /// The `namespace` rows of the state database at `db_path`.
+    ///
+    /// # Errors
+    ///
+    /// The database cannot be created, opened or given its schema.
+    pub fn open(db_path: &Path, namespace: &str) -> Result<Self> {
+        Ok(State {
+            db_path: db_path.to_path_buf(),
+            namespace: namespace.to_owned(),
+            conn: open_state_db(db_path)?,
+            pending: HashMap::new(),
+            removed_trees: Vec::new(),
+            clear_before_persist: false,
+            dirty: false,
+        })
+    }
+
+    /// [`State::open`], or an empty in-memory state that saves nothing when the
+    /// database cannot be opened, so readers and the service keep going.
     pub fn load(db_path: &Path, namespace: &str) -> Self {
-        match open_state_db(db_path) {
-            Ok(conn) => State {
-                db_path: db_path.to_path_buf(),
-                namespace: namespace.to_owned(),
-                conn,
-                pending: HashMap::new(),
-                removed_trees: Vec::new(),
-                clear_before_persist: false,
-                dirty: false,
-            },
-            Err(error) => {
-                log::warn!(
-                    "state database {} unavailable, nothing will be saved: {error:#}",
-                    db_path.display()
-                );
-                State::in_memory(db_path.to_path_buf(), namespace)
-            }
-        }
+        State::open(db_path, namespace).unwrap_or_else(|error| {
+            log::warn!(
+                "state database {} unavailable, nothing will be saved: {error:#}",
+                db_path.display()
+            );
+            State::in_memory(db_path.to_path_buf(), namespace)
+        })
     }
 
     /// Start empty (used for a forced full rebuild): the first persist replaces
     /// every row of `namespace`.
-    pub fn empty(db_path: &Path, namespace: &str) -> Self {
-        let conn = open_state_db(db_path).unwrap_or_else(|_| {
-            let conn = Connection::open_in_memory().expect("in-memory sqlite state opens");
-            tune_connection_for_low_memory(&conn);
-            init_schema(&conn).expect("in-memory sqlite state schema initializes");
-            conn
-        });
-        State {
-            db_path: db_path.to_path_buf(),
-            namespace: namespace.to_owned(),
-            conn,
-            pending: HashMap::new(),
-            removed_trees: Vec::new(),
-            clear_before_persist: true,
-            dirty: true,
-        }
+    ///
+    /// # Errors
+    ///
+    /// As [`State::open`].
+    pub fn empty(db_path: &Path, namespace: &str) -> Result<Self> {
+        let mut state = State::open(db_path, namespace)?;
+        state.clear();
+        Ok(state)
     }
 
     /// Whether `path` is recorded with this exact mtime+size (→ unchanged).
@@ -153,7 +151,7 @@ impl State {
     }
 
     /// The persisted paths directly inside `dir`.
-    pub fn children(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+    pub(crate) fn children(&self, dir: &Path) -> Result<Vec<PathBuf>> {
         let (low, high) = subtree_range(&key(dir));
         // substr() and length() both count characters, so they agree with
         // each other whatever the path holds.
@@ -163,9 +161,39 @@ impl State {
                 AND instr(substr(path, length(?2) + 1), '/') = 0",
         )?;
         let rows = statement.query_map(params![self.namespace, low, high], |row| {
-            row.get::<_, String>(0)
+            row.get::<_, String>(0).map(PathBuf::from)
         })?;
-        Ok(rows.flatten().map(PathBuf::from).collect())
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `dir` and the paths under it, pending changes included.
+    pub(crate) fn tree(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+        let dir_key = key(dir);
+        let (low, high) = subtree_range(&dir_key);
+        let in_tree =
+            |path: &str| path == dir_key || (path >= low.as_str() && path < high.as_str());
+        let mut paths: Vec<String> = Vec::new();
+        if !self.clear_before_persist {
+            let mut statement = self.conn.prepare_cached(
+                "SELECT path FROM file_state
+                  WHERE namespace = ?1 AND (path = ?2 OR (path >= ?3 AND path < ?4))",
+            )?;
+            let rows = statement.query_map(params![self.namespace, dir_key, low, high], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for path in rows {
+                let path = path?;
+                if !self.pending.contains_key(&path) && !self.in_removed_tree(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        for (path, change) in &self.pending {
+            if matches!(change, PendingChange::Set(..)) && in_tree(path) {
+                paths.push(path.clone());
+            }
+        }
+        Ok(paths.into_iter().map(PathBuf::from).collect())
     }
 
     /// Forget `path` and every path under it. A folder moved away, to the trash
@@ -199,7 +227,7 @@ impl State {
     /// would otherwise take and release the database's locks on its own, two
     /// `fcntl` and an `fstat` apiece. Batches persisted meanwhile commit with
     /// the pass, and a failed pass rolls all of them back.
-    pub fn scan_pass<T>(&mut self, pass: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    pub(crate) fn scan_pass<T>(&mut self, pass: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.conn
             .execute_batch("BEGIN")
             .context("begin scan transaction")?;
@@ -222,7 +250,7 @@ impl State {
 
     /// Start a low-RAM reconciliation pass. Seen paths are recorded in a SQLite
     /// temporary B-tree instead of a process-wide `HashSet<String>`.
-    pub fn begin_scan(&mut self) -> Result<()> {
+    pub(crate) fn begin_scan(&mut self) -> Result<()> {
         self.conn
             .execute_batch(
                 "
@@ -240,7 +268,7 @@ impl State {
     /// Mark `path` as observed in the current reconciliation pass, with the
     /// `(mtime, size)` found on disk when the pass compares them (see
     /// [`Self::scan_changes_after`]).
-    pub fn mark_seen(&mut self, path: &Path, found: Option<(i64, u64)>) -> Result<()> {
+    pub(crate) fn mark_seen(&mut self, path: &Path, found: Option<(i64, u64)>) -> Result<()> {
         let (mtime, size) = found.map_or((None, None), |(mtime, size)| {
             (Some(mtime), Some(u64_to_db_size(size)))
         });
@@ -262,7 +290,7 @@ impl State {
     /// where a lookup per path would cost three B-tree descents with the
     /// seen-mark and the deletion check. The catalogue must be persisted when
     /// the pass starts; rows written meanwhile all sort at or before `after`.
-    pub fn scan_changes_after(
+    pub(crate) fn scan_changes_after(
         &self,
         after: &str,
         limit: usize,
@@ -311,7 +339,7 @@ impl State {
     /// Mark every cached path under the retained prefixes as seen. Used for
     /// offline removable/network sources whose catalogues must not be deleted just
     /// because the mount is absent during this scan.
-    pub fn mark_seen_prefixes(&mut self, prefixes: &[PathBuf]) -> Result<()> {
+    pub(crate) fn mark_seen_prefixes(&mut self, prefixes: &[PathBuf]) -> Result<()> {
         for prefix in prefixes {
             let prefix_text = key(prefix);
             let (low, high) = subtree_range(&prefix_text);
@@ -334,7 +362,11 @@ impl State {
 
     /// Batch of cached paths not seen in the current scan, lexicographically after
     /// `after`. Batching avoids allocating the whole deletion set.
-    pub fn unseen_paths_after(&self, after: Option<&str>, limit: usize) -> Result<Vec<PathBuf>> {
+    pub(crate) fn unseen_paths_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PathBuf>> {
         if limit == 0 || self.clear_before_persist {
             return Ok(Vec::new());
         }
@@ -364,7 +396,7 @@ impl State {
     ///
     /// Deleting a file drops only its catalogue row; this finds the content
     /// rows and documents that would keep answering for paths that are gone.
-    pub fn paths_missing_from(
+    pub(crate) fn paths_missing_from(
         &self,
         other_namespace: &str,
         after: Option<&str>,
@@ -418,7 +450,7 @@ impl State {
     /// `(mtime, size)` is absent or different in `other_namespace` of the same
     /// database. Streams the pending-work set in one indexed SQL join instead of
     /// re-walking the catalogue with a `stat` + a SELECT per file.
-    pub fn entries_stale_against(
+    pub(crate) fn entries_stale_against(
         &self,
         other_namespace: &str,
         after: Option<&str>,
@@ -467,7 +499,11 @@ impl State {
 
     /// Recorded `(path, mtime, size)` after `after`, sorted, pending changes
     /// included. Used by bounded catalogue passes instead of materializing the
-    /// full catalogue.
+    /// full catalogue: a page shorter than `limit` is the last one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalogue database cannot be queried.
     pub fn entries_after(
         &self,
         after: Option<&str>,
@@ -477,37 +513,30 @@ impl State {
             return Ok(Vec::new());
         }
         let after_text = after.unwrap_or_default();
-        let mut entries: Vec<(String, i64, u64)> = if self.clear_before_persist {
-            Vec::new()
-        } else {
-            let mut stmt = self
-                .conn
-                .prepare_cached(
-                    "
-                    SELECT path, mtime, size FROM file_state
-                    WHERE namespace = ?1 AND path > ?2
-                    ORDER BY path
-                    LIMIT ?3
-                    ",
-                )
-                .context("prepare path batch query")?;
-            let rows = stmt
-                .query_map(params![self.namespace, after_text, limit as i64], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        db_size_to_u64(row.get::<_, i64>(2)?),
-                    ))
-                })
-                .context("query path batch")?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        // Stored rows a pending change overrides do not count toward the page,
+        // and a pending row past the last stored row read waits for its page:
+        // either would end the pass early or move the cursor past unread rows.
+        let mut entries: Vec<(String, i64, u64)> = Vec::new();
+        let mut stored_after = after_text.to_owned();
+        let mut stored_done = self.clear_before_persist;
+        while !stored_done && entries.len() < limit {
+            let page = self.stored_page(&stored_after, limit)?;
+            stored_done = page.len() < limit;
+            if let Some((last, _, _)) = page.last() {
+                stored_after.clone_from(last);
+            }
+            entries.extend(page.into_iter().filter(|(path, _, _)| {
+                !self.pending.contains_key(path) && !self.in_removed_tree(path)
+            }));
+        }
 
         for (path, change) in &self.pending {
             if !after_text.is_empty() && path.as_str() <= after_text {
                 continue;
             }
-            entries.retain(|(known, _, _)| known != path);
+            if !stored_done && path.as_str() > stored_after.as_str() {
+                continue;
+            }
             if let PendingChange::Set(mtime, size) = *change {
                 entries.push((path.clone(), mtime, size));
             }
@@ -518,6 +547,31 @@ impl State {
             .into_iter()
             .map(|(path, mtime, size)| (PathBuf::from(path), mtime, size))
             .collect())
+    }
+
+    /// Up to `limit` stored rows after `after`, in path order, pending changes ignored.
+    fn stored_page(&self, after: &str, limit: usize) -> Result<Vec<(String, i64, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "
+                SELECT path, mtime, size FROM file_state
+                WHERE namespace = ?1 AND path > ?2
+                ORDER BY path
+                LIMIT ?3
+                ",
+            )
+            .context("prepare path batch query")?;
+        let rows = stmt
+            .query_map(params![self.namespace, after, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    db_size_to_u64(row.get::<_, i64>(2)?),
+                ))
+            })
+            .context("query path batch")?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn len(&self) -> usize {
@@ -555,18 +609,18 @@ impl State {
     }
 
     /// The value stored under `key` in the database's `meta` table.
-    pub fn meta(&self, key: &str) -> Option<i64> {
+    pub(crate) fn meta(&self, key: &str) -> rusqlite::Result<Option<i64>> {
         self.conn
             .query_row(
                 "SELECT value FROM meta WHERE key = ?1",
                 params![key],
                 |row| row.get(0),
             )
-            .ok()
+            .optional()
     }
 
     /// Store `value` under `key` in the `meta` table, or remove the key.
-    pub fn set_meta(&self, key: &str, value: Option<i64>) -> Result<()> {
+    pub(crate) fn set_meta(&self, key: &str, value: Option<i64>) -> Result<()> {
         match value {
             Some(value) => self.conn.execute(
                 "INSERT INTO meta(key, value) VALUES (?1, ?2)
@@ -589,6 +643,10 @@ impl State {
     }
 
     /// Persist changed rows in one SQLite transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction fails; the changes stay pending for the next call.
     pub fn persist(&mut self) -> Result<()> {
         if !self.dirty {
             return Ok(());
@@ -852,8 +910,8 @@ fn open_state_db(db_path: &Path) -> Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(db_path).with_context(|| format!("open {}", db_path.display()))?;
-    // The daemon's scan pass holds the write lock for its whole walk; a CLI
-    // command opening the same database waits for it rather than failing.
+    // Opening writes (init_schema), so an open while a scan pass holds the
+    // write lock waits up to 5 s, then fails into the in-memory fallback.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     tune_connection_for_low_memory(&conn);
     init_schema(&conn)?;

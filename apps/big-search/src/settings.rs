@@ -5,7 +5,7 @@
 //! as living on that device (offline). Config file:
 //! `$XDG_CONFIG_HOME/big-search/config.toml`.
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 pub use big_search_config::{ContentIndexMode, SymlinkPolicy};
@@ -158,10 +158,73 @@ impl Sources {
         &self.list
     }
 
-    /// The source owning `path` (longest matching prefix).
+    /// The source owning `path` (longest matching prefix). A path with a `..`
+    /// component has none: `starts_with` compares components without resolving
+    /// them, so `<source>/..` would pass for the folder above the source.
     pub fn owner(&self, path: &Path) -> Option<&Source> {
+        if path.components().any(|part| part == Component::ParentDir) {
+            return None;
+        }
         self.list.iter().find(|s| path.starts_with(&s.path))
     }
+
+    /// The catalogue key of a path a client asks the daemon to read: its
+    /// [`normalized_client_path`] with the longest existing ancestor resolved,
+    /// so a symlink inside a source is keyed where it leads. `None` when that
+    /// lands outside every source as resolved at load (a source folder since
+    /// replaced by a symlink leads nowhere new), or a lookup fails other than
+    /// by a missing component.
+    pub fn resolved_client_path(&self, path: &Path) -> Option<PathBuf> {
+        let spelled = normalized_client_path(path)?;
+        let mut existing = spelled.as_path();
+        let resolved = loop {
+            match std::fs::canonicalize(existing) {
+                Ok(resolved) => break resolved,
+                // Missing (a component gone, or a file where a folder was),
+                // and no dangling symlink that could lead out once its target
+                // appears.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) && std::fs::symlink_metadata(existing).is_err() =>
+                {
+                    existing = existing.parent()?;
+                }
+                Err(_) => return None,
+            }
+        };
+        let tail = spelled.strip_prefix(existing).ok()?;
+        // `join` of an empty tail would add a trailing `/` to the key.
+        let key = if tail.as_os_str().is_empty() {
+            resolved
+        } else {
+            resolved.join(tail)
+        };
+        self.list
+            .iter()
+            .any(|source| key.starts_with(&source.path))
+            .then_some(key)
+    }
+
+    /// The key rows about a client path are kept under: its
+    /// [`Self::resolved_client_path`] when inside a source, so every spelling
+    /// of one file finds the same rows; otherwise as spelled, for a file
+    /// anywhere or one whose source is gone. `None` when relative or holding
+    /// `..`.
+    pub fn client_row_key(&self, path: &Path) -> Option<PathBuf> {
+        self.resolved_client_path(path)
+            .or_else(|| normalized_client_path(path))
+    }
+}
+
+/// `path` spelled the way the catalogue keys paths: `.`, repeated and trailing
+/// `/` dropped. `None` when relative or holding `..`, which a key never does.
+pub fn normalized_client_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+        return None;
+    }
+    Some(path.components().collect())
 }
 
 /// A source is available when its directory exists and is non-empty. An unplugged
@@ -173,7 +236,7 @@ pub fn is_available(source: &Source) -> bool {
         .unwrap_or(false)
 }
 
-/// The configured sources available now, in configuration order.
+/// The configured sources available now, longest path first, as loaded.
 pub fn available_sources() -> Vec<&'static Source> {
     sources().all().iter().filter(|s| is_available(s)).collect()
 }
@@ -562,13 +625,16 @@ const CONFIG_TEMPLATE: &str = "\
 #   big-search config preset low-memory   # content on, doc-id-only postings
 #   big-search config preset balanced     # automatic defaults
 #   big-search config preset complete     # larger content cap + frequency ranking
+# auto and adaptive (0) values follow the memory the indexer may use: for the
+# service, its own limit (MemoryHigh in big-search.service), not the RAM.
 content = true          # extract file content (text/PDF/office) by default
 metadata = false        # extract metadata (type, audio/video duration, image size)
 names_only = false      # true = only filenames; disables content/metadata sidecar
-content_index_mode = \"auto\" # auto | basic | freqs. auto: basic below 6 GiB RAM
+content_index_mode = \"auto\" # auto | basic | freqs. auto: basic below 6 GiB, chosen
+                        # when the content index is created
 extract_max_mb = 0      # extracted text per file. 0 = adaptive (4/8/16/32 MiB)
 text_max_mb = 0         # plain text input cap. 0 = no input-size skip; output is capped
-office_max_mb = 0       # Office input cap. 0 = adaptive (64 MiB low RAM, else 256 MiB)
+office_max_mb = 0       # Office input cap. 0 = adaptive (64 MiB below 6 GiB, else 256 MiB)
 pdf_max_mb = 0          # PDF input cap. 0 = no input-size skip; timeout/output cap apply
 pdf_timeout_secs = 5    # seconds of work per PDF extraction (CPU time at full clock)
 content_cooldown_secs = 900 # wait this long after a change before re-reading a file's
@@ -624,7 +690,7 @@ symlink_policy = \"personal-local\" # personal-local | local-exact
 # keep_versions = 10      # most versions kept per document
 # keep_days = 30          # oldest version kept, in days
 # max_total_gib = 0       # disk the history may use. 0 = 1/20 of the disk, at most 10 GiB
-# skip_git_repositories = true # keep nothing inside a git work tree
+# skip_git_repositories = true # keep nothing inside a git or jj work tree
 # respect_gitignore = true     # when not skipped, still skip what .gitignore excludes
 ";
 
@@ -781,5 +847,138 @@ mod tests {
                 .map(Source::content),
             Some(false)
         );
+    }
+
+    /// Guards: security refusal: the reindex, origin and versions requests
+    /// trust this answer to keep a client's path inside the searched folders.
+    #[test]
+    fn owner_refuses_parent_components() {
+        let sources = Sources {
+            list: vec![src("/home/u/docs", true)],
+        };
+        for path in [
+            "/home/u/docs/..",
+            "/home/u/docs/../../../etc",
+            "/home/u/docs/a/../../b",
+        ] {
+            assert!(sources.owner(Path::new(path)).is_none(), "{path}");
+        }
+        assert!(sources.owner(Path::new("/home/u/docs/a..b")).is_some());
+    }
+
+    /// A source `src` holding `docs/a.txt`, beside a folder `outside` holding
+    /// `secret.txt` and `sub/`: the scratch folder, its canonical path, and the
+    /// sources.
+    fn client_path_fixture(name: &str) -> (crate::test_env::ScratchDir, PathBuf, Sources) {
+        let scratch = crate::test_env::scratch_dir(name);
+        let base = std::fs::canonicalize(&scratch).unwrap();
+        let source = base.join("src");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(source.join("docs")).unwrap();
+        std::fs::create_dir_all(outside.join("sub")).unwrap();
+        std::fs::write(source.join("docs/a.txt"), "a").unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        let sources = Sources {
+            list: vec![src(source.to_str().unwrap(), true)],
+        };
+        (scratch, base, sources)
+    }
+
+    /// Guards: security refusal: a path a client names for the daemon to read
+    /// stays inside a source after every symlink on the way is followed, and
+    /// is keyed one way however it was spelled.
+    #[test]
+    fn client_paths_resolved_inside_sources() {
+        let (_scratch, base, sources) = client_path_fixture("bs-client-path");
+        let source = base.join("src");
+        let outside = base.join("outside");
+        std::os::unix::fs::symlink(&outside, source.join("out")).unwrap();
+        std::os::unix::fs::symlink(source.join("docs"), source.join("inner")).unwrap();
+        std::os::unix::fs::symlink(&source, base.join("via")).unwrap();
+        std::os::unix::fs::symlink(outside.join("later"), source.join("dangling")).unwrap();
+        // A folder removed and a file of its name written in its place.
+        std::fs::write(source.join("docs/proj"), "p").unwrap();
+        let docs = source.join("docs");
+        let text = |path: &Path| path.to_str().unwrap().to_owned();
+        let accepted = [
+            (text(&docs.join("a.txt")), docs.join("a.txt")),
+            (format!("{}/./a.txt", text(&docs)), docs.join("a.txt")),
+            (format!("{}//a.txt", text(&docs)), docs.join("a.txt")),
+            (format!("{}/", text(&docs)), docs.clone()),
+            (text(&source.join("inner/a.txt")), docs.join("a.txt")),
+            (text(&base.join("via/docs")), docs.clone()),
+            (text(&docs.join("gone/new.txt")), docs.join("gone/new.txt")),
+            (text(&docs.join("proj/sub")), docs.join("proj/sub")),
+            (text(&source), source.clone()),
+        ];
+        // Keys are text: compared as such, since `Path` equality ignores a
+        // trailing `/`.
+        for (asked, key) in &accepted {
+            assert_eq!(
+                sources
+                    .resolved_client_path(Path::new(asked))
+                    .as_deref()
+                    .and_then(Path::to_str),
+                key.to_str(),
+                "{asked}"
+            );
+        }
+        let refused = [
+            "src/docs/a.txt".to_owned(),
+            format!("{}/..", text(&source)),
+            format!("{}/../a.txt", text(&docs)),
+            format!("{}/", text(&source.join("out"))),
+            text(&source.join("out/sub")),
+            text(&source.join("out/secret.txt")),
+            text(&source.join("dangling/x.txt")),
+            text(&outside.join("secret.txt")),
+            text(&base),
+        ];
+        for asked in &refused {
+            assert_eq!(
+                sources.resolved_client_path(Path::new(asked)),
+                None,
+                "{asked}"
+            );
+        }
+    }
+
+    /// Guards: security refusal: a source folder replaced by a symlink while
+    /// the daemon runs leads the daemon nowhere new; the source stays the
+    /// folder resolved at load.
+    #[test]
+    fn replaced_source_leads_nowhere_new() {
+        let (_scratch, base, sources) = client_path_fixture("bs-client-replaced");
+        let source = base.join("src");
+        let outside = base.join("outside");
+        std::fs::rename(&source, base.join("src.old")).unwrap();
+        std::os::unix::fs::symlink(&outside, &source).unwrap();
+        for asked in [outside.join("secret.txt"), source.join("secret.txt")] {
+            assert_eq!(sources.resolved_client_path(&asked), None, "{asked:?}");
+        }
+        // Rows keep their spelling, so a file once there is still found.
+        assert_eq!(
+            sources.client_row_key(&source.join("docs/a.txt")),
+            Some(source.join("docs/a.txt"))
+        );
+    }
+
+    #[test]
+    fn client_spelling_normalized() {
+        for (asked, key) in [
+            ("/home/u/docs/./a.txt", Some("/home/u/docs/a.txt")),
+            ("//home/u//docs/", Some("/home/u/docs")),
+            ("/home/u/docs/../a.txt", None),
+            ("home/u/a.txt", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                normalized_client_path(Path::new(asked))
+                    .as_deref()
+                    .and_then(Path::to_str),
+                key,
+                "{asked}"
+            );
+        }
     }
 }

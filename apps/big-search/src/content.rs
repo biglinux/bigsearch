@@ -48,6 +48,10 @@ const NON_CANDIDATE_TOMBSTONE_BATCH: usize = 4096;
 /// ("tombstones"), removing them from the pending join. Changing the indexing
 /// policy later (e.g. enabling metadata) requires `big-search rebuild`, which
 /// clears this state.
+///
+/// # Errors
+///
+/// Returns an error when the content state cannot be written.
 pub fn record_skipped_candidates(entries: &[(PathBuf, i64, u64)]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
@@ -76,6 +80,11 @@ pub type CatalogCursor = Option<String>;
 /// see them, and they answer content searches with files that are gone.
 ///
 /// Walks every live document, so this is a startup repair, not a per-pass step.
+///
+/// # Errors
+///
+/// Returns an error when the content index or its state cannot be read, or the deletions
+/// cannot be committed.
 pub fn prune_unreferenced_content_docs(index: &Index) -> Result<usize> {
     let index_dir = crate::config::content_index_dir();
     if crate::index::is_unreferenced_pruned(&index_dir) {
@@ -142,6 +151,11 @@ pub const ORPHAN_PRUNE_STEADY_LIMIT: usize = 8192;
 /// it would answer searches until a full rebuild. Commits are batched because a
 /// commit is the expensive part, and a keyset cursor (not the deletions
 /// themselves) advances the scan, so nothing has to be flushed to make progress.
+///
+/// # Errors
+///
+/// Returns an error when the content state cannot be read or written, or the deletions
+/// cannot be committed.
 pub fn prune_orphaned_content(index: &Index, limit: usize) -> Result<(usize, bool)> {
     const FLUSH_EVERY: usize = 16 * ORPHAN_PRUNE_BATCH;
 
@@ -211,7 +225,7 @@ pub(crate) fn default_workers() -> usize {
     )
 }
 
-/// One worker on a small machine, two otherwise; a request of 1 to 4 wins.
+/// One worker on a small machine, two otherwise; a request wins, up to 4.
 fn pool_width(cores: usize, low_memory: bool, requested: Option<&str>) -> usize {
     let default = if low_memory || cores <= 2 { 1 } else { 2 };
     requested
@@ -232,6 +246,11 @@ fn content_channel_capacity() -> usize {
 /// Index all pending content/metadata by streaming the name catalogue from
 /// SQLite in bounded batches. This avoids constructing `Vec<PathBuf>` for the
 /// full catalogue during a reindex or daemon backfill.
+///
+/// # Errors
+///
+/// Returns an error when the catalogue or the content state cannot be read, or the content
+/// index cannot be written.
 pub fn index_pending_catalog(index: &Index) -> Result<u64> {
     if !crate::settings::content_index_enabled() {
         return Ok(0);
@@ -254,12 +273,13 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
             }
             break;
         }
-        indexed_total = indexed_total.saturating_add(index_content_limited_with_writer(
+        let read = index_content_limited_with_writer(
             &mut writer,
             &f,
             batch.files,
             Some(catalog_content_batch_limit()),
-        )?);
+        )?;
+        indexed_total = indexed_total.saturating_add(read.indexed);
         if !batch.has_more {
             break;
         }
@@ -270,6 +290,12 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
     Ok(indexed_total)
 }
 
+/// Extracts and indexes the content of `files`, at most `limit` of them when
+/// given, and returns how many were indexed.
+///
+/// # Errors
+///
+/// Returns an error when the content index or its state cannot be written.
 pub fn index_content_limited(
     index: &Index,
     files: Vec<PathBuf>,
@@ -280,21 +306,33 @@ pub fn index_content_limited(
     }
     let f = content_fields(index)?;
     let mut writer = crate::index::content_writer(index).context("content writer")?;
-    let indexed = index_content_limited_with_writer(&mut writer, &f, files, limit)?;
+    let read = index_content_limited_with_writer(&mut writer, &f, files, limit)?;
     writer
         .wait_merging_threads()
         .context("wait content merges")?;
-    Ok(indexed)
+    Ok(read.indexed)
 }
 
-pub fn index_content_limited_with_writer(
+/// What one extraction batch did.
+pub(crate) struct BatchRead {
+    pub(crate) indexed: u64,
+    /// Files another process held busy: they get no content row, so they stay
+    /// pending until a later pass reads them.
+    pub(crate) busy: usize,
+}
+
+pub(crate) fn index_content_limited_with_writer(
     writer: &mut IndexWriter,
     f: &ContentFields,
     files: Vec<PathBuf>,
     limit: Option<usize>,
-) -> Result<u64> {
+) -> Result<BatchRead> {
+    let nothing_read = BatchRead {
+        indexed: 0,
+        busy: 0,
+    };
     if !crate::settings::content_index_enabled() {
-        return Ok(0);
+        return Ok(nothing_read);
     }
     let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
@@ -304,7 +342,7 @@ pub fn index_content_limited_with_writer(
         pending_batch_with_byte_limit(files, &content_state, limit.unwrap_or(usize::MAX), u64::MAX)
             .files;
     if files.is_empty() {
-        return Ok(0);
+        return Ok(nothing_read);
     }
 
     let queue = Arc::new(Mutex::new(files.into_iter()));
@@ -322,14 +360,17 @@ pub fn index_content_limited_with_writer(
         let signatures = signatures.clone();
         let tx = tx.clone();
         workers.push(std::thread::spawn(move || {
-            run_extraction_worker(&queue, signatures.as_deref(), &tx);
+            run_extraction_worker(&queue, signatures.as_deref(), &tx)
         }));
     }
     drop(tx); // close channel once all workers finish
 
     let indexed = write_content_results(writer, f, rx, &mut content_state)?;
+    let mut busy = 0;
     for w in workers {
-        let _ = w.join();
+        // A worker that panicked outside the extractors' catch_unwind takes
+        // its count with it, as it already took the file it was reading.
+        busy += w.join().unwrap_or(0);
     }
     if let Some(signatures) = signatures {
         let mut signatures = signatures.lock().expect("signature lock");
@@ -341,17 +382,19 @@ pub fn index_content_limited_with_writer(
         signatures.persist()?;
     }
     content_state.persist()?;
-    Ok(indexed)
+    Ok(BatchRead { indexed, busy })
 }
 
 /// One extraction worker: drains the shared queue at background priority and
-/// sends one result per file it could stat.
+/// sends one result per file it could stat and another process does not hold
+/// busy; returns how many it found busy.
 fn run_extraction_worker(
     queue: &Mutex<std::vec::IntoIter<PathBuf>>,
     signatures: Option<&Mutex<ContentSignatures>>,
     tx: &mpsc::SyncSender<ContentResult>,
-) {
+) -> usize {
     throttle::lower_priority();
+    let mut busy = 0;
     loop {
         let next = {
             let mut q = queue.lock().expect("queue lock");
@@ -359,40 +402,33 @@ fn run_extraction_worker(
         };
         let Some(path) = next else { break };
         throttle::yield_for_pressure();
-        // One stat answers both questions: the selection pass already
-        // stat'ed this file, and asking again for mtime/size and then a
-        // third time for the symlink check was pure repetition.
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             continue;
         };
         let (mtime, size) = catalogue::meta_pair(&metadata);
-        if metadata.is_symlink() {
-            let _ = tx.send(ContentResult {
-                path,
-                mtime,
-                size,
-                body: None,
-            });
-            continue;
-        }
-        if let Some(signatures) = signatures
-            && matches!(
-                signatures
-                    .lock()
-                    .expect("signature lock")
-                    .claim(&path, size),
-                ContentClaim::Duplicate
-            )
-        {
-            let _ = tx.send(ContentResult {
-                path,
-                mtime,
-                size,
-                body: None,
-            });
-            continue;
-        }
-        let body = extract_body(&path);
+        // Only a regular file is read: a link would duplicate its target's body.
+        // The descriptor is held through the extraction: while it is open no
+        // other process can take a write lease, so no reader below skips the file.
+        let body = match extract::open_regular_with(&path, libc::O_NOFOLLOW) {
+            Ok(_lease_bar) => {
+                let duplicate = signatures.is_some_and(|signatures| {
+                    matches!(
+                        signatures
+                            .lock()
+                            .expect("signature lock")
+                            .claim(&path, size),
+                        ContentClaim::Duplicate
+                    )
+                });
+                if duplicate { None } else { extract_body(&path) }
+            }
+            // No result: the file stays pending and a later pass reads it.
+            Err(extract::Unopened::Busy) => {
+                busy += 1;
+                continue;
+            }
+            Err(extract::Unopened::Refused) => None,
+        };
         let _ = tx.send(ContentResult {
             path,
             mtime,
@@ -400,6 +436,7 @@ fn run_extraction_worker(
             body,
         });
     }
+    busy
 }
 
 /// The indexed body of one file: its text and/or media metadata, as the
@@ -472,8 +509,12 @@ fn dedupe_content_enabled() -> bool {
 }
 
 /// One pending backfill batch selected from the complete name catalogue without
-/// loading the catalogue into RAM (a fresh pass; see [`pending_catalog_batch_after`]).
+/// loading the catalogue into RAM (a fresh pass; see `pending_catalog_batch_after`).
 /// `min_change_age` defers files changed more recently than that (cooldown).
+///
+/// # Errors
+///
+/// Returns an error when the catalogue or the content state cannot be read.
 pub fn pending_catalog_batch(
     limit: usize,
     min_change_age: Duration,
@@ -488,7 +529,7 @@ pub fn pending_catalog_batch(
 /// cursor for the next call (`None` when this pass reached the catalogue end).
 /// Files whose catalogued mtime is younger than `min_change_age` are deferred,
 /// not extracted; pass `Duration::ZERO` to bypass the cooldown.
-pub fn pending_catalog_batch_after(
+pub(crate) fn pending_catalog_batch_after(
     cursor: CatalogCursor,
     limit: usize,
     min_change_age: Duration,
@@ -516,8 +557,12 @@ fn catalog_content_batch_limit() -> usize {
         .unwrap_or(DEFAULT_CATALOG_CONTENT_BATCH)
 }
 
-/// Forget what the content pass knows about one path, so the next pass reads it
-/// again although neither its size nor its modification time changed.
+/// The `(mtime, size)` a content row is given so the next pass reads its file
+/// again: no file has it, so the row matches no catalogue entry.
+const STALE_CONTENT: (i64, u64) = (i64::MIN, 0);
+
+/// Make the content pass read one path again although neither its size nor its
+/// modification time changed.
 ///
 /// This is the whole shape of a tag write. A tag lives in the `user.xdg.tags`
 /// extended attribute, and writing an extended attribute leaves size and
@@ -526,15 +571,28 @@ fn catalog_content_batch_limit() -> usize {
 /// the content index keeps its own record, and the tag token lives there.
 /// Without this, the forced reindex commits a name-index document with nothing
 /// new in it, the content pass declines the work, and the tag is never findable.
-pub fn forget_content_state(path: &Path) -> Result<()> {
+///
+/// The row stays, only marked stale: it is what [`prune_orphaned_content`]
+/// finds the document by when the path leaves the catalogue before the pass
+/// reads it again.
+pub(crate) fn mark_content_stale(path: &Path) -> Result<()> {
     let mut content_state = catalogue::State::load(
         &crate::config::state_db_path(),
         crate::catalogue::CONTENT_NAMESPACE,
     );
-    content_state.remove(path);
+    if !content_state.contains(path) {
+        return Ok(());
+    }
+    let (mtime, size) = STALE_CONTENT;
+    content_state.set(path, mtime, size);
     content_state.persist()
 }
 
+/// Forgets every content state row, so every file is extracted again.
+///
+/// # Errors
+///
+/// Returns an error when the content state cannot be cleared.
 pub fn clear_content_state() -> Result<()> {
     // These rows are the only thing referencing the content documents, so
     // dropping them is exactly what strands documents. Re-arm the sweep.
@@ -648,8 +706,8 @@ impl CatalogSelection {
     fn take(&mut self, path: PathBuf, mtime: i64, size: u64) -> bool {
         let path_key = path.to_string_lossy().into_owned();
         // Three ways a catalogue entry is settled without extracting it: the
-        // policy never wants it, it is already gone, or it is a directory.
-        // All get a tombstone.
+        // policy never wants it, it is already gone, or it is not a regular
+        // file. All get a tombstone.
         //
         // The vanished case has to be caught here, not in the worker: there
         // `catalogue::meta` fails and the path is skipped with no result, so no
@@ -659,16 +717,14 @@ impl CatalogSelection {
         // Only this side still holds the catalogue's mtime/size, which is
         // what the pending join compares against.
         //
-        // Directories reach this point because `meta::is_meta_candidate`
+        // The scan catalogues every file type, and `meta::is_meta_candidate`
         // answers `sniff_type` (on by default) for anything without an
-        // extension, and never asks whether the path is a file. A directory
-        // has no body and no media metadata, but its mtime changes whenever
-        // an entry is added or removed inside it, so `$HOME` itself would
-        // sit inside the edit cooldown and every content search would end
-        // with "1 file being indexed, try again shortly".
+        // extension. A directory's mtime changes whenever an entry inside it
+        // does, so `$HOME` itself would sit inside the edit cooldown; a FIFO
+        // blocks the worker that opens it, and with it the whole pass.
         let settled = match std::fs::symlink_metadata(&path) {
-            Err(_) => true,        // gone before the pass reached it
-            Ok(md) => md.is_dir(), // nothing to extract from a directory
+            Err(_) => true, // gone before the pass reached it
+            Ok(md) => !md.is_file(),
         };
         if !is_extraction_candidate(&path) || settled {
             self.after = Some(path_key);

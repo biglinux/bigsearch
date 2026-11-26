@@ -131,7 +131,6 @@ fn equal_names_rank_newest_first() {
         found,
         [paths[1].clone(), paths[2].clone(), paths[0].clone()]
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -214,7 +213,7 @@ fn every_typed_word_matches_separately() {
     assert_eq!(paths("raio bruno"), vec![raio_x.clone()]);
     // Order is irrelevant, and so is what sits between the words.
     assert_eq!(paths("bruno raio"), vec![raio_x.clone()]);
-    assert_eq!(paths("raio 2021"), vec![raio_x.clone()]);
+    assert_eq!(paths("raio 2021"), vec![raio_x]);
     // Every word still has to be there.
     assert!(paths("raio inexistente").is_empty());
     // A word shared by both files keeps both.

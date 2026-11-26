@@ -24,7 +24,7 @@
 //! for as long as the index is open, one thread per index: an idle daemon would
 //! wake four times a second to learn that nothing had changed.
 use notify::event::{EventKind, ModifyKind, RenameMode};
-use notify::{RecursiveMode, Watcher};
+use notify::{Config, EventKindMask, RecommendedWatcher, RecursiveMode, Watcher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -105,15 +105,22 @@ impl MetaWatch {
     fn start(root: &Path) -> Option<Self> {
         let callbacks = Arc::new(WatchCallbackList::default());
         let fired = callbacks.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        // Only the kinds that can publish a commit: notify's default adds
+        // IN_OPEN, and every reload opens files in this folder.
+        let config = Config::default().with_event_kinds(
+            EventKindMask::CREATE | EventKindMask::MODIFY_DATA | EventKindMask::MODIFY_NAME,
+        );
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
                 if event.is_ok_and(|event| is_meta_commit(&event)) {
                     // Same as tantivy's poller: wait for the reloads before the next event.
                     let _ = fired.broadcast().wait();
                 }
-            })
-            .map_err(|e| log::warn!("index watch unavailable, polling instead: {e}"))
-            .ok()?;
+            },
+            config,
+        )
+        .map_err(|e| log::warn!("index watch unavailable, polling instead: {e}"))
+        .ok()?;
         watcher
             .watch(root, RecursiveMode::NonRecursive)
             .map_err(|e| log::warn!("index watch unavailable, polling instead: {e}"))
@@ -266,8 +273,6 @@ mod tests {
             leftovers.is_empty(),
             "temp files left behind: {leftovers:?}"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A commit wakes the readers once, and reading `meta.json` (which is what a
@@ -310,8 +315,6 @@ mod tests {
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(calls.load(Ordering::SeqCst), 2, "a read woke the watch");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A reader opened before the commits sees them without being reopened:
@@ -333,7 +336,6 @@ mod tests {
         assert_eq!(reader.searcher().num_docs(), 1);
 
         drop(writer);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The daemon's layout: the watcher writes through one instance, queries read
@@ -382,7 +384,6 @@ mod tests {
         );
 
         drop(writer);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Commit repeatedly through the real index stack. Run under `strace` this is
@@ -402,10 +403,7 @@ mod tests {
         }
         drop(writer);
 
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            20
-        );
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 20);
         assert_eq!(
             crate::query::search(
                 &index.reader().unwrap(),
@@ -423,10 +421,8 @@ mod tests {
         drop(index);
         let reopened = crate::index::open_or_create(&dir).unwrap();
         assert_eq!(
-            crate::index::document_count(&reopened.reader().unwrap()).unwrap(),
+            crate::index::document_count(&reopened.reader().unwrap()),
             20
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

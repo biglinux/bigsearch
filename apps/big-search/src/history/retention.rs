@@ -50,8 +50,7 @@ impl History {
             .query_map(params![file_id], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
-            .flatten()
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         let oldest_index = rows.len().saturating_sub(1);
 
         for (index, (id, saved_at, object, reason)) in rows.into_iter().enumerate() {
@@ -109,18 +108,18 @@ impl History {
                   GROUP BY v.file_id HAVING SUM(v.size) > ?1"
             ))?
             .query_map(params![share as i64], |row| row.get::<_, i64>(0))?
-            .flatten()
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         let mut dropped = Vec::new();
         for file_id in hogs {
-            dropped.extend(
-                conn.prepare(
+            for row in conn
+                .prepare(
                     "SELECT id, object FROM versions WHERE file_id = ?1
                       ORDER BY saved_at DESC, id DESC LIMIT -1 OFFSET 3",
                 )?
                 .query_map(params![file_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .flatten(),
-            );
+            {
+                dropped.push(row?);
+            }
         }
         Ok(dropped)
     }
@@ -144,8 +143,7 @@ impl History {
         Ok(conn
             .prepare("SELECT object FROM versions")?
             .query_map([], |row| row.get::<_, String>(0))?
-            .flatten()
-            .collect())
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     /// What the store actually costs, in bytes.
@@ -186,8 +184,8 @@ impl History {
         })?;
         let mut chosen = Vec::new();
         let mut covered = 0u64;
-        for row in rows.flatten() {
-            let (id, object, size) = row;
+        for row in rows {
+            let (id, object, size) = row?;
             chosen.push((id, object));
             covered = covered.saturating_add(size.max(0) as u64);
             if covered >= bytes {
@@ -216,7 +214,7 @@ impl History {
     /// questions: a lookup per version costs seconds of a cold disk at every
     /// start. A shard that cannot be listed stops the sweep, since its versions
     /// would otherwise read as gone.
-    pub fn sweep_orphans(&mut self) -> Result<()> {
+    pub(crate) fn sweep_orphans(&mut self) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };

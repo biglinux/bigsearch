@@ -16,8 +16,8 @@ mod scratch;
 
 use daemon::*;
 
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[test]
 fn pause_resume_rebuild_cycle() {
@@ -81,8 +81,6 @@ fn pause_resume_rebuild_cycle() {
     // Resume → status reports running again.
     assert!(command_accepted(&sock, "resume"));
     assert!(await_paused(&sock, false), "daemon did not report resumed");
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 /// Debug builds only: a release binary ignores the batch size this test sets.
@@ -131,8 +129,6 @@ fn content_backfill_continues_past_batch() {
         ),
         "second content file was not indexed by an idle follow-up batch"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 /// A folder deleted or moved while the daemon runs leaves nothing of its tree
@@ -190,14 +186,7 @@ fn departed_tree_leaves_every_index() {
         settled(&|| query_paths(&sock, "content", "movingworddeep", &home).1 == [deep.clone()]),
         "the moved tree is not searchable by content under its new path"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
-
-/// How long a tree's departure may take to reach every index: the watcher
-/// debounces, and the content side follows in the next backfill pass, which a
-/// busy machine delays (see `await_content_result`).
-const SETTLE: Duration = Duration::from_secs(45);
 
 /// A tree `tree` at `dir`: a file on top and one a folder down, each with a
 /// word of its own.
@@ -215,91 +204,630 @@ fn plant_tree(dir: &Path, tree: &str) {
     .unwrap();
 }
 
-/// Nothing of the tree that was at `old` is left in any index or catalogue.
-fn assert_tree_gone(sock: &Path, data: &Path, old: &Path, tree: &str) {
-    assert!(
-        settles_within(SETTLE, || query_paths(sock, "list", "", old).0 == 0),
-        "{tree}: the catalogue still lists {:?}",
-        query_paths(sock, "list", "", old)
-    );
-    assert!(
-        settles_within(SETTLE, || query_paths(sock, "name", tree, old).0 == 0),
-        "{tree}: the name index still holds {:?}",
-        query_paths(sock, "name", tree, old)
-    );
-    let word = format!("{tree}worddeep");
-    assert!(
-        settles_within(SETTLE, || query_paths(sock, "content", &word, old).0 == 0),
-        "{tree}: the content index still answers for the old path"
-    );
-    assert!(
-        settles_within(SETTLE, || catalogue_rows(data, "content", old) == 0),
-        "{tree}: the content catalogue still holds rows under the old path"
-    );
-    assert_eq!(catalogue_rows(data, "name", old), 0);
-}
-
-/// A file that appears in a repository while the daemon runs is left out when
-/// the global git ignore file excludes it, as the walk leaves it out.
+/// With content indexing off, a content search says so instead of an empty
+/// answer; a running daemon's profile decides over the command's own.
 #[test]
-fn global_git_ignore_covers_events() {
-    let base = scratch::scratch_dir("bs-git-events");
+fn content_off_named() {
+    let base = scratch::scratch_dir("bs-content-off");
     let home = base.join("home");
     let xdg_storage_home = base.join("data");
     let run = base.join("run");
-    let repo = home.join("docs/repo");
-    std::fs::create_dir_all(repo.join(".git")).unwrap();
-    std::fs::create_dir_all(xdg_storage_home.join("cfg/git")).unwrap();
+    std::fs::create_dir_all(home.join("docs")).unwrap();
     std::fs::create_dir_all(&run).unwrap();
-    std::fs::write(xdg_storage_home.join("cfg/git/ignore"), "*.secret\n").unwrap();
-    let sock = run.join("biglinux/indexd.sock");
-    let _daemon = KillOnDrop(
-        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
-            .spawn()
-            .unwrap(),
-    );
-    assert!(wait_socket(&sock), "daemon never bound socket");
-
-    std::fs::write(repo.join("b.secret"), "alpha").unwrap();
-    std::fs::write(repo.join("visible.txt"), "beta").unwrap();
-    assert!(
-        settles(|| query_paths(&sock, "name", "visible", &home).0 == 1),
-        "the visible file was not indexed"
-    );
-    assert_eq!(catalogue_rows(&xdg_storage_home, "name", &repo), 1);
-    std::fs::remove_dir_all(&base).ok();
-}
-
-/// A source inside a dot-folder indexes the files that appear in it: only what
-/// is hidden below the source is out of scope.
-#[test]
-fn hidden_source_indexes_new_files() {
-    let base = scratch::scratch_dir("bs-hidden-events");
-    let home = base.join("home");
-    let xdg_storage_home = base.join("data");
-    let run = base.join("run");
-    let notes = home.join(".stash/notes");
-    std::fs::create_dir_all(&notes).unwrap();
-    std::fs::write(notes.join("first.txt"), "alpha").unwrap();
-    std::fs::create_dir_all(xdg_storage_home.join("cfg/big-search")).unwrap();
-    std::fs::create_dir_all(&run).unwrap();
-    std::fs::write(
-        xdg_storage_home.join("cfg/big-search/config.toml"),
-        format!("[[source]]\npath = \"{}\"\n", notes.display()),
+    std::fs::write(home.join("docs/conf.txt"), "alpha").unwrap();
+    let reindex = env_cmd(
+        &["reindex", home.to_str().unwrap()],
+        &home,
+        &xdg_storage_home,
+        &run,
     )
+    .env("BIG_SEARCH_NAMES_ONLY", "1")
+    .status()
     .unwrap();
+    assert!(reindex.success());
+    let content_search = |names_only: &str| {
+        let output = env_cmd(&["content", "alpha"], &home, &xdg_storage_home, &run)
+            .env("BIG_SEARCH_NAMES_ONLY", names_only)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stderr).contains("content search is off")
+    };
+    assert!(content_search("1"), "no daemon, names only");
+    assert!(!content_search("0"), "no daemon, content on");
+
     let sock = run.join("biglinux/indexd.sock");
-    let _daemon = KillOnDrop(
+    let _d = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .env("BIG_SEARCH_NAMES_ONLY", "1")
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_socket(&sock), "daemon never bound socket");
+    assert!(content_search("0"), "names-only daemon");
+}
+
+/// A request naming the file another one came from and the file it made.
+fn pair_cmd(cmd: &str, src: &Path, dst: &Path) -> serde_json::Value {
+    serde_json::json!({"v": 2, "cmd": cmd, "src": src, "dst": dst})
+}
+
+/// Guards: security refusal: a client cannot make the daemon read a folder or
+/// copy a file outside the searched folders through a symlink inside one.
+#[test]
+fn client_symlink_out_refused() {
+    let base = scratch::scratch_dir("bs-client-link");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(home.join("docs")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(outside.join("secret.txt"), "s").unwrap();
+    std::os::unix::fs::symlink(&outside, home.join("docs/link")).unwrap();
+    let sock = run.join("biglinux/indexd.sock");
+    let _d = KillOnDrop(
         env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
             .spawn()
             .unwrap(),
     );
     assert!(wait_socket(&sock), "daemon never bound socket");
-
-    std::fs::write(notes.join("appeared.txt"), "beta").unwrap();
-    assert!(
-        settles(|| query_paths(&sock, "name", "appeared", &notes).0 == 1),
-        "the new file in the hidden source was not indexed"
+    let docs = home.join("docs").display().to_string();
+    let spelled = |text: String| PathBuf::from(text);
+    // The message tells the path refusal from a later failure, such as a disk
+    // that keeps no versions.
+    let not_searched = Some("not in a searched folder");
+    assert_answers(
+        &sock,
+        &[
+            (
+                path_cmd("reindex", &spelled(format!("{docs}/link/"))),
+                not_searched,
+            ),
+            (
+                path_cmd("reindex", &spelled(format!("{docs}/link/."))),
+                not_searched,
+            ),
+            (
+                path_cmd("save_version", &spelled(format!("{docs}/link/secret.txt"))),
+                not_searched,
+            ),
+            (
+                path_cmd("versions", &spelled(format!("{docs}/../x.txt"))),
+                Some("holds .."),
+            ),
+            (path_cmd("reindex", &spelled(format!("{docs}/./"))), None),
+        ],
     );
-    std::fs::remove_dir_all(&base).ok();
+}
+
+/// The ids of the versions the daemon lists for `path`.
+fn version_ids(sock: &Path, path: &Path) -> Vec<i64> {
+    let reply = ask(sock, &path_cmd("versions", path));
+    reply["versions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("versions {path:?}: {reply}"))
+        .iter()
+        .map(|version| version["id"].as_i64().unwrap())
+        .collect()
+}
+
+/// A daemon searching `docs`, which holds the folders `real`, `old`, `other`,
+/// `gone`, `proj`, `vacated` and `moved` with an `a.txt` each, `alias` linked
+/// to `real` and `out` linked to a folder outside the source.
+struct PathMatrix {
+    base: PathBuf,
+    home: PathBuf,
+    docs: PathBuf,
+    outside: PathBuf,
+    sock: PathBuf,
+    data: PathBuf,
+    /// Stopped before `base` is removed, or it writes its data folder again.
+    daemon: Option<KillOnDrop>,
+    run: scratch::ScratchDir,
+}
+
+impl PathMatrix {
+    fn start(name: &str) -> Self {
+        // A disk that can share blocks: `/tmp` is usually tmpfs, which keeps no
+        // versions. The socket stays there, under the length limit of its path.
+        let base =
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let xdg_storage_home = base.join("data");
+        let outside = base.join("outside");
+        let docs = home.join("docs");
+        for folder in ["real", "old", "other", "gone", "proj", "vacated", "moved"] {
+            std::fs::create_dir_all(docs.join(folder)).unwrap();
+            std::fs::write(docs.join(folder).join("a.txt"), folder).unwrap();
+        }
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("a.txt"), "outside").unwrap();
+        std::os::unix::fs::symlink(docs.join("real"), docs.join("alias")).unwrap();
+        std::os::unix::fs::symlink(&outside, docs.join("out")).unwrap();
+        // The scratch home lies in the build folder, which the default rules
+        // exclude.
+        let rules = xdg_storage_home.join("cfg/big-search/ignore");
+        std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+        std::fs::write(&rules, "!target/\n!**/target/**\n").unwrap();
+        let run = scratch::scratch_dir("bs-matrix-run");
+        let mut matrix = Self {
+            sock: run.join("biglinux/indexd.sock"),
+            base,
+            home,
+            docs,
+            outside,
+            data: xdg_storage_home,
+            daemon: None,
+            run,
+        };
+        matrix.daemon = Some(matrix.spawn());
+        matrix
+    }
+
+    /// Start the daemon and wait until it watches, so a rearrangement is heard.
+    fn spawn(&self) -> KillOnDrop {
+        let daemon = KillOnDrop(
+            env_cmd(&["daemon"], &self.home, &self.data, &self.run)
+                .spawn()
+                .unwrap(),
+        );
+        assert!(wait_socket(&self.sock), "daemon never bound socket");
+        assert!(
+            settles(
+                || send_daemon_request(&self.sock, "{\"v\":2,\"cmd\":\"status\"}")
+                    .contains("\"activity\":\"idle\"")
+            ),
+            "the daemon never finished its start"
+        );
+        daemon
+    }
+
+    /// Stop the daemon as the service manager does, with SIGTERM, and start
+    /// it again.
+    fn restart(&mut self) {
+        let mut daemon = self.daemon.take().unwrap();
+        let pid = libc::pid_t::try_from(daemon.0.id()).unwrap();
+        // SAFETY: `kill` takes no pointers, and the child is not reaped yet,
+        // so its pid names no other process.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = daemon.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "the daemon did not stop");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(status.success(), "the stop ended with {status}");
+        // An exit leaves the socket file, which `spawn` waits to see.
+        let _ = std::fs::remove_file(&self.sock);
+        self.daemon = Some(self.spawn());
+    }
+
+    fn file(&self, folder: &str) -> PathBuf {
+        self.docs.join(folder).join("a.txt")
+    }
+
+    fn reply(&self, cmd: &str, path: &Path) -> serde_json::Value {
+        ask(&self.sock, &path_cmd(cmd, path))
+    }
+
+    fn ids(&self, folder: &str) -> Vec<i64> {
+        version_ids(&self.sock, &self.file(folder))
+    }
+
+    /// Whether this disk keeps versions, said on stderr when it does not.
+    fn keeps_versions(&self) -> bool {
+        let saved = self.reply("save_version", &self.file("alias"));
+        if saved["kind"] == "ok" {
+            return true;
+        }
+        let unavailable = self.reply("versions", &self.file("alias"))["unavailable"].clone();
+        assert_ne!(unavailable, "", "{saved}");
+        eprintln!("this disk keeps no versions ({unavailable}); test declared unsupported");
+        false
+    }
+
+    /// One version listed for `folder`'s file: the state on disk is never
+    /// listed, and keeping it again leaves any automatic version of it nothing
+    /// new to keep.
+    fn keep_one(&self, folder: &str, edit: &str) {
+        let file = self.file(folder);
+        assert_eq!(self.reply("save_version", &file)["kind"], "ok", "{file:?}");
+        std::fs::write(&file, edit).unwrap();
+        assert_eq!(self.reply("save_version", &file)["kind"], "ok", "{file:?}");
+    }
+
+    /// `old` replaced by a link to `other`, `gone` removed, `proj` turned into
+    /// a file, `vacated` replaced by a link to an empty folder, `moved` moved
+    /// to `moved-to` with a link in its place, and `dangling` linked to a
+    /// folder that does not exist yet.
+    fn rearrange(&self) {
+        let docs = &self.docs;
+        std::fs::rename(docs.join("moved"), docs.join("moved-to")).unwrap();
+        std::os::unix::fs::symlink(docs.join("moved-to"), docs.join("moved")).unwrap();
+        std::fs::remove_dir_all(docs.join("vacated")).unwrap();
+        std::fs::create_dir(docs.join("empty")).unwrap();
+        std::os::unix::fs::symlink(docs.join("empty"), docs.join("vacated")).unwrap();
+        std::fs::remove_dir_all(docs.join("old")).unwrap();
+        std::os::unix::fs::symlink(docs.join("other"), docs.join("old")).unwrap();
+        std::fs::remove_dir_all(docs.join("gone")).unwrap();
+        std::fs::remove_dir_all(docs.join("proj")).unwrap();
+        std::fs::write(docs.join("proj"), "a file now").unwrap();
+        std::os::unix::fs::symlink(self.outside.join("later"), docs.join("dangling")).unwrap();
+    }
+}
+
+impl Drop for PathMatrix {
+    fn drop(&mut self) {
+        drop(self.daemon.take());
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+/// Guards: privacy action: a request naming a path answers for the document
+/// it names whatever symlinks, removals or replacements happened on the way,
+/// and nothing outside a source is read.
+#[test]
+fn client_path_matrix() {
+    let matrix = PathMatrix::start("client-path-matrix");
+    if !matrix.keeps_versions() {
+        return;
+    }
+    matrix.keep_one("alias", "real edited");
+    for folder in ["old", "other", "gone", "proj", "vacated", "moved"] {
+        matrix.keep_one(folder, &format!("{folder} edited"));
+    }
+    matrix.rearrange();
+    versions_by_spelling(&matrix);
+    moved_folder_linked(&matrix);
+    disk_requests(&matrix);
+    origin_requests(&matrix);
+    let other = forget_by_spelling(&matrix);
+    source_root_replaced(&matrix, &other);
+}
+
+/// Guards: persisted data: a save heard just before the service manager stops
+/// the daemon leaves the document its versions. Killed with the save not yet
+/// noted, the row recorded the replaced file, and the next start parked it as
+/// a file that arrived while nothing watched.
+#[test]
+fn save_before_stop_kept() {
+    let mut matrix = PathMatrix::start("save-before-stop");
+    if !matrix.keeps_versions() {
+        return;
+    }
+    matrix.keep_one("real", "real edited");
+    let kept = matrix.ids("real");
+    assert!(!kept.is_empty(), "nothing listed before the stop");
+    // What an editor does: a new file renamed over the document.
+    let file = matrix.file("real");
+    let saved = file.with_extension("tmp-save");
+    std::fs::write(&saved, "real saved").unwrap();
+    std::fs::rename(&saved, &file).unwrap();
+    matrix.restart();
+    let listed = matrix.ids("real");
+    assert!(
+        kept.iter().all(|id| listed.contains(id)),
+        "listed {kept:?} before the stop, {listed:?} after"
+    );
+}
+
+/// Guards: the person's CPU: the thread reading the sources' inotify
+/// descriptor runs in the indexer's idle class, so a burst of changes costs no
+/// normal-priority CPU, while the main thread keeps a normal program's share.
+#[test]
+fn inotify_reader_runs_idle() {
+    let base = scratch::scratch_dir("bs-priority");
+    let home = base.join("home");
+    let xdg_storage_home = base.join("data");
+    let run = base.join("run");
+    std::fs::create_dir_all(home.join("docs")).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    let daemon = KillOnDrop(
+        env_cmd(&["daemon"], &home, &xdg_storage_home, &run)
+            .env_remove("BIG_SEARCH_KEEP_PRIORITY")
+            .spawn()
+            .unwrap(),
+    );
+    let pid = daemon.0.id();
+    // The main thread binds the socket once the sources' watch and the query
+    // readers' watches on the index folders exist, without waiting on the
+    // indexer's walk.
+    assert!(
+        wait_socket(&run.join("biglinux/indexd.sock")),
+        "the daemon did not bind its socket"
+    );
+    let watcher = || {
+        thread_ids(pid, "watcher")
+            .first()
+            .map(|&tid| thread_policy(pid, tid))
+    };
+    assert!(
+        settles(|| watcher() == Some(libc::SCHED_IDLE)),
+        "the indexer does not run idle: {:?}",
+        watcher()
+    );
+    let data_folder = xdg_storage_home.join("big-search");
+    let index_folders = [data_folder.join("index"), data_folder.join("content-index")];
+    let readers = || sources_readers(pid, &index_folders);
+    assert!(
+        settles(|| readers().len() == 1),
+        "not one thread reads the sources' watch: {:?}",
+        readers()
+    );
+    assert_eq!(thread_policy(pid, readers()[0]), libc::SCHED_IDLE);
+    assert_eq!(thread_policy(pid, pid), libc::SCHED_OTHER);
+}
+
+/// The notify threads reading an inotify descriptor that watches none of
+/// `index_folders`, which the query readers watch for commits. Each waits in
+/// epoll_wait, whose first argument its parent can read in `syscall`, on an
+/// epoll descriptor whose `fdinfo` lists the inotify one.
+fn sources_readers(pid: u32, index_folders: &[PathBuf]) -> Vec<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let index_watches: Vec<String> = index_folders
+        .iter()
+        .map(|folder| format!("ino:{:x}", std::fs::metadata(folder).unwrap().ino()))
+        .collect();
+    let fdinfo =
+        |fd: u64| std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).unwrap_or_default();
+    let is_inotify = |fd: &u64| {
+        std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))
+            .is_ok_and(|target| target.as_os_str() == "anon_inode:inotify")
+    };
+    let watches_index = |fd: u64| {
+        fdinfo(fd).lines().any(|line| {
+            line.starts_with("inotify wd:")
+                && line
+                    .split_whitespace()
+                    .any(|field| index_watches.iter().any(|watch| watch == field))
+        })
+    };
+    // `comm` holds the first 15 bytes of notify's "notify-rs inotify loop".
+    thread_ids(pid, "notify-rs inoti")
+        .into_iter()
+        .filter(|tid| {
+            let Ok(syscall) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/syscall"))
+            else {
+                return false;
+            };
+            let Some(epoll) = syscall
+                .split_whitespace()
+                .nth(1)
+                .and_then(|arg| u64::from_str_radix(arg.trim_start_matches("0x"), 16).ok())
+            else {
+                return false;
+            };
+            let inotify: Vec<u64> = fdinfo(epoll)
+                .lines()
+                .filter_map(|line| line.strip_prefix("tfd:"))
+                .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
+                .filter(is_inotify)
+                .collect();
+            !inotify.is_empty() && !inotify.into_iter().any(watches_index)
+        })
+        .collect()
+}
+
+/// The threads of `pid` named `name`.
+fn thread_ids(pid: u32, name: &str) -> Vec<u32> {
+    std::fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .flatten()
+        .filter(|task| {
+            std::fs::read_to_string(task.path().join("comm"))
+                .is_ok_and(|comm| comm.trim_end() == name)
+        })
+        .filter_map(|task| task.file_name().to_str()?.parse().ok())
+        .collect()
+}
+
+/// The scheduling policy of thread `tid`, field 41 of its `stat`
+/// (proc_pid_stat(5)).
+fn thread_policy(pid: u32, tid: u32) -> i32 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/stat")).unwrap();
+    // Fields from the third on follow the parenthesized name.
+    let (_, fields) = stat.rsplit_once(')').unwrap();
+    fields
+        .split_whitespace()
+        .nth(41 - 3)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// The versions listed through each spelling.
+fn versions_by_spelling(matrix: &PathMatrix) {
+    // Alias inside a source: one document under either spelling.
+    let real = matrix.ids("real");
+    assert_eq!(real.len(), 1, "{real:?}");
+    assert_eq!(matrix.ids("alias"), real);
+    // Folder replaced by a link inside the source: the versions kept under the
+    // old folder stay its own, apart from those of the folder linked in. Both
+    // of its states are listed, since neither is on disk any more.
+    let old = matrix.ids("old");
+    let other = matrix.ids("other");
+    assert_eq!((old.len(), other.len()), (2, 1), "{old:?} {other:?}");
+    assert!(!old.contains(&other[0]), "{old:?} {other:?}");
+    // A path vanished, a folder turned into a file, and one replaced by a link
+    // to where no such file is: rows keep their key.
+    for folder in ["gone", "proj", "vacated"] {
+        assert_eq!(matrix.ids(folder).len(), 2, "{folder}");
+    }
+    // Links to outside and to nothing: nothing was kept there.
+    assert_eq!(matrix.ids("out"), Vec::<i64>::new());
+    assert_eq!(matrix.ids("dangling"), Vec::<i64>::new());
+}
+
+/// A folder moved and a link put in its place while the daemon runs: the
+/// rows follow the folder, so the link's spelling lists them where it leads,
+/// and after an editor's save there a restore through the link proceeds.
+fn moved_folder_linked(matrix: &PathMatrix) {
+    let kept = matrix.ids("moved");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(
+        settles(|| matrix.ids("moved-to") == kept),
+        "the rows did not follow the folder: {:?}",
+        matrix.ids("moved-to")
+    );
+    let saved = matrix.docs.join("moved-to/a.txt.saving");
+    std::fs::write(&saved, "moved saved by an editor").unwrap();
+    std::fs::rename(&saved, matrix.file("moved-to")).unwrap();
+    assert_answers(
+        &matrix.sock,
+        &[(path_cmd("save_version", &matrix.file("moved")), None)],
+    );
+    let listed = matrix.ids("moved-to");
+    assert!(
+        kept.iter().all(|id| listed.contains(id)),
+        "{kept:?} {listed:?}"
+    );
+    assert_eq!(matrix.ids("moved"), listed);
+}
+
+/// Requests that read the disk follow a link and stay inside the source. A
+/// restore through a link put in place of a folder that has versions would
+/// write that folder's file over the one linked in, so it is refused with the
+/// file it leads to named.
+fn disk_requests(matrix: &PathMatrix) {
+    let docs = &matrix.docs;
+    let file = |folder: &str| matrix.file(folder);
+    let save = |folder: &str| path_cmd("save_version", &file(folder));
+    let reindex = |name: &str| path_cmd("reindex", &docs.join(name));
+    let created = |folder: &str| path_cmd("register_created", &file(folder));
+    let leads_to = file("other").display().to_string();
+    let not_searched = Some("not in a searched folder");
+    let no_source = Some("outside the configured sources");
+    assert_answers(
+        &matrix.sock,
+        &[
+            (save("old"), Some(leads_to.as_str())),
+            // No file there: nothing a restore would lose.
+            (save("gone"), None),
+            (save("proj"), None),
+            (save("vacated"), None),
+            (
+                path_cmd("save_version", &docs.join("proj")),
+                Some("not kept: it has no document extension"),
+            ),
+            (save("out"), not_searched),
+            (save("dangling"), not_searched),
+            (reindex("alias"), None),
+            (reindex("old"), None),
+            (reindex("gone"), None),
+            (reindex("proj"), None),
+            (reindex("proj/a.txt"), None),
+            (reindex("out/"), not_searched),
+            (reindex("dangling"), not_searched),
+            (created("alias"), None),
+            (created("old"), None),
+            (created("gone"), None),
+            (created("proj"), None),
+            (created("out"), no_source),
+            (created("dangling"), no_source),
+        ],
+    );
+    assert_eq!(
+        matrix.ids("vacated").len(),
+        2,
+        "the restore moved vacated's rows"
+    );
+    // Recorded where the link leads.
+    for folder in ["real", "other"] {
+        let origin = matrix.reply("origin", &file(folder)).to_string();
+        assert!(origin.contains("app_created"), "{folder}: {origin}");
+    }
+}
+
+/// Origins recorded by a client: the file made is keyed inside the source as
+/// [`disk_requests`] keys it, the one it came from may be anywhere.
+fn origin_requests(matrix: &PathMatrix) {
+    let file = |folder: &str| matrix.file(folder);
+    let no_source = Some("outside the configured sources");
+    let pair = |cmd: &str, src: &Path, dst: &str| pair_cmd(cmd, src, &matrix.docs.join(dst));
+    assert_answers(
+        &matrix.sock,
+        &[
+            (
+                pair(
+                    "register_copy",
+                    &matrix.outside.join("a.txt"),
+                    "alias/c.txt",
+                ),
+                None,
+            ),
+            (pair("register_copy", &file("out"), "old/c.txt"), None),
+            (
+                pair("register_copy", Path::new("a.txt"), "real/c.txt"),
+                Some("relative"),
+            ),
+            (pair("register_copy", &file("real"), "out/c.txt"), no_source),
+            (pair("register_move", &file("gone"), "proj/m.txt"), None),
+            (
+                pair("register_move", &file("real"), "dangling/m.txt"),
+                no_source,
+            ),
+            (pair("register_derived", &file("proj"), "gone/d.txt"), None),
+            (
+                pair("register_derived", &file("real"), "out/d.txt"),
+                no_source,
+            ),
+        ],
+    );
+}
+
+/// Forgetting through a spelling erases every version listed through it or
+/// where it leads; returns those of `other` kept again.
+fn forget_by_spelling(matrix: &PathMatrix) -> Vec<i64> {
+    let forget = |folder: &str| matrix.reply("forget_versions", &matrix.file(folder));
+    assert_eq!(forget("old")["kind"], "ok");
+    assert_eq!(matrix.ids("old"), Vec::<i64>::new());
+    assert_eq!(matrix.ids("other"), Vec::<i64>::new());
+    assert_eq!(forget("alias")["kind"], "ok");
+    assert_eq!(matrix.ids("real"), Vec::<i64>::new());
+    for folder in ["gone", "proj", "vacated", "out", "dangling"] {
+        assert_eq!(forget(folder)["kind"], "ok", "{folder}");
+        assert_eq!(matrix.ids(folder), Vec::<i64>::new(), "{folder}");
+    }
+    matrix.keep_one("alias", "real again");
+    assert_eq!(matrix.ids("real").len(), 1);
+    matrix.keep_one("other", "other again");
+    let other = matrix.ids("other");
+    assert_eq!(other.len(), 1, "{other:?}");
+    other
+}
+
+/// The source root replaced by a link while the daemon runs leads nowhere
+/// new, and the rows kept under it are still found by their spelling.
+fn source_root_replaced(matrix: &PathMatrix, other: &[i64]) {
+    std::fs::rename(&matrix.home, matrix.base.join("home.old")).unwrap();
+    std::os::unix::fs::symlink(&matrix.outside, &matrix.home).unwrap();
+    std::fs::create_dir_all(matrix.outside.join("docs/real")).unwrap();
+    std::fs::write(matrix.outside.join("docs/real/a.txt"), "outside").unwrap();
+    let real = matrix.file("real");
+    let not_searched = Some("not in a searched folder");
+    assert_answers(
+        &matrix.sock,
+        &[
+            (path_cmd("reindex", &matrix.docs.join("real")), not_searched),
+            (path_cmd("save_version", &real), not_searched),
+            (
+                path_cmd("register_created", &real),
+                Some("outside the configured sources"),
+            ),
+        ],
+    );
+    // Its state on disk is out of reach now, so it is listed too.
+    let listed = matrix.ids("other");
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(listed.contains(&other[0]), "{listed:?}");
+    assert_eq!(
+        matrix.reply("forget_versions", &matrix.file("other"))["kind"],
+        "ok"
+    );
+    assert_eq!(matrix.ids("other"), Vec::<i64>::new());
 }

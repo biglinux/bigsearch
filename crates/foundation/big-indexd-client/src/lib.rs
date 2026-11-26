@@ -210,6 +210,10 @@ pub const KIND_FILTER: &str = "kind-filter";
 /// [`RequestBody::Rescan`].
 pub const RESCAN: &str = "rescan";
 
+/// The [`Status::capabilities`] entry of a daemon that keeps no content
+/// index: its `content` and `both` searches find no file by its text.
+pub const NAMES_ONLY: &str = "names-only";
+
 /// Page window for virtual scrolling.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Page {
@@ -263,12 +267,19 @@ pub struct QueryOutcome {
     pub total: usize,
     /// Offset to request next, or `None` at the end.
     pub next_offset: Option<usize>,
-    /// Approximate number of recently-changed files whose content is not yet
-    /// (re-)extracted. `> 0` on a content/both query means results may be
-    /// incomplete; the daemon has already been nudged to extract them, so a
-    /// retry shortly will see them ("loading" hint for UIs).
+    /// Approximate number of files whose content is not yet (re-)extracted
+    /// because they changed recently or another program held them busy. `> 0`
+    /// on a content/both query means results may be incomplete; the daemon has
+    /// already been nudged to extract them, so a retry shortly will see them
+    /// ("loading" hint for UIs).
     #[serde(default)]
     pub content_pending: u64,
+    /// The search stopped at [`CANDIDATE_CEILING`] candidates before the
+    /// folder, extension, type, date and size filters ran: matches past them
+    /// were never read, so this page can miss some and `total` is a floor.
+    /// Narrowing the query reaches them; paging does not.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// A versioned, command-tagged request.
@@ -595,7 +606,8 @@ pub struct Status {
     /// Optional features this daemon answers, such as [`KIND_FILTER`]: a
     /// request field it does not list is ignored by it.
     pub capabilities: Vec<String>,
-    /// Recently-changed files whose content extraction is still deferred.
+    /// Files whose content extraction is still deferred: changed recently, or
+    /// held busy by another program.
     pub pending_content: u64,
     /// Live document count in the content index.
     pub content_docs: u64,
@@ -684,6 +696,7 @@ mod tests {
                 assert_eq!(outcome.hits[0].size, 5);
                 assert_eq!(outcome.hits[0].ext, "txt");
                 assert_eq!(outcome.content_pending, 0); // additive field defaults
+                assert!(!outcome.truncated);
             }
             other => panic!("wrong kind: {other:?}"),
         }

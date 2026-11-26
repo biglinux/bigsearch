@@ -31,8 +31,8 @@ fn main() -> ExitCode {
     // SAFETY: called once, before any thread exists that could read the locale.
     unsafe { gettextrs::setlocale(gettextrs::LocaleCategory::LcAll, "") };
     // Without a catalog every message stays in English, the source language.
-    gettextrs::bindtextdomain("big-docinfo", LOCALE_DIR).ok();
-    gettextrs::textdomain("big-docinfo").ok();
+    let _ = gettextrs::bindtextdomain("big-docinfo", LOCALE_DIR);
+    let _ = gettextrs::textdomain("big-docinfo");
     // Messages are written for the person reading the dialog: one sentence with
     // the cause and what to do, no paths or error chains.
     match run() {
@@ -76,11 +76,22 @@ enum Output {
 }
 
 fn describe(path: &Path, output: Output) -> Result<()> {
-    let file = big_search::extract::described(path).with_context(|| {
-        gettext(
-            "This file has no readable text: its type is not supported, or it is a scanned PDF.",
-        )
-    })?;
+    let Some(file) = big_search::extract::described(path) else {
+        // Extraction reads no cause back; opening the file tells an unreadable
+        // one from a type without text.
+        bail!(match std::fs::File::open(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                gettext("This file is no longer there: it was moved or deleted.")
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                gettext("You do not have permission to read this file.")
+            }
+            Err(_) => gettext("This file could not be read."),
+            Ok(_) => gettext(
+                "This file has no readable text: its type is not supported, or it is a scanned PDF.",
+            ),
+        });
+    };
     let ext = extension(path);
     let hints = Hints {
         declared_title: file.declared_title.as_deref(),

@@ -12,13 +12,14 @@
     reason = "integration test spawns the built big-search binary under test"
 )]
 
+mod daemon;
 mod scratch;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, ExitStatus};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -32,13 +33,7 @@ impl Drop for KillOnDrop {
 }
 
 fn daemon(home: &Path, xdg_storage_home: &Path, run: &Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_big-search"))
-        .arg("daemon")
-        .env("RUST_LOG", "off")
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", xdg_storage_home)
-        .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", run)
+    daemon::env_cmd(&["daemon"], home, xdg_storage_home, run)
         .spawn()
         .expect("spawn daemon")
 }
@@ -55,14 +50,8 @@ fn wait_socket(sock: &Path, timeout: Duration) -> bool {
 }
 
 fn seed_index(home: &Path, xdg_storage_home: &Path, run: &Path) {
-    let reindex = Command::new(env!("CARGO_BIN_EXE_big-search"))
-        .arg("reindex")
+    let reindex = daemon::env_cmd(&["reindex"], home, xdg_storage_home, run)
         .arg(home)
-        .env("RUST_LOG", "off")
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", xdg_storage_home)
-        .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", run)
         .status()
         .unwrap();
     assert!(reindex.success());
@@ -76,8 +65,8 @@ fn wait_for_refusal(child: &mut Child) -> ExitStatus {
             break s;
         }
         if Instant::now() > deadline {
-            child.kill().ok();
-            panic!("second daemon did not exit — it should refuse the singleton lock");
+            let _ = child.kill();
+            panic!("second daemon did not exit: it should refuse the singleton lock");
         }
         sleep(Duration::from_millis(50));
     }
@@ -142,5 +131,4 @@ fn second_daemon_leaves_first_intact() {
     );
 
     drop(d1); // kills the first daemon
-    std::fs::remove_dir_all(&base).ok();
 }

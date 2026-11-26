@@ -68,9 +68,14 @@ fn apply_deadlines(stream: &UnixStream, deadline: Duration) -> Result<(), Client
 /// refuse it for.
 #[must_use]
 pub fn default_socket() -> Option<PathBuf> {
-    // An empty or relative value is unset (XDG Base Directory spec): joining it
-    // would name a socket under the current folder. The daemon binds this path.
-    std::env::var_os("XDG_RUNTIME_DIR")
+    socket_in(std::env::var_os("XDG_RUNTIME_DIR"))
+}
+
+/// The socket under the runtime directory `runtime`. An empty or relative
+/// value is unset (XDG Base Directory spec): joining it would name a socket
+/// under the current folder. The daemon binds this path.
+fn socket_in(runtime: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    runtime
         .map(PathBuf::from)
         .filter(|runtime| runtime.is_absolute())
         .map(|runtime| runtime.join("biglinux").join("indexd.sock"))
@@ -120,6 +125,11 @@ impl Client {
     }
 
     /// Run a query; the daemon filters, pages, and attaches metadata server-side.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn query(
         &self,
         q: &str,
@@ -131,6 +141,11 @@ impl Client {
     }
 
     /// Run a query and request origin summaries for the visible page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn query_with_origin(
         &self,
         q: &str,
@@ -164,6 +179,11 @@ impl Client {
     }
 
     /// Fetch full origin/provenance details for one path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn origin(&self, path: &str) -> Result<Option<OriginProvenance>, ClientError> {
         match self.roundtrip(RequestBody::Origin(OriginRequest {
             path: path.to_string(),
@@ -176,6 +196,10 @@ impl Client {
     }
 
     /// Register a successful file copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_copy(
         &self,
         src: &str,
@@ -190,6 +214,10 @@ impl Client {
     }
 
     /// Register a successful move or rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_move(
         &self,
         src: &str,
@@ -204,6 +232,10 @@ impl Client {
     }
 
     /// Register a file created by an application.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_created(&self, path: &str, app_id: Option<&str>) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::RegisterCreated(RegisterCreatedRequest {
             path: path.to_string(),
@@ -212,6 +244,10 @@ impl Client {
     }
 
     /// Register a file derived from another file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_derived(
         &self,
         src: &str,
@@ -226,6 +262,11 @@ impl Client {
     }
 
     /// Cataloged count + paused flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn status(&self) -> Result<Status, ClientError> {
         match self.roundtrip(RequestBody::Status)? {
             Reply::Status {
@@ -346,11 +387,19 @@ impl Client {
     }
 
     /// Pause indexing (queries keep working against the current index).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn pause(&self) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::Pause)
     }
 
     /// Resume indexing and reconcile changes missed while paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn resume(&self) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::Resume)
     }
@@ -498,6 +547,40 @@ fn exchange(
 mod tests {
     use super::*;
 
+    /// Guards: bound: a reply line up to the ceiling is read, one byte more is
+    /// refused instead of growing without end.
+    #[test]
+    fn reply_line_capped() {
+        let ceiling = usize::try_from(MAX_REPLY_BYTES).unwrap();
+        let mut at_cap = vec![b'a'; ceiling - 1];
+        at_cap.push(b'\n');
+        let mut line = String::new();
+        read_reply_line(&mut at_cap.as_slice(), &mut line).unwrap();
+        assert_eq!(line.len(), ceiling);
+
+        let mut past_cap = vec![b'a'; ceiling];
+        past_cap.push(b'\n');
+        let mut line = String::new();
+        let refused = read_reply_line(&mut past_cap.as_slice(), &mut line);
+        assert!(
+            matches!(&refused, Err(ClientError::Io(error)) if error.kind() == io::ErrorKind::InvalidData),
+            "{refused:?}"
+        );
+    }
+
+    /// Guards: security refusal: a runtime directory that is unset, empty or
+    /// relative names no socket, so none lands under the working folder.
+    #[test]
+    fn socket_needs_absolute_runtime() {
+        for runtime in [None, Some(""), Some("run/user/1000")] {
+            assert_eq!(socket_in(runtime.map(Into::into)), None, "{runtime:?}");
+        }
+        assert_eq!(
+            socket_in(Some("/run/user/1000".into())),
+            Some(PathBuf::from("/run/user/1000/biglinux/indexd.sock"))
+        );
+    }
+
     #[test]
     fn persistent_client_reuses_its_connection() {
         use std::os::unix::net::UnixListener;
@@ -534,7 +617,7 @@ mod tests {
         client.forget_versions("/b").unwrap();
 
         server_thread.join().unwrap().unwrap();
-        std::fs::remove_file(socket_path).ok();
+        let _ = std::fs::remove_file(socket_path);
     }
 
     #[test]
@@ -577,7 +660,7 @@ mod tests {
         // tells a resend.
         let outcome = outcome.recv_timeout(IO_TIMEOUT / 2);
         done.store(true, Ordering::Relaxed);
-        std::fs::remove_file(&socket_path).ok();
+        let _ = std::fs::remove_file(&socket_path);
         assert!(
             matches!(outcome, Ok(Err(ClientError::Io(_)))),
             "{outcome:?}"

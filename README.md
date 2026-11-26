@@ -16,8 +16,8 @@ Pre-release: the socket protocol, the configuration file and the on-disk format 
   searchable without a dictionary.
 - **Live index:** inotify on every visible folder, so a saved file is
   searchable within seconds. A restart finds files created, renamed or deleted
-  while the service was down without reading every file; `big-search rescan`
-  also rereads files edited in place.
+  while the service was down without reading every file, then, a minute
+  later, walks the folders once in the background for files edited in place.
 - **Earlier versions:** on filesystems with reflinks (Btrfs, XFS) a copy of a
   document is kept before each save, within a disk budget.
 - **Origin:** where a file came from (a browser download, a copy, a move),

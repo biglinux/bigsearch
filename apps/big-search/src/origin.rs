@@ -1,9 +1,12 @@
 //! Lightweight file origin/provenance store. Search remains owned by Tantivy;
 //! this SQLite sidecar is consulted only for explicit origin requests or when a
 //! query asks for origin summaries.
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use big_indexd_client::{Hit, OriginProvenance, OriginSummary};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    params_from_iter,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
@@ -12,11 +15,13 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod downloads;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use downloads::domain_from_url;
 use downloads::{read_xdg_origin_domain, should_probe_xdg_origin};
 
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 const ORIGIN_CAPABILITY: &str = "file_origin";
 const ORIGIN_REGISTER_CAPABILITY: &str = "file_origin_register";
 
@@ -57,8 +62,10 @@ pub enum OriginConfidence {
 #[derive(Clone, Debug)]
 struct OriginRecord {
     path: String,
-    dev: Option<i64>,
+    /// The file's identity, as [`crate::history::identity`] gives it.
+    fs: Option<i64>,
     ino: Option<i64>,
+    born: Option<i64>,
     kind: OriginKind,
     confidence: OriginConfidence,
     source_app: Option<String>,
@@ -74,11 +81,14 @@ impl OriginRecord {
     /// A file at `path`, seen arriving at `at`, with nothing known yet of
     /// where it came from.
     fn arrived(path: &Path, kind: OriginKind, confidence: OriginConfidence, at: i64) -> Self {
-        let (dev, ino) = dev_ino(path);
+        let (fs, ino, born) = identity_of(path).map_or((None, None, None), |(fs, ino, born)| {
+            (Some(fs), Some(ino), born)
+        });
         Self {
             path: path_key(path),
-            dev,
+            fs,
             ino,
+            born,
             kind,
             confidence,
             source_app: None,
@@ -202,6 +212,12 @@ pub struct OriginWriter {
 }
 
 impl OriginWriter {
+    /// The writer for the origin database at `path`; one that records nothing
+    /// when file origin is turned off.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the origin database cannot be opened or its schema created.
     pub fn open(path: PathBuf) -> Result<Self> {
         if !settings().enabled {
             return Ok(Self { conn: None });
@@ -215,15 +231,21 @@ impl OriginWriter {
         Self { conn: None }
     }
 
+    /// Records that the program `app_id` created `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `path` is relative, holds `..` or leads outside the configured
+    /// sources, or the database cannot be written.
     pub fn register_created(&self, path: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(path)?;
+        let path = key_under_source(path)?;
         let record = OriginRecord {
             source_app: app_id.map(str::to_string),
             ..OriginRecord::arrived(
-                path,
+                &path,
                 OriginKind::AppCreated,
                 OriginConfidence::High,
                 now_secs(),
@@ -232,12 +254,19 @@ impl OriginWriter {
         upsert_record(conn, &record)
     }
 
+    /// Records that `dst` is a copy of `src`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `dst` is relative, holds `..` or leads outside the configured
+    /// sources, `src` is relative or holds `..`, or the database cannot be written.
     pub fn register_copy(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(dst)?;
-        let source = crate::settings::sources().owner(src);
+        let dst = key_under_source(dst)?;
+        let src = spelled_source(src)?;
+        let source = crate::settings::sources().owner(&src);
         let (kind, source_device_id, source_device_label) = match source {
             Some(source) if source.removable() => (
                 OriginKind::RemovableCopy,
@@ -253,28 +282,40 @@ impl OriginWriter {
         };
         let record = OriginRecord {
             source_app: app_id.map(str::to_string),
-            source_path: Some(path_key(src)),
+            source_path: Some(path_key(&src)),
             source_device_id,
             source_device_label,
-            ..OriginRecord::arrived(dst, kind, OriginConfidence::High, now_secs())
+            ..OriginRecord::arrived(&dst, kind, OriginConfidence::High, now_secs())
         };
         upsert_record(conn, &record)
     }
 
+    /// Records that `src` was moved or renamed to `dst`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `dst` is relative, holds `..` or leads outside the configured
+    /// sources, `src` is relative or holds `..`, or the database cannot be written.
     pub fn register_move(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(dst)?;
+        let dst = key_under_source(dst)?;
         let now = now_secs();
-        let src_key = path_key(src);
-        let dst_key = path_key(dst);
-        let (dev, ino) = dev_ino(dst);
+        let src_key = path_key(&spelled_source(src)?);
+        let dst_key = path_key(&dst);
+        let arrived = OriginRecord::arrived(
+            &dst,
+            OriginKind::MovedOrRenamed,
+            OriginConfidence::Medium,
+            now,
+        );
 
         if let Some(mut record) = select_record(conn, &src_key)? {
             record.path = dst_key;
-            record.dev = dev;
-            record.ino = ino;
+            record.fs = arrived.fs;
+            record.ino = arrived.ino;
+            record.born = arrived.born;
             record.updated_at = now;
             upsert_record(conn, &record)?;
             if src_key != record.path {
@@ -286,26 +327,27 @@ impl OriginWriter {
         let record = OriginRecord {
             source_app: app_id.map(str::to_string),
             source_path: Some(src_key),
-            ..OriginRecord::arrived(
-                dst,
-                OriginKind::MovedOrRenamed,
-                OriginConfidence::Medium,
-                now,
-            )
+            ..arrived
         };
         upsert_record(conn, &record)
     }
 
+    /// Records that `dst` was made from `src`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `dst` is relative, holds `..` or leads outside the configured
+    /// sources, `src` is relative or holds `..`, or the database cannot be written.
     pub fn register_derived(&self, src: &Path, dst: &Path, app_id: Option<&str>) -> Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(dst)?;
+        let dst = key_under_source(dst)?;
         let record = OriginRecord {
             source_app: app_id.map(str::to_string),
-            source_path: Some(path_key(src)),
+            source_path: Some(path_key(&spelled_source(src)?)),
             ..OriginRecord::arrived(
-                dst,
+                &dst,
                 OriginKind::DerivedFile,
                 OriginConfidence::High,
                 now_secs(),
@@ -314,13 +356,13 @@ impl OriginWriter {
         upsert_record(conn, &record)
     }
 
-    pub fn register_web_download(&self, path: &Path, domain: &str) -> Result<()> {
+    pub(crate) fn register_web_download(&self, path: &Path, domain: &str) -> Result<()> {
         self.register_web_download_at(path, domain, now_secs())
     }
 
     /// The same, for a download whose date is known: from the list a browser
     /// keeps, where the file may have arrived months ago.
-    pub fn register_web_download_at(
+    pub(crate) fn register_web_download_at(
         &self,
         path: &Path,
         domain: &str,
@@ -329,41 +371,39 @@ impl OriginWriter {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        ensure_path_under_source(path)?;
-        let record = OriginRecord {
-            source_domain: Some(domain.to_string()),
-            first_seen_at: downloaded_at,
-            ..OriginRecord::arrived(
-                path,
-                OriginKind::WebDownload,
-                OriginConfidence::High,
-                now_secs(),
-            )
-        };
-        upsert_record(conn, &record)
+        upsert_record(conn, &web_download(path, domain, downloaded_at)?)
     }
 
-    /// The same for a whole list, in one transaction.
+    /// The same for a whole list, in one transaction; a path outside the
+    /// sources is left out.
     ///
     /// A browser's download list is thousands of rows, read in one go when the
     /// service starts. One at a time is one commit each against a database that
     /// syncs, thousands of them before the first file is even indexed.
     ///
     /// Returns how many were recorded.
-    pub fn register_web_downloads_at(&self, downloads: &[(PathBuf, String, i64)]) -> Result<usize> {
+    pub(crate) fn register_web_downloads_at(
+        &self,
+        downloads: &[(PathBuf, String, i64)],
+    ) -> Result<usize> {
         let Some(conn) = &self.conn else {
             return Ok(0);
         };
+        // Resolved before the write lock, which a stat on a network mount that
+        // stopped answering would hold.
+        let records: Vec<OriginRecord> = downloads
+            .iter()
+            .filter_map(|(path, domain, downloaded_at)| {
+                web_download(path, domain, *downloaded_at).ok()
+            })
+            .collect();
         // `unchecked_transaction` because the connection is behind `&self`; the
         // store is single-threaded, which is what makes that safe here.
         let transaction = conn.unchecked_transaction()?;
         let mut recorded = 0;
-        for (path, domain, downloaded_at) in downloads {
-            if self
-                .register_web_download_at(path, domain, *downloaded_at)
-                .is_ok()
-                && conn.changes() > 0
-            {
+        for record in &records {
+            upsert_record(conn, record)?;
+            if conn.changes() > 0 {
                 recorded += 1;
             }
         }
@@ -450,7 +490,7 @@ impl OriginReader {
 /// connection and would keep writing into an unlinked inode. `VACUUM`
 /// afterwards because forgetting has to mean the rows are gone from the file,
 /// not merely unreferenced inside it.
-pub fn forget_all(path: &Path) -> Result<()> {
+pub(crate) fn forget_all(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -461,6 +501,34 @@ pub fn forget_all(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The origin store's tables, created when missing.
+const ORIGIN_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1');
+    CREATE TABLE IF NOT EXISTS file_origin (
+        path TEXT PRIMARY KEY,
+        dev INTEGER,
+        ino INTEGER,
+        fs INTEGER,
+        born INTEGER,
+        kind TEXT NOT NULL,
+        confidence INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        source_app TEXT,
+        source_path TEXT,
+        source_device_id TEXT,
+        source_device_label TEXT,
+        source_domain TEXT,
+        first_seen_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_file_origin_kind_time
+        ON file_origin(kind, first_seen_at DESC);
+";
+
 fn open_writer(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -468,40 +536,93 @@ fn open_writer(path: &Path) -> Result<Connection> {
     }
     let conn = Connection::open(path)?;
     configure_connection(&conn)?;
+    conn.execute_batch(ORIGIN_SCHEMA)?;
+    add_identity_columns(&conn)?;
     conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1');
-        CREATE TABLE IF NOT EXISTS file_origin (
-            path TEXT PRIMARY KEY,
-            dev INTEGER,
-            ino INTEGER,
-            kind TEXT NOT NULL,
-            confidence INTEGER NOT NULL,
-            label TEXT NOT NULL,
-            source_app TEXT,
-            source_path TEXT,
-            source_device_id TEXT,
-            source_device_label TEXT,
-            source_domain TEXT,
-            first_seen_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_file_origin_dev_ino
-            ON file_origin(dev, ino);
-        CREATE INDEX IF NOT EXISTS idx_file_origin_kind_time
-            ON file_origin(kind, first_seen_at DESC);
-        ",
+        "DROP INDEX IF EXISTS idx_file_origin_dev_ino;
+         CREATE INDEX IF NOT EXISTS idx_file_origin_fs_ino ON file_origin(fs, ino);",
     )?;
     conn.execute(
         "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
         params![SCHEMA_VERSION],
     )?;
-    conn.execute_batch("PRAGMA optimize;")?;
+    // Lookups go by key or by one index and need no statistics: those taken
+    // while the store was small have every lookup read the whole table once it
+    // grows, and the ANALYZE of `PRAGMA optimize` fails a registration beside
+    // another connection ("database is locked") without the busy wait.
+    let has_statistics: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = 'sqlite_stat1')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_statistics {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS sqlite_stat1; DROP TABLE IF EXISTS sqlite_stat4;",
+        )?;
+        // The connection that drops them keeps the statistics it loaded.
+        return open_writer(path);
+    }
     Ok(conn)
+}
+
+/// Add the [`crate::history::identity`] columns, once, to a store that recorded
+/// `st_dev` (btrfs draws it anew per mount): only a row whose path still holds
+/// the file it recorded gets one. `dev` stays, unread, for older builds.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "kept: compares the st_dev an older build recorded"
+)]
+fn add_identity_columns(conn: &Connection) -> Result<()> {
+    let has_fs = || -> rusqlite::Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('file_origin') WHERE name = 'fs')",
+            [],
+            |row| row.get(0),
+        )
+    };
+    if has_fs()? {
+        return Ok(());
+    }
+    // Read before the write lock: a recorded path on a network mount that
+    // stopped answering blocks its stat, and every other writer with it.
+    let recorded: Vec<(String, i64, i64)> = conn
+        .prepare(
+            "SELECT path, dev, ino FROM file_origin WHERE dev IS NOT NULL AND ino IS NOT NULL",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let identified: Vec<_> = recorded
+        .into_iter()
+        .filter_map(|(path, dev, ino)| {
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if metadata.dev().cast_signed() != dev || metadata.ino().cast_signed() != ino {
+                return None;
+            }
+            let (fs, _, born) = crate::history::identity(Path::new(&path), &metadata).ok()?;
+            Some((path, dev, ino, fs, born))
+        })
+        .collect();
+    // Immediate, and asked again: another connection opening the store may
+    // have added them while this one waited for the lock.
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    if has_fs()? {
+        return Ok(());
+    }
+    transaction.execute_batch(
+        "ALTER TABLE file_origin ADD COLUMN fs INTEGER;
+         ALTER TABLE file_origin ADD COLUMN born INTEGER;",
+    )?;
+    {
+        // Only a row still as it was read: another writer may have replaced it.
+        let mut identify = transaction.prepare(
+            "UPDATE file_origin SET fs = ?4, born = ?5 WHERE path = ?1 AND dev = ?2 AND ino = ?3",
+        )?;
+        for (path, dev, ino, fs, born) in identified {
+            identify.execute(params![path, dev, ino, fs, born])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn open_reader(path: &Path) -> Result<Connection> {
@@ -558,13 +679,15 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
     conn.execute(
         "
         INSERT INTO file_origin (
-            path, dev, ino, kind, confidence, label, source_app, source_path,
+            path, fs, ino, kind, confidence, label, source_app, source_path,
             source_device_id, source_device_label, source_domain, first_seen_at,
-            updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            updated_at, born
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         ON CONFLICT(path) DO UPDATE SET
-            dev = excluded.dev,
+            dev = NULL,
+            fs = excluded.fs,
             ino = excluded.ino,
+            born = excluded.born,
             kind = excluded.kind,
             confidence = excluded.confidence,
             label = excluded.label,
@@ -579,7 +702,7 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
         ",
         params![
             record.path,
-            record.dev,
+            record.fs,
             record.ino,
             record.kind.as_str(),
             record.confidence as u8,
@@ -593,6 +716,7 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
             record.source_domain,
             record.first_seen_at,
             record.updated_at,
+            record.born,
         ],
     )?;
     Ok(())
@@ -600,9 +724,9 @@ fn upsert_record(conn: &Connection, record: &OriginRecord) -> Result<()> {
 
 /// The columns `row_to_record` reads, in its positional order: a query listing
 /// them differently would silently swap fields.
-const RECORD_COLUMNS: &str = "path, dev, ino, kind, confidence, source_app, \
+const RECORD_COLUMNS: &str = "path, fs, ino, kind, confidence, source_app, \
      source_path, source_device_id, source_device_label, source_domain, \
-     first_seen_at, updated_at";
+     first_seen_at, updated_at, born";
 
 fn select_record(conn: &Connection, path: &str) -> Result<Option<OriginRecord>> {
     let by_path = conn
@@ -616,23 +740,24 @@ fn select_record(conn: &Connection, path: &str) -> Result<Option<OriginRecord>> 
         return Ok(by_path);
     }
     // Renamed, or moved by something that did not tell us. The file is the same
-    // file (same device, same inode), and where it came from did not change
-    // because somebody gave it a different name.
+    // file (same filesystem, inode and birth), and where it came from did not
+    // change because somebody gave it a different name.
     select_by_identity(conn, Path::new(path))
 }
 
 /// The record for whatever file now sits at `path`, found by its identity on
 /// disk rather than by its name.
 fn select_by_identity(conn: &Connection, path: &Path) -> Result<Option<OriginRecord>> {
-    let (Some(dev), Some(ino)) = dev_ino(path) else {
+    let Some((fs, ino, born)) = identity_of(path) else {
         return Ok(None);
     };
     conn.query_row(
         &format!(
             "SELECT {RECORD_COLUMNS} FROM file_origin
-              WHERE dev = ?1 AND ino = ?2 ORDER BY updated_at DESC LIMIT 1"
+              WHERE fs = ?1 AND ino = ?2 AND (born IS NULL OR ?3 IS NULL OR born = ?3)
+              ORDER BY updated_at DESC LIMIT 1"
         ),
-        params![dev, ino],
+        params![fs, ino, born],
         row_to_record,
     )
     .optional()
@@ -664,35 +789,20 @@ fn select_records(
     Ok(by_path)
 }
 
-/// Fill in the paths the name lookup missed by device and inode, filed under
-/// the name asked for, so a renamed file keeps its origin.
-///
-/// A downloaded document renamed in another program keeps its origin: the row
-/// still holds the earlier name, and the file is the same file (same device,
-/// same inode). The record found this way is filed under the name that was
-/// asked for, not the stale one it is stored under.
-///
-/// The price, the same the properties dialog pays: on a filesystem that reuses
-/// inode numbers, a deleted download's origin can land on an unrelated new file.
+/// Fill in the paths the name lookup missed by the file's identity (filesystem,
+/// inode, birth), filed under the name asked for, so a renamed file keeps its
+/// origin. Without birth times, a deleted download's origin can land on a new
+/// file that reused its inode.
 fn attach_by_identity(
     conn: &Connection,
     paths: &[String],
     found: &mut HashMap<String, OriginProvenance>,
 ) -> Result<()> {
-    let missing: Vec<&String> = paths
+    let identities: Vec<(&String, (i64, i64, Option<i64>))> = paths
         .iter()
         .filter(|path| !found.contains_key(*path))
         .take(IDENTITY_FALLBACK_LIMIT)
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    let identities: Vec<(&String, i64, i64)> = missing
-        .into_iter()
-        .filter_map(|path| match dev_ino(Path::new(path)) {
-            (Some(dev), Some(ino)) => Some((path, dev, ino)),
-            _ => None,
-        })
+        .filter_map(|path| Some((path, identity_of(Path::new(path))?)))
         .collect();
     if identities.is_empty() {
         return Ok(());
@@ -703,25 +813,24 @@ fn attach_by_identity(
         .join(",");
     let sql = format!(
         "SELECT {RECORD_COLUMNS} FROM file_origin
-          WHERE (dev, ino) IN ({placeholders})"
+          WHERE (fs, ino) IN ({placeholders}) ORDER BY updated_at DESC"
     );
     // ast-grep-ignore: rust-sql-format (only the column constant and "?" placeholders are formatted; every value is bound)
     let mut stmt = conn.prepare(&sql)?;
-    let mut values: Vec<i64> = Vec::with_capacity(identities.len() * 2);
-    for (_, dev, ino) in &identities {
-        values.push(*dev);
-        values.push(*ino);
-    }
-    let records = stmt.query_map(params_from_iter(values.iter()), row_to_record)?;
-    let mut by_identity: HashMap<(i64, i64), OriginRecord> = HashMap::new();
-    for record in records {
-        let record = record?;
-        if let (Some(dev), Some(ino)) = (record.dev, record.ino) {
-            by_identity.insert((dev, ino), record);
-        }
-    }
-    for (path, dev, ino) in identities {
-        if let Some(record) = by_identity.get(&(dev, ino)) {
+    let values: Vec<i64> = identities
+        .iter()
+        .flat_map(|(_, (fs, ino, _))| [*fs, *ino])
+        .collect();
+    let records: Vec<OriginRecord> = stmt
+        .query_map(params_from_iter(values.iter()), row_to_record)?
+        .collect::<rusqlite::Result<_>>()?;
+    for (path, (fs, ino, born)) in identities {
+        let same_file = records.iter().find(|record| {
+            record.fs == Some(fs)
+                && record.ino == Some(ino)
+                && (record.born.is_none() || born.is_none() || record.born == born)
+        });
+        if let Some(record) = same_file {
             found.insert(path.clone(), record.clone().into_provenance());
         }
     }
@@ -733,8 +842,9 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OriginRecord> {
     let confidence: u8 = row.get(4)?;
     Ok(OriginRecord {
         path: row.get(0)?,
-        dev: row.get(1)?,
+        fs: row.get(1)?,
         ino: row.get(2)?,
+        born: row.get(12)?,
         kind: parse_kind(&kind_text),
         confidence: parse_confidence(confidence),
         source_app: row.get(5)?,
@@ -768,17 +878,40 @@ fn parse_confidence(confidence: u8) -> OriginConfidence {
     }
 }
 
-fn ensure_path_under_source(path: &Path) -> Result<()> {
-    if !path.is_absolute() {
-        bail!("origin path must be absolute: {}", path.display());
-    }
-    if crate::settings::sources().owner(path).is_none() {
-        bail!(
-            "origin path is outside configured sources: {}",
-            path.display()
-        );
-    }
-    Ok(())
+/// The key of a file whose origin is recorded: under a source, symlinks
+/// resolved as the catalogue keys it.
+fn key_under_source(path: &Path) -> Result<PathBuf> {
+    crate::settings::sources()
+        .resolved_client_path(path)
+        .with_context(|| {
+            format!(
+                "origin path is relative, holds .. or is outside the configured sources: {}",
+                path.display()
+            )
+        })
+}
+
+/// The record of a download from `domain` at `downloaded_at`.
+fn web_download(path: &Path, domain: &str, downloaded_at: i64) -> Result<OriginRecord> {
+    let path = key_under_source(path)?;
+    Ok(OriginRecord {
+        source_domain: Some(domain.to_string()),
+        first_seen_at: downloaded_at,
+        ..OriginRecord::arrived(
+            &path,
+            OriginKind::WebDownload,
+            OriginConfidence::High,
+            now_secs(),
+        )
+    })
+}
+
+/// The file another one came from: anywhere, a device included, keyed as its
+/// row would be so a move finds it.
+fn spelled_source(path: &Path) -> Result<PathBuf> {
+    crate::settings::sources()
+        .client_row_key(path)
+        .with_context(|| format!("origin source is relative or holds ..: {}", path.display()))
 }
 
 fn app_label(app_id: Option<&str>) -> String {
@@ -791,11 +924,11 @@ fn app_label(app_id: Option<&str>) -> String {
     }
 }
 
-fn dev_ino(path: &Path) -> (Option<i64>, Option<i64>) {
-    std::fs::symlink_metadata(path)
-        .ok()
-        .map(|metadata| (Some(metadata.dev() as i64), Some(metadata.ino() as i64)))
-        .unwrap_or((None, None))
+/// The identity of the file at `path`, link not followed; none when it
+/// cannot be read.
+fn identity_of(path: &Path) -> Option<(i64, i64, Option<i64>)> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    crate::history::identity(path, &metadata).ok()
 }
 
 fn path_key(path: &Path) -> String {
@@ -807,134 +940,4 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn temporary_origin_path(label: &str) -> PathBuf {
-        let dir = crate::test_env::scratch_dir(&format!(
-            "bs-origin-{label}-{}-{}",
-            std::process::id(),
-            now_secs()
-        ));
-        dir.join("origin.sqlite")
-    }
-
-    /// Another writer holding the lock for a while (the watcher set aside by
-    /// the scheduler mid-transaction) delays a writer instead of failing it.
-    /// Opening writes the schema, so it waits too.
-    #[test]
-    fn writer_waits_for_open_transaction() {
-        let db = temporary_origin_path("busy");
-        drop(OriginWriter::open(db.clone()).unwrap());
-        let holder = Connection::open(&db).unwrap();
-        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            holder.execute_batch("COMMIT").unwrap();
-        });
-        let _writer = OriginWriter::open(db.clone()).unwrap();
-        release.join().unwrap();
-        assert!(
-            OriginReader::new(db.clone())
-                .origin(Path::new("/missing"))
-                .is_none()
-        );
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn forget_all_empties_the_database() {
-        let db = temporary_origin_path("forget");
-        let conn = open_writer(&db).unwrap();
-        conn.execute(
-            "INSERT INTO file_origin(path, kind, confidence, label, first_seen_at, updated_at)
-             VALUES ('/a', 'downloaded', 1, 'x', 0, 0)",
-            [],
-        )
-        .unwrap();
-        forget_all(&db).unwrap();
-        let left: i64 = conn
-            .query_row("SELECT count(*) FROM file_origin", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(left, 0);
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn fresh_store_has_no_origin() {
-        let db = temporary_origin_path("schema");
-        let _writer = OriginWriter::open(db.clone()).unwrap();
-        assert!(
-            OriginReader::new(db.clone())
-                .origin(Path::new("/missing"))
-                .is_none()
-        );
-        assert!(db.exists());
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
-    }
-
-    /// The browser's list names a path, not a file: it must not overwrite what
-    /// is known about a file that took a deleted download's name.
-    #[test]
-    fn a_download_never_replaces_another_origin() {
-        let db = temporary_origin_path("kinds");
-        let conn = open_writer(&db).unwrap();
-        let record = |kind, domain: Option<&str>| OriginRecord {
-            path: "/d/report.pdf".to_string(),
-            dev: None,
-            ino: None,
-            kind,
-            confidence: OriginConfidence::High,
-            source_app: None,
-            source_path: None,
-            source_device_id: None,
-            source_device_label: None,
-            source_domain: domain.map(str::to_string),
-            first_seen_at: 1,
-            updated_at: 1,
-        };
-        let stored = || select_record(&conn, "/d/report.pdf").unwrap().unwrap();
-
-        upsert_record(&conn, &record(OriginKind::WebDownload, Some("a.example"))).unwrap();
-        upsert_record(&conn, &record(OriginKind::WebDownload, Some("b.example"))).unwrap();
-        assert_eq!(stored().source_domain.as_deref(), Some("b.example"));
-        upsert_record(&conn, &record(OriginKind::AppCreated, None)).unwrap();
-        upsert_record(&conn, &record(OriginKind::WebDownload, Some("c.example"))).unwrap();
-        assert_eq!(stored().kind, OriginKind::AppCreated);
-        assert_eq!(stored().source_domain, None);
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
-    }
-
-    /// The label is built from the fields when read; the database keeps no
-    /// sentence in any language.
-    #[test]
-    fn label_built_on_read() {
-        let db = temporary_origin_path("label");
-        let conn = open_writer(&db).unwrap();
-        let record = OriginRecord {
-            path: "/d/copy.pdf".to_string(),
-            dev: None,
-            ino: None,
-            kind: OriginKind::RemovableCopy,
-            confidence: OriginConfidence::High,
-            source_app: None,
-            source_path: Some("/media/stick/copy.pdf".to_string()),
-            source_device_id: Some("stick".to_string()),
-            source_device_label: Some("KINGSTON".to_string()),
-            source_domain: None,
-            first_seen_at: 1,
-            updated_at: 1,
-        };
-        upsert_record(&conn, &record).unwrap();
-        let stored: String = conn
-            .query_row("SELECT label FROM file_origin", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(stored, "");
-        let read = select_record(&conn, "/d/copy.pdf").unwrap().unwrap();
-        assert_eq!(read.label(), "Copied from the removable drive KINGSTON");
-        std::fs::remove_dir_all(db.parent().unwrap()).ok();
-    }
 }

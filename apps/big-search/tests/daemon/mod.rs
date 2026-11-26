@@ -30,7 +30,8 @@ pub fn env_cmd(args: &[&str], home: &Path, xdg_storage_home: &Path, run: &Path) 
         .env("HOME", home)
         .env("XDG_DATA_HOME", xdg_storage_home)
         .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", run);
+        .env("XDG_RUNTIME_DIR", run)
+        .env("BIG_SEARCH_KEEP_PRIORITY", "1");
     c
 }
 
@@ -50,8 +51,10 @@ pub fn send_daemon_request(sock: &Path, json: &str) -> String {
     line
 }
 
+/// Whether the daemon bound `sock`. A data folder on disk rather than in
+/// `/tmp` waits on the index's first sync, which a busy disk holds for seconds.
 pub fn wait_socket(sock: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if sock.exists() {
             return true;
@@ -168,6 +171,21 @@ pub fn catalogue_rows(xdg_storage_home: &Path, namespace: &str, dir: &Path) -> i
     .unwrap()
 }
 
+/// The inotify watches process `pid` holds, over all its inotify descriptors,
+/// as the kernel lists them.
+pub fn inotify_watches(pid: u32) -> usize {
+    std::fs::read_dir(format!("/proc/{pid}/fdinfo"))
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .map(|info| {
+            info.lines()
+                .filter(|line| line.starts_with("inotify wd:"))
+                .count()
+        })
+        .sum()
+}
+
 /// Polls `check` for up to 20 s.
 pub fn settles(check: impl Fn() -> bool) -> bool {
     settles_within(Duration::from_secs(20), check)
@@ -232,7 +250,7 @@ impl Sandbox {
             "the run never recorded its folders"
         );
         drop(daemon);
-        std::fs::remove_file(&self.sock).ok();
+        let _ = std::fs::remove_file(&self.sock);
     }
 
     pub fn state_db(&self) -> rusqlite::Result<rusqlite::Connection> {
@@ -296,5 +314,59 @@ impl Sandbox {
     /// wait until the folders made so far are older than the next start.
     pub fn age_folders(&self) {
         sleep(Duration::from_millis(2100));
+    }
+}
+
+/// How long a tree's departure may take to reach every index: the watcher
+/// debounces, and the content side follows in the next backfill pass, which a
+/// busy machine delays (see `await_content_result`).
+pub const SETTLE: Duration = Duration::from_secs(45);
+
+/// Nothing of the tree that was at `old` is left in any index or catalogue.
+pub fn assert_tree_gone(sock: &Path, data: &Path, old: &Path, tree: &str) {
+    assert!(
+        settles_within(SETTLE, || query_paths(sock, "list", "", old).0 == 0),
+        "{tree}: the catalogue still lists {:?}",
+        query_paths(sock, "list", "", old)
+    );
+    assert!(
+        settles_within(SETTLE, || query_paths(sock, "name", tree, old).0 == 0),
+        "{tree}: the name index still holds {:?}",
+        query_paths(sock, "name", tree, old)
+    );
+    let word = format!("{tree}worddeep");
+    assert!(
+        settles_within(SETTLE, || query_paths(sock, "content", &word, old).0 == 0),
+        "{tree}: the content index still answers for the old path"
+    );
+    assert!(
+        settles_within(SETTLE, || catalogue_rows(data, "content", old) == 0),
+        "{tree}: the content catalogue still holds rows under the old path"
+    );
+    assert_eq!(catalogue_rows(data, "name", old), 0);
+}
+
+/// The daemon's reply to `request`.
+pub fn ask(sock: &Path, request: &serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(&send_daemon_request(sock, &request.to_string())).unwrap()
+}
+
+/// A request naming one path.
+pub fn path_cmd(cmd: &str, path: &Path) -> serde_json::Value {
+    serde_json::json!({"v": 2, "cmd": cmd, "path": path})
+}
+
+/// Sends each request and checks its answer: ok for `None`, otherwise an
+/// error whose message holds the text given.
+pub fn assert_answers(sock: &Path, cells: &[(serde_json::Value, Option<&str>)]) {
+    for (request, refusal) in cells {
+        let answer = ask(sock, request);
+        let Some(refusal) = refusal else {
+            assert_eq!(answer["kind"], "ok", "{request}: {answer}");
+            continue;
+        };
+        assert_eq!(answer["kind"], "error", "{request}: {answer}");
+        let message = answer["message"].as_str().unwrap_or_default();
+        assert!(message.contains(refusal), "{request}: {answer}");
     }
 }

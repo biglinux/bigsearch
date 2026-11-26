@@ -27,6 +27,7 @@ quick-xml = { version = "0.42.0", features = ["escape-html"] }
 rusqlite = { version = "0.43.0", default-features = false, features = ["cache"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150" }
+signal-hook = { version = "0.4.6" }
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "isomp4", "mkv", "ogg", "flac", "wav"] }
 # Only the mmap directory and the store's lz4: the default stemmer, stopword
 # lists and columnar zstd (a C library) go unused.
