@@ -211,8 +211,8 @@ const CATALOG_PATH_BATCH: usize = 2048;
 const DEFAULT_CATALOG_CONTENT_BATCH: usize = 1000;
 
 /// Default worker count: 2 on desktop-class machines (the DESIGN.md §6 pool
-/// width), 1 on low-memory or dual-core hardware so extraction never dominates
-/// the machine.
+/// width), 1 on low-memory hardware or two logical CPUs or fewer, so extraction
+/// never dominates the machine.
 pub(crate) fn default_workers() -> usize {
     let cores = std::thread::available_parallelism()
         .map(std::num::NonZero::get)

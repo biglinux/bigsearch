@@ -46,9 +46,10 @@ Measured on one real home folder:
 
 ## 2. Shape
 
-One binary: `big-search daemon` is the service, every other subcommand is a
-client. The core is synchronous: standard threads and channels, no async
-runtime.
+One binary: `big-search daemon` is the service and the search and control
+subcommands are its clients; `reindex`, `count`, `list` and `config` work on
+the files directly. The core is synchronous: standard threads and channels, no
+async runtime.
 
 ```text
  daemon (user service, unprivileged)
@@ -79,15 +80,18 @@ A query never waits for extraction, and indexing yields the CPU to queries
 |---|---|
 | `scan.rs`, `scan_roots.rs` | the walk of visible files; resolving configured roots and top-level symlinks |
 | `watch.rs` | inotify, coalescing, overflow rescans, segment compaction |
-| `content.rs`, `content_dedupe.rs` | the background content pass; reading reflinked copies once |
-| `extract*.rs`, `mime.rs`, `meta.rs` | text, media type and metadata of an untrusted file |
+| `mounts.rs` | which mount holds a path, from `/proc/self/mountinfo`; removable and network sources |
+| `content.rs`, `content_dedupe.rs` | the background content pass; reading reflinked copies once, when enabled |
+| `extract*.rs`, `mime.rs`, `meta.rs`, `prominent.rs` | text, media type and metadata of an untrusted file; the lines it sets as its title |
 | `index.rs`, `nosync_dir.rs`, `cjk_tokenizer.rs` | the two tantivy indexes, their analyzers and directory |
+| `fold.rs`, `simplified_chinese.rs` | case and script folding; Traditional to Simplified Chinese |
 | `query.rs` | name, content and combined search, ranking, page lookup |
 | `catalogue.rs` | the `path -> (mtime, size)` catalogue |
 | `ipc.rs` | the socket server |
 | `throttle.rs` | background priority, the indexer's cgroup, backfill pacing |
 | `history.rs`, `origin.rs`, `browser_downloads.rs` | earlier versions and where a file came from |
 | `settings.rs`, `config.rs` | configuration and XDG paths |
+| `index_cmd.rs`, `config_cmd.rs` | the `daemon` and `reindex` commands, which hold the index writers; the `config` command |
 
 ## 3. Indexes
 
@@ -122,15 +126,18 @@ never the bottleneck, and cost 104 MB of RSS.
 Both indexes and the state store are a cache derived from the filesystem, so
 the daemon never calls `fsync` on the indexes (`nosync_dir.rs`). The worst a
 forced reboot costs is documents whose commits did not reach the disk. Each
-start compares the name index with the catalogue and re-adds the name
-documents the catalogue still lists (`index::repair_deflated_against_state`);
-a stale or missing document whose catalogue row is current, a content document
-included, needs `big-search rebuild`, since a rescan compares the disk with
-the catalogue only. A torn index fails to open and
-`index::open_or_create` recreates it. Measured over ten minutes of near-idle
-churn, tantivy's syncs were 145 calls to write a few kilobytes, and 4.07 GB of
-logical writes landed as 17.9 GB at the block layer. The directory also watches
-`meta.json` with inotify instead of letting tantivy poll it every 500 ms.
+start compares the name index's document count with the catalogue's. A
+deficit of up to 1 % of the catalogue (at least 1000 documents) re-adds the
+missing name documents (`index::repair_deflated_against_state`); a larger
+deficit, or a surplus past 20 % (at least 10,000), recreates the name index and
+clears the catalogue, so the start walks every folder. A stale or missing
+document whose catalogue row is current, a content document included, needs
+`big-search rebuild`, since a rescan compares the disk with the catalogue
+only. A torn index fails to open and `index::open_or_create` recreates it.
+Measured over ten minutes of near-idle churn, tantivy's syncs were 145 calls to
+write a few kilobytes, and 4.07 GB of logical writes landed as 17.9 GB at the
+block layer. The directory also watches `meta.json` with inotify instead of
+letting tantivy poll it every 500 ms.
 
 ### Segments and reads
 
@@ -144,13 +151,14 @@ A cold query pays per segment, about 70 to 100 ms each on a 5400 rpm disk, and
 tantivy's merge policy leaves 7 to 12 segments and never merges a large one for
 its deletes (the daemon's largest segments held a third of dead documents). So
 when a content backfill pass finishes, off battery, each index is merged into
-one segment once a tenth of it changed, and otherwise its small segments are
-joined into one (`watch::compact_when_worth_it`, `index::worth_compacting`). On
-the notebook, over 18,000 simulated edits this wrote less than the default
-policy (334 against 355 MB) and left at most 2 segments instead of 4: cold
-queries took 124 to 374 ms instead of 335 to 655 ms, and 55 to 213 ms right
-after a full merge. On the notebook's own index a full merge took 61 MB to 32 MB
-and cold queries from 743 to 1041 ms down to 42 to 62 ms.
+one segment once a tenth of it changed, and otherwise, with three segments or
+more, its small segments are joined into one (`watch::compact_when_worth_it`,
+`index::worth_compacting`). On the notebook, over 18,000 simulated edits this
+wrote less than the default policy (334 against 355 MB) and left at most 2
+segments instead of 4: cold queries took 124 to 374 ms instead of 335 to 655
+ms, and 55 to 213 ms right after a full merge. On the notebook's own index a
+full merge took 61 MB to 32 MB and cold queries from 743 to 1041 ms down to 42
+to 62 ms.
 
 SQLite FTS5, measured on the same machine and corpus, was 7 to 65x slower on
 common terms with a warm cache, slower to build and larger, so the engine is
@@ -188,8 +196,9 @@ cost nothing measurable cold ("zz relatorio" 1013 ms against "relatorio zz"
 1019 ms, both dominated by opening the indexes).
 
 Every word also matches its plural or singular by suffix rules on folded words
-(`query::inflections`: Portuguese and Spanish -ões, -ais, -eis, -ns, -res, -zes
-and -s; English -es after x, ch and sh), ranked below the word as typed.
+of four letters or more (`query::inflections`: Portuguese and Spanish -ões,
+-ães, -ãos, -ais, -eis, -óis, -uis, -ns, -res, -zes, -ses and -s; English -es
+after x, ch and sh), ranked below the word as typed.
 Snowball was measured on this index's own 5.5-million-term vocabulary first:
 on folded words it joined none of 670 -ões, 421 -ais, 261 -eis and 194 -ns
 pairs to their singulars, merged "casa" with "caso", "casado" and "case", and
@@ -258,13 +267,13 @@ test 3 % larger.
 
 Traditional Chinese characters are folded to their simplified forms
 (`simplified_chinese.rs`: 3079 pairs from ICU's `Traditional-Simplified`
-transform taken one character at a time, under the Unicode License v3 notice
-the file carries), so "会议记录" finds "會議記錄" and back, in names and content.
-A character table needs no dictionary: zh_CN and zh_TW message pairs that differ
-only in characters are all found across scripts, none without it. Pairs whose
-words differ by region (文档/文件, 打印/列印, 音频/音訊) are found 24 % of the time
-(9 % without); joining those needs a phrase list, which this does not attempt.
-Japanese results are unaffected.
+transform taken one character at a time, under the Unicode License v3 in
+`LICENSES/Unicode-3.0.txt`), so "会议记录" finds "會議記錄" and back, in names
+and content. A character table needs no dictionary: zh_CN and zh_TW message
+pairs that differ only in characters are all found across scripts, none
+without it. Pairs whose words differ by region (文档/文件, 打印/列印,
+音频/音訊) are found 24 % of the time (9 % without); joining those needs a
+phrase list, which this does not attempt. Japanese results are unaffected.
 
 ### Memory and build
 
@@ -307,10 +316,12 @@ nothing above it is tested: a `.gitignore` above a source speaks only for what
 lies below it. The walk reads each folder's files once on the way down; the
 watcher reads them only for a path new to the catalogue. The global excludes
 file is read once per run, as the effective rules are.
-Symlinks are never followed during the walk; a symlinked folder at the top of a
-root is resolved into a root of its own by `scan_roots::resolve_roots` according
-to the symlink policy, and network mounts, virtual mounts and operating-system
-trees are rejected as roots. The walk runs at background priority (section 7).
+Symlinks are never followed during the walk. With `follow_symlinks` on (off by
+default), a symlinked folder at the top of a root is resolved into a root of
+its own by `scan_roots::resolve_roots_with_policy`: a target on anything but a
+known local filesystem is skipped, and under the default `personal-local`
+policy so are operating-system trees. The walk runs at background priority
+(section 7).
 
 ## 5. Watch
 
@@ -338,15 +349,17 @@ hidden and gitignored churn never wakes the daemon.
 
 ## 6. Extraction
 
-The content pass runs a small pool of extraction workers: 2, or 1 on a
-low-memory or dual-core machine (`content::default_workers`;
+The content pass runs a small pool of extraction workers: 2, or 1 when the
+service may use less than 6 GiB of memory or the machine has two logical CPUs
+or fewer (`content::default_workers`;
 `BIG_SEARCH_CONTENT_WORKERS` overrides it, up to 4). Workers extract
 concurrently and a single writer applies the results through a bounded channel,
 so workers block when the writer falls behind. A changed file is left alone for
 `content_cooldown_secs` (900 s by default) before its text is read again, so a
 document being edited is not re-read on every save. Files whose `(mtime, size)`
-match the state store are never read again, and reflinked copies sharing the
-same physical extents are read once (`content_dedupe.rs`).
+match the state store are never read again. With `BIG_SEARCH_DEDUP_CONTENT`
+set (off by default), reflinked copies sharing the same physical extents are
+read once (`content_dedupe.rs`).
 
 | Format | Method |
 |---|---|
@@ -357,7 +370,7 @@ same physical extents are read once (`content_dedupe.rs`).
 | EPUB | container, package and spine chapters, read as HTML |
 | `eml` | headers and the plain or HTML body: MIME parts, base64, quoted-printable, RFC 2047 (`extract_mail.rs`) |
 | RTF | control words, `\'hh` and `\u` escapes, skipped destinations (`extract_rtf.rs`) |
-| `doc` (OLE2) | `antiword` subprocess; an RTF file saved as `.doc` goes to the RTF reader |
+| `doc` | refused past `office_max_mb`; OLE2 through the `antiword` subprocess, an RTF file saved as `.doc` through the RTF reader, plain text as text |
 
 Every indexed file is untrusted input. Subprocesses get argv arrays, never a
 shell, a null stdin and a capped stdout, with `RLIMIT_AS`, a CPU-time limit and
@@ -368,7 +381,8 @@ are refused past `office_max_mb` (0 chooses 64 or 256 MiB by machine), 4096
 entries or 512 slides or sheets; each part's decompressed size is capped,
 and so is the markup read from one archive (four extraction caps).
 Plain text and PDF have optional size limits (`text_max_mb`, `pdf_max_mb`, 0 by
-default) and PDF a deadline (`pdf_timeout_secs`, 5 s).
+default), and PDF and Word documents a time budget (`pdf_timeout_secs`, 5 s of
+work; section 7).
 
 ### PDF through `pdftotext`
 
@@ -595,16 +609,19 @@ a 64 MiB mmap window.
 
 Peak memory does not grow with the catalogue:
 
-- A reconcile (`scan::sync`, overflow and rebuild) records the paths it sees in
-  a temporary `current_scan_seen` `WITHOUT ROWID` table as the walker emits
-  them, flushing pending state changes every 2048 rows.
-- Stale paths are selected with `NOT EXISTS` against that table in ordered
-  2048-row pages, so deletion never holds the whole stale set.
+- A reconcile (`scan::sync`, overflow and rebuild) records the paths the
+  walker emits in a temporary `current_scan_seen` `WITHOUT ROWID` table.
+- That table and the catalogue are then read side by side in path order, 2048
+  rows at a time (`State::scan_changes_after`). The merge yields each new,
+  changed and gone path, so deletion never holds the whole stale set, and
+  pending state changes are flushed every 2048 rows.
 - The roots of offline removable and network sources are marked seen before
-  the stale pass, so an unplugged device keeps its catalogue.
-- The content backfill streams the name catalogue (`paths_after`) and picks a
-  batch bounded by count and by estimated bytes to read, so expensive PDFs and
-  office files cannot take over the memory.
+  that comparison, so an unplugged device keeps its catalogue.
+- The content backfill picks each batch with one SQL join of the name and
+  content catalogues, resumed from a cursor
+  (`content::pending_catalog_batch_after`) and bounded by count and by
+  estimated bytes to read, so expensive PDFs and office files cannot take over
+  the memory.
 - `big-search count` without `--under` reads tantivy's document count.
 - PDF page lookup uses the same capped `pdftotext` reader as indexing.
 
@@ -649,7 +666,7 @@ or `0`, `false`, `no` or `off`, in any case; any other value is ignored.
 | `BIG_SEARCH_ORIGIN`, `BIG_SEARCH_ORIGIN_WATCH`, `BIG_SEARCH_ORIGIN_BROWSER_HISTORY` | `[origin]` `enabled` (and the watch it starts), `browser_history` |
 | `BIG_SEARCH_ORIGIN_XATTR`, `BIG_SEARCH_ORIGIN_QUERY`, `BIG_SEARCH_ORIGIN_MAX_BATCH` | origin from extended attributes, origin in query results, origin paths gathered before a write |
 | `BIG_SEARCH_META_SNIFF`, `_AUDIO`, `_VIDEO`, `_IMAGE`, `BIG_SEARCH_META_MAX_MB` | metadata by content type and its read cap (`meta.rs`) |
-| `BIG_SEARCH_CONTENT_WORKERS`, `BIG_SEARCH_DEDUP_CONTENT` | extraction workers (up to 4), reading reflinked copies once |
+| `BIG_SEARCH_CONTENT_WORKERS`, `BIG_SEARCH_DEDUP_CONTENT` | extraction workers (up to 4), reading reflinked copies once (off by default) |
 | `BIG_SEARCH_BACKGROUND_WRITER_MB`, `BIG_SEARCH_BULK_WRITER_MB`, `BIG_SEARCH_CONTENT_WRITER_MB` | tantivy writer memory |
 | `BIG_SEARCH_BENCH` | prints timings from `reindex` |
 
