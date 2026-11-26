@@ -225,7 +225,7 @@ pub(crate) fn default_workers() -> usize {
     )
 }
 
-/// One worker on a small machine, two otherwise; a request of 1 to 4 wins.
+/// One worker on a small machine, two otherwise; a request wins, up to 4.
 fn pool_width(cores: usize, low_memory: bool, requested: Option<&str>) -> usize {
     let default = if low_memory || cores <= 2 { 1 } else { 2 };
     requested

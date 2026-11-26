@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 /// regardless of whether a dir is a git repo. Users extend/override these in
 /// `~/.config/big-search/ignore` (gitignore syntax; `!pattern` re-includes).
 pub(super) const DEFAULT_IGNORE: &str = "\
-# big-search default ignores — edit ~/.config/big-search/ignore to customize.
+# big-search default ignores: edit ~/.config/big-search/ignore to customize.
 target/
 **/target/**
 node_modules/
@@ -66,27 +66,27 @@ pnpm-lock.yaml
 
 /// Documented per-user ignore file, seeded once at `~/.config/big-search/ignore`
 /// so the customization point is discoverable and self-explaining. Commented out
-/// by default → no extra excludes until the user opts in.
+/// by default, so it adds no excludes until the user opts in.
 const USER_IGNORE_TEMPLATE: &str = "\
-# big-search — your personal ignore list (gitignore syntax).
+# big-search: your personal ignore list (gitignore syntax).
 #
-# These patterns are added ON TOP of the built-in ignores (build artifacts like
+# These patterns are added on top of the built-in ignores (build artifacts like
 # target/, node_modules/, *.lock and all hidden dot-files are already skipped).
-# Re-read on the next reindex / daemon start. Edit freely — big-search never
+# Re-read on the next reindex or service start. Edit freely: big-search never
 # overwrites this file.
 #
 # Syntax (same as .gitignore):
 #   foo/         skip every directory named foo, anywhere
-#   /foo/        skip foo only at a scan-root top level
+#   /foo/        skip foo only at the top of a source
 #   *.bak        skip files by glob
 #   !keep.bak    re-include something a previous rule excluded
 #
-# IMPORTANT: excluding a directory also hides the files inside it from name
+# Excluding a directory also hides the files inside it from name
 # search. Exclude only trees whose contents you never look for (caches,
-# extracted container images, old build/working dirs) — not folders whose files
-# you still want to find (your VMs, ROMs, ISOs and documents stay findable).
+# extracted container images, old build or working folders), not folders whose
+# files you still want to find (your VMs, ROMs, ISOs and documents stay findable).
 #
-# Examples — uncomment / adapt:
+# Examples to uncomment or adapt:
 # *.iso              # don't index ISO images
 # github/            # skip cloned source repos
 # Caches/

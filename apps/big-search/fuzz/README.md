@@ -20,7 +20,7 @@ cargo +nightly fuzz run docinfo_text -- -max_total_time=300
 
 | Target | Exercises |
 |--------|-----------|
-| `xml_text`   | `extract::xml_text` and `extract::xml_text_lines`: the quick-xml character-data walks |
+| `xml_text`   | `extract::xml_text_lines`: the quick-xml character-data walk |
 | `office_zip` | `extract::office_text_from_reader`: zip parsing, entry selection and the XML walk, with arbitrary bytes as the archive (the main hostile-document path) |
 | `text_bytes` | `extract::text_from_bytes`: NUL/binary rejection and lossy UTF-8 decoding |
 | `mail_bytes` | `extract::mail_text`: an `.eml` message with MIME parts, base64, quoted-printable and encoded headers |

@@ -42,7 +42,7 @@ pub(super) struct ContentBackfill {
     /// batch left.
     pass_deferred: usize,
     pass_busy: usize,
-    /// Some file this pass was read or refused rather than left busy.
+    /// This pass read or refused at least one file rather than leaving it busy.
     pass_settled_any: bool,
     /// Passes in a row that left files busy and settled none; each one doubles
     /// the wait before the next.

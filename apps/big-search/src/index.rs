@@ -16,9 +16,8 @@ use tantivy::tokenizer::{
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
 /// Registered analyzer for the `name` field: `NameGrams` of [`name_text`].
-/// Its name changes with what it emits (last: `name_grams`, before NFKC and
-/// single CJK characters), so the on-disk schema differs and the name index
-/// rebuilds.
+/// Its name changes with what it emits, so the on-disk schema differs and
+/// the name index rebuilds. A retired name, never to be used again: `name_grams`.
 pub const NGRAM: &str = "name_nfkc";
 /// Registered analyzer for the `body` field: CJK-bigram aware with every CJK
 /// character alone too, word-splitting otherwise, folded like names
@@ -30,7 +29,7 @@ pub const NGRAM: &str = "name_nfkc";
 pub const BODY: &str = "body_readable";
 /// The analyzer content queries go through: [`BODY`] without the single
 /// characters of a CJK run (see [`CjkFriendlyTokenizer`]).
-pub const BODY_QUERY: &str = "body_nfkc_query";
+pub const BODY_QUERY: &str = "body_query";
 const DEFAULT_BACKGROUND_WRITER_MEMORY_MB: usize = 15;
 const DEFAULT_BULK_WRITER_MEMORY_MB: usize = 32;
 const MIN_WRITER_MEMORY_MB: usize = 15;

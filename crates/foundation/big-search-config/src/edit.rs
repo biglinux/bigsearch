@@ -458,7 +458,6 @@ pub(crate) fn write_atomically(
     written
 }
 
-/// Set keys inside `table`, adding the table itself when the file has none.
 /// Set `values` in `table`, kept only when the file then reads with exactly
 /// those values there and nothing else changed; values it holds already leave
 /// the file as it was.
@@ -498,6 +497,7 @@ fn literal_value(literal: &str) -> io::Result<toml::Value> {
         })
 }
 
+/// Set keys inside `table`, adding the table itself when the file has none.
 pub(crate) fn set_in_table(lines: &mut Vec<String>, table: &str, values: &[(&str, &str)]) {
     let start = match lines
         .iter()

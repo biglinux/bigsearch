@@ -697,9 +697,10 @@ fn moved_folder_linked(matrix: &PathMatrix) {
     assert_eq!(matrix.ids("moved"), listed);
 }
 
-/// Requests that read the disk follow a link and stay inside the source. A restore through a link put in place of a folder that
-/// has versions would write that folder's file over the one linked in, so it
-/// is refused with the file it leads to named.
+/// Requests that read the disk follow a link and stay inside the source. A
+/// restore through a link put in place of a folder that has versions would
+/// write that folder's file over the one linked in, so it is refused with the
+/// file it leads to named.
 fn disk_requests(matrix: &PathMatrix) {
     let docs = &matrix.docs;
     let file = |folder: &str| matrix.file(folder);

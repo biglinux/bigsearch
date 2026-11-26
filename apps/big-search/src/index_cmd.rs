@@ -1,6 +1,5 @@
 //! The `reindex` and `daemon` subcommands: the two that hold the index
-//! writers and the daemon lock. A child module of the crate root, so
-//! `use super::*` supplies the shared imports and the library modules.
+//! writers and the daemon lock.
 
 use super::*;
 
@@ -25,9 +24,6 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
     throttle::lower_priority();
     settings::seed_config_template();
     scan::seed_user_ignore();
-    let mut index = index::open_or_create(&config::index_dir())?;
-    let mut content_index = index::open_content_or_create(&config::content_index_dir())?;
-    scan::write_effective_ignore()?;
     // The daemon's folder list does not follow this walk; its next start walks.
     // The first state write, so a database that will not open refuses the
     // reindex before any index is touched.
@@ -35,6 +31,9 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
         &config::state_db_path(),
         catalogue::WATCH_NAMESPACE,
     )?)?;
+    let mut index = index::open_or_create(&config::index_dir())?;
+    let mut content_index = index::open_content_or_create(&config::content_index_dir())?;
+    scan::write_effective_ignore()?;
 
     let (scan_roots, mut state, rebuild_content_from_state) = if explicit_roots.is_empty() {
         reconcile_plan(&mut index, &mut content_index)?

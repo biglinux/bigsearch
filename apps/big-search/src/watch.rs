@@ -241,8 +241,8 @@ pub struct Inotify {
     heard: Arc<Heard>,
 }
 
-/// Start inotify for the sources `roots`; each event heard wakes the watcher
-/// loop through `wake`. notify's reader thread takes its caller's policy, nice
+/// Start inotify for the sources `roots`; the first event heard after the
+/// watcher loop takes a batch wakes it through `wake`. notify's reader thread takes its caller's policy, nice
 /// value and cgroup: the daemon calls this through
 /// [`crate::throttle::spawn_lowered`].
 ///
@@ -523,7 +523,11 @@ impl WatchLoop<'_> {
         let key = crate::settings::sources()
             .resolved_client_path(&path)
             .filter(|key| self.roots.iter().any(|root| key.starts_with(root)));
-        let Some(path) = key.filter(|_| !self.runtime.paused.load(Ordering::Relaxed)) else {
+        if self.runtime.paused.load(Ordering::Relaxed) {
+            log::warn!("reindex of {} refused: indexing is paused", path.display());
+            return Ok(());
+        }
+        let Some(path) = key else {
             log::warn!("reindex of {} refused: outside the roots", path.display());
             return Ok(());
         };

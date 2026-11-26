@@ -41,7 +41,7 @@ fn compacts_after_a_tenth_changes() {
     assert!(worth_compacting(&[(1000, 120), (120, 0)]));
     assert!(worth_compacting(&[(1000, 100)]));
     assert!(worth_compacting(&[(1000, 0), (70, 0), (50, 0)]));
-    // The daemon's own name index before the change: 1 of 3 documents dead.
+    // A name index measured on a desktop: 1 of 3 documents dead.
     assert!(worth_compacting(&[
         (102_746, 34_296),
         (18_215, 851),

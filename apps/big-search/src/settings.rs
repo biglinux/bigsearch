@@ -236,7 +236,7 @@ pub fn is_available(source: &Source) -> bool {
         .unwrap_or(false)
 }
 
-/// The configured sources available now, in configuration order.
+/// The configured sources available now, longest path first, as loaded.
 pub fn available_sources() -> Vec<&'static Source> {
     sources().all().iter().filter(|s| is_available(s)).collect()
 }

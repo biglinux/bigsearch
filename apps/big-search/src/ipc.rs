@@ -23,7 +23,8 @@ pub struct Control {
     pub paused: Arc<AtomicBool>,
     pub activity: Arc<AtomicU8>,
     /// Files whose content extraction is deferred by the edit cooldown or by
-    /// another process holding them busy; exposed on query/status replies so UIs can show a "content still indexing" hint.
+    /// another process holding them busy; query and status replies carry it
+    /// so a client can say content is still being indexed.
     pub pending_content: Arc<AtomicU64>,
     /// Folders the watcher could not watch.
     pub unwatched_dirs: Arc<AtomicU64>,
@@ -565,9 +566,9 @@ fn versions_reply(
     }
 }
 
-/// The keys a client path may have versions under, in order: as spelled, since
-/// a stored key was a real path when kept and a symlink put in its place since
-/// leads to another document; then resolved inside a source, as
+/// The keys a client path may have versions under, in order: as spelled (a
+/// stored key was a real path when kept, and a symlink put in its place later
+/// leads to another document), then resolved inside a source, as
 /// [`save_version_reply`] keys it. `None` when relative or holding `..`.
 fn version_spellings(path: &str) -> Option<Vec<PathBuf>> {
     let spelled = settings::normalized_client_path(Path::new(path))?;

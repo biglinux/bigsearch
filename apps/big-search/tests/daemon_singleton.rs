@@ -66,7 +66,7 @@ fn wait_for_refusal(child: &mut Child) -> ExitStatus {
         }
         if Instant::now() > deadline {
             let _ = child.kill();
-            panic!("second daemon did not exit — it should refuse the singleton lock");
+            panic!("second daemon did not exit: it should refuse the singleton lock");
         }
         sleep(Duration::from_millis(50));
     }

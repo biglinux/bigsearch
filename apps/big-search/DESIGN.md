@@ -465,8 +465,8 @@ the thread policies still apply.
 
 So indexing yields to the daemon's own queries, and the unit as a whole,
 indexing included, competes with other programs at its normal CPU weight. A
-lower unit weight costs the searches more than it gives back. Measured on a
-4-core notebook with 8 CPU loops in another unit and 20,000 new files to index:
+lower unit weight costs the searches more than it gives back. Measured on the
+notebook with 8 CPU loops in another unit and 20,000 new files to index:
 
 | Unit weight | Indexed in | Search median, max |
 |---|---|---|
@@ -656,7 +656,8 @@ or `0`, `false`, `no` or `off`, in any case; any other value is ignored.
 Debug builds and tests also read `BIG_SEARCH_CATALOG_CONTENT_BATCH`,
 `BIG_SEARCH_DAEMON_CONTENT_BATCH`, `BIG_SEARCH_DAEMON_CONTENT_BATCH_MB`,
 `BIG_SEARCH_DAEMON_CONTENT_IDLE_MS` and `BIG_SEARCH_SAVED_START_CHECK_MS`,
-which shrink batches and waits; a release build ignores them.
+which shrink batches and waits, and `BIG_SEARCH_KEEP_PRIORITY`, which keeps
+the indexer at normal priority; a release build ignores them.
 
 ## 10. Dependencies
 

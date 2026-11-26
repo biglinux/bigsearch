@@ -205,7 +205,7 @@ fn listed_entries(dir: &Path, watches: &mut Watches) -> Option<HashSet<PathBuf>>
 /// entries; a new folder among them is walked whole, a vanished one leaves
 /// with its tree. A replaced folder leaves with its tree, and what took its
 /// place is indexed: a folder walked whole. A file rewritten in place changes
-/// no folder and waits for `big-search rescan`.
+/// no folder and waits for the walk a minute after the start.
 pub(super) fn catch_up_at_start(
     writer: &mut Option<IndexWriter>,
     f: &Fields,
