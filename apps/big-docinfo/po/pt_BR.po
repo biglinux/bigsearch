@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: big-docinfo\n"
 "Report-Msgid-Bugs-To: https://github.com/biglinux/bigsearch/issues\n"
-"POT-Creation-Date: 2026-11-22 21:23-0300\n"
+"POT-Creation-Date: 2026-11-24 13:14-0300\n"
 "PO-Revision-Date: 2026-11-22 18:00-0300\n"
 "Last-Translator: BigLinux <https://github.com/biglinux>\n"
 "Language-Team: BigLinux <https://github.com/biglinux>\n"
@@ -18,6 +18,18 @@ msgid "This name has characters a file name cannot hold. Choose another name."
 msgstr ""
 "Esse nome tem caracteres que um nome de arquivo não aceita. Escolha outro "
 "nome."
+
+#: src/main.rs
+msgid "This file is no longer there: it was moved or deleted."
+msgstr "Este arquivo não está mais lá: foi movido ou excluído."
+
+#: src/main.rs
+msgid "You do not have permission to read this file."
+msgstr "Você não tem permissão para ler este arquivo."
+
+#: src/main.rs
+msgid "This file could not be read."
+msgstr "Não foi possível ler este arquivo."
 
 #: src/main.rs
 msgid ""

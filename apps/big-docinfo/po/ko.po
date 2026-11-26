@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: big-docinfo\n"
 "Report-Msgid-Bugs-To: https://github.com/biglinux/bigsearch/issues\n"
-"POT-Creation-Date: 2026-11-22 21:23-0300\n"
+"POT-Creation-Date: 2026-11-24 13:14-0300\n"
 "PO-Revision-Date: 2026-11-22 18:00-0300\n"
 "Last-Translator: BigLinux <https://github.com/biglinux>\n"
 "Language-Team: BigLinux <https://github.com/biglinux>\n"
@@ -17,6 +17,18 @@ msgstr ""
 msgid "This name has characters a file name cannot hold. Choose another name."
 msgstr ""
 "이 이름에는 파일 이름에 쓸 수 없는 문자가 있습니다. 다른 이름을 선택하십시오."
+
+#: src/main.rs
+msgid "This file is no longer there: it was moved or deleted."
+msgstr "이 파일은 더 이상 그 자리에 없습니다. 이동되었거나 삭제되었습니다."
+
+#: src/main.rs
+msgid "You do not have permission to read this file."
+msgstr "이 파일을 읽을 권한이 없습니다."
+
+#: src/main.rs
+msgid "This file could not be read."
+msgstr "이 파일을 읽을 수 없습니다."
 
 #: src/main.rs
 msgid ""
