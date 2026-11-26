@@ -1,0 +1,204 @@
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: big-docinfo\n"
+"Report-Msgid-Bugs-To: https://github.com/biglinux/bigsearch/issues\n"
+"POT-Creation-Date: 2026-11-24 13:14-0300\n"
+"PO-Revision-Date: 2026-11-22 18:00-0300\n"
+"Last-Translator: BigLinux <https://github.com/biglinux>\n"
+"Language-Team: BigLinux <https://github.com/biglinux>\n"
+"Language: ko\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: src/main.rs
+msgid "This name has characters a file name cannot hold. Choose another name."
+msgstr ""
+"이 이름에는 파일 이름에 쓸 수 없는 문자가 있습니다. 다른 이름을 선택하십시오."
+
+#: src/main.rs
+msgid "This file is no longer there: it was moved or deleted."
+msgstr "이 파일은 더 이상 그 자리에 없습니다. 이동되었거나 삭제되었습니다."
+
+#: src/main.rs
+msgid "You do not have permission to read this file."
+msgstr "이 파일을 읽을 권한이 없습니다."
+
+#: src/main.rs
+msgid "This file could not be read."
+msgstr "이 파일을 읽을 수 없습니다."
+
+#: src/main.rs
+msgid ""
+"This file has no readable text: its type is not supported, or it is a "
+"scanned PDF."
+msgstr ""
+"이 파일에는 읽을 수 있는 텍스트가 없습니다. 지원하지 않는 형식이거나 스캔한 "
+"PDF입니다."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Kind"
+msgstr "종류"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Date"
+msgstr "날짜"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Entity"
+msgstr "발행처"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Title"
+msgstr "제목"
+
+#: src/main.rs
+msgid "No kind or title found in this document; the current name stays."
+msgstr "이 문서에서 종류나 제목을 찾지 못했습니다. 현재 이름을 유지합니다."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Name"
+msgstr "이름"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Invoice"
+msgstr "세금 계산서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Receipt"
+msgstr "영수증"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Bill or payment slip"
+msgstr "청구서 또는 납부서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Statement"
+msgstr "거래 내역서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Contract"
+msgstr "계약서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Minutes"
+msgstr "회의록"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Law, decree or ordinance"
+msgstr "법령 또는 고시"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Public notice"
+msgstr "공고"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Opinion or expert report"
+msgstr "의견서 또는 감정서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Report"
+msgstr "보고서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Official letter or letter"
+msgstr "공문 또는 편지"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Email"
+msgstr "이메일"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Declaration or certificate"
+msgstr "신고서 또는 증명서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Résumé"
+msgstr "이력서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Manual"
+msgstr "설명서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Article"
+msgstr "기사"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Quote"
+msgstr "견적서"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Notes"
+msgstr "메모"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Health document"
+msgstr "의료 문서"
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid "“{name}” cannot be a file name. Use a name without slashes."
+msgstr ""
+"“{name}”은(는) 파일 이름으로 쓸 수 없습니다. 슬래시가 없는 이름을 사용하십시"
+"오."
+
+#: src/main.rs
+msgid "This name is too long. Use a shorter name."
+msgstr "이름이 너무 깁니다. 더 짧은 이름을 사용하십시오."
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid ""
+"A file named “{name}” already exists in this folder. Choose another name."
+msgstr "이 폴더에 “{name}” 파일이 이미 있습니다. 다른 이름을 선택하십시오."
+
+#: src/main.rs
+msgid ""
+"This disk cannot rename without risking another file. Rename it in the file "
+"manager."
+msgstr ""
+"이 디스크에서는 다른 파일을 지울 위험 없이 이름을 바꿀 수 없습니다. 파일 관리"
+"자에서 이름을 바꾸십시오."
+
+#. Translators: keep {error} as written; the system fills in why.
+#: src/main.rs
+#, rust-format
+msgid "Could not rename: {error}."
+msgstr "이름을 바꾸지 못했습니다: {error}."
+
+#: packaging/suggest-name
+msgid "Suggest a name"
+msgstr "이름 제안"
+
+#: packaging/big-docinfo.desktop
+msgid "Suggest a name…"
+msgstr "이름 제안…"

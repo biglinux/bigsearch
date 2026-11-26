@@ -10,7 +10,6 @@
 //! one lock for the whole crate, because a per-module lock only serializes that
 //! module and the modules collide with each other.
 use std::ffi::OsString;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -50,12 +49,48 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// An empty directory in `/tmp` for a test whose files are judged by their
-/// ancestors: the scan refuses a path under a dot-directory, a git work tree's
-/// ignored files or a build directory, and `TMPDIR` can be any of those
-/// (`~/.cache/…`, a repository's `target/`).
-pub fn scratch_dir(name: &str) -> PathBuf {
-    let dir = PathBuf::from(format!("/tmp/{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    dir
+#[path = "../tests/scratch/mod.rs"]
+mod scratch;
+pub use scratch::{ScratchDir, runs_as_root, scratch_dir};
+
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "coreutils makes the FIFO, outside this crate"
+)]
+pub fn make_fifo(path: &std::path::Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo {}", path.display());
+}
+
+/// A child process holding a write lease on `path` (as a Samba oplock or an NFS
+/// delegation does) that ignores the break signal; kill and wait it to release.
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the lease holder is a Python child: taking a lease in-process needs unsafe fcntl"
+)]
+pub fn hold_write_lease(path: &std::path::Path) -> std::process::Child {
+    use std::io::BufRead as _;
+    const HOLD_LEASE: &str = "import fcntl, os, signal, sys
+signal.signal(signal.SIGIO, signal.SIG_IGN)
+fcntl.fcntl(os.open(sys.argv[1], os.O_RDWR), fcntl.F_SETLEASE, fcntl.F_WRLCK)
+print('leased', flush=True)
+sys.stdin.read()";
+    let mut holder = std::process::Command::new("python3")
+        .args(["-I", "-c", HOLD_LEASE])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "leased\n", "the holder could not take the lease");
+    holder
 }

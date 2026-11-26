@@ -5,7 +5,7 @@
 //! the worker in `super::worker` enforces the budget and gives space back
 //! during housekeeping.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::params;
 
 use super::store::now_secs;
@@ -50,8 +50,7 @@ impl History {
             .query_map(params![file_id], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
-            .flatten()
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         let oldest_index = rows.len().saturating_sub(1);
 
         for (index, (id, saved_at, object, reason)) in rows.into_iter().enumerate() {
@@ -109,18 +108,18 @@ impl History {
                   GROUP BY v.file_id HAVING SUM(v.size) > ?1"
             ))?
             .query_map(params![share as i64], |row| row.get::<_, i64>(0))?
-            .flatten()
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         let mut dropped = Vec::new();
         for file_id in hogs {
-            dropped.extend(
-                conn.prepare(
+            for row in conn
+                .prepare(
                     "SELECT id, object FROM versions WHERE file_id = ?1
                       ORDER BY saved_at DESC, id DESC LIMIT -1 OFFSET 3",
                 )?
                 .query_map(params![file_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .flatten(),
-            );
+            {
+                dropped.push(row?);
+            }
         }
         Ok(dropped)
     }
@@ -134,7 +133,7 @@ impl History {
         if total <= self.budget_bytes {
             return Ok(Vec::new());
         }
-        self.oldest_versions_totalling(total - self.budget_bytes)
+        self.oldest_versions_totaling(total - self.budget_bytes)
     }
 
     pub(super) fn all_object_names(&self) -> Result<Vec<String>> {
@@ -144,8 +143,7 @@ impl History {
         Ok(conn
             .prepare("SELECT object FROM versions")?
             .query_map([], |row| row.get::<_, String>(0))?
-            .flatten()
-            .collect())
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     /// What the store actually costs, in bytes.
@@ -169,7 +167,7 @@ impl History {
 
     /// The oldest superseded versions, enough of them to cover `bytes`, in one
     /// query rather than a full-table sum per version evicted.
-    pub(super) fn oldest_versions_totalling(&self, bytes: u64) -> Result<Vec<(i64, String)>> {
+    pub(super) fn oldest_versions_totaling(&self, bytes: u64) -> Result<Vec<(i64, String)>> {
         let Some(conn) = &self.conn else {
             return Ok(Vec::new());
         };
@@ -186,8 +184,8 @@ impl History {
         })?;
         let mut chosen = Vec::new();
         let mut covered = 0u64;
-        for row in rows.flatten() {
-            let (id, object, size) = row;
+        for row in rows {
+            let (id, object, size) = row?;
             chosen.push((id, object));
             covered = covered.saturating_add(size.max(0) as u64);
             if covered >= bytes {
@@ -212,40 +210,45 @@ impl History {
     /// Throw away objects nobody claims and rows whose object is gone.
     ///
     /// A crash between the clone and the row leaves a file holding disk space
-    /// that nothing else would ever free.
-    pub fn sweep_orphans(&mut self) -> Result<()> {
-        if self.conn.is_none() {
-            return Ok(());
-        }
-        // A set: the walk below asks "is this object known" once per file.
-        let known: std::collections::HashSet<String> =
-            self.all_object_names()?.into_iter().collect();
-        let missing_rows: Vec<&String> = known
-            .iter()
-            .filter(|name| !self.objects.join(name).exists())
-            .collect();
-        if let Some(conn) = &self.conn {
-            for name in &missing_rows {
-                conn.execute("DELETE FROM versions WHERE object = ?1", params![name])?;
-            }
-        }
-        let Ok(entries) = std::fs::read_dir(&self.objects) else {
+    /// that nothing else would ever free. The shards' listings answer both
+    /// questions: a lookup per version costs seconds of a cold disk at every
+    /// start. A shard that cannot be listed stops the sweep, since its versions
+    /// would otherwise read as gone.
+    pub(crate) fn sweep_orphans(&mut self) -> Result<()> {
+        let Some(conn) = &self.conn else {
             return Ok(());
         };
-        for shard in entries.flatten() {
-            let Ok(files) = std::fs::read_dir(shard.path()) else {
+        let mut known: std::collections::HashSet<String> =
+            self.all_object_names()?.into_iter().collect();
+        let shards = match std::fs::read_dir(&self.objects) {
+            Ok(shards) => Some(shards),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("list {}", self.objects.display()));
+            }
+        };
+        for shard in shards.into_iter().flatten() {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
                 continue;
-            };
-            for object in files.flatten() {
+            }
+            let objects = std::fs::read_dir(shard.path())
+                .with_context(|| format!("list {}", shard.path().display()))?;
+            for object in objects {
+                let object = object?;
                 let name = format!(
                     "{}/{}",
                     shard.file_name().to_string_lossy(),
                     object.file_name().to_string_lossy()
                 );
-                if !known.contains(name.as_str()) {
+                if !known.remove(&name) {
                     let _ = std::fs::remove_file(object.path());
                 }
             }
+        }
+        // What is left has no object on disk.
+        for name in &known {
+            conn.execute("DELETE FROM versions WHERE object = ?1", params![name])?;
         }
         Ok(())
     }

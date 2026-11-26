@@ -1,0 +1,202 @@
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: big-docinfo\n"
+"Report-Msgid-Bugs-To: https://github.com/biglinux/bigsearch/issues\n"
+"POT-Creation-Date: 2026-11-24 13:14-0300\n"
+"PO-Revision-Date: 2026-11-22 18:00-0300\n"
+"Last-Translator: BigLinux <https://github.com/biglinux>\n"
+"Language-Team: BigLinux <https://github.com/biglinux>\n"
+"Language: tr\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+#: src/main.rs
+msgid "This name has characters a file name cannot hold. Choose another name."
+msgstr ""
+"Bu ad, bir dosya adında bulunamayacak karakterler içeriyor. Başka bir ad "
+"seçin."
+
+#: src/main.rs
+msgid "This file is no longer there: it was moved or deleted."
+msgstr "Bu dosya artık orada değil: taşınmış ya da silinmiş."
+
+#: src/main.rs
+msgid "You do not have permission to read this file."
+msgstr "Bu dosyayı okuma izniniz yok."
+
+#: src/main.rs
+msgid "This file could not be read."
+msgstr "Bu dosya okunamadı."
+
+#: src/main.rs
+msgid ""
+"This file has no readable text: its type is not supported, or it is a "
+"scanned PDF."
+msgstr ""
+"Bu dosyada okunabilir metin yok: türü desteklenmiyor ya da taranmış bir PDF."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Kind"
+msgstr "Tür"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Date"
+msgstr "Tarih"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Entity"
+msgstr "Düzenleyen"
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Title"
+msgstr "Başlık"
+
+#: src/main.rs
+msgid "No kind or title found in this document; the current name stays."
+msgstr "Bu belgede tür ya da başlık bulunamadı; mevcut ad korunuyor."
+
+#: src/main.rs
+msgctxt "document field"
+msgid "Name"
+msgstr "Ad"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Invoice"
+msgstr "Fatura"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Receipt"
+msgstr "Makbuz"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Bill or payment slip"
+msgstr "Fatura veya ödeme belgesi"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Statement"
+msgstr "Hesap dökümü"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Contract"
+msgstr "Sözleşme"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Minutes"
+msgstr "Tutanak"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Law, decree or ordinance"
+msgstr "Kanun, kararname veya yönetmelik"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Public notice"
+msgstr "İlan"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Opinion or expert report"
+msgstr "Görüş veya bilirkişi raporu"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Report"
+msgstr "Rapor"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Official letter or letter"
+msgstr "Resmî yazı veya mektup"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Email"
+msgstr "E-posta"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Declaration or certificate"
+msgstr "Beyan veya belge"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Résumé"
+msgstr "Özgeçmiş"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Manual"
+msgstr "Kılavuz"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Article"
+msgstr "Makale"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Quote"
+msgstr "Fiyat teklifi"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Notes"
+msgstr "Notlar"
+
+#: src/main.rs
+msgctxt "document kind"
+msgid "Health document"
+msgstr "Sağlık belgesi"
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid "“{name}” cannot be a file name. Use a name without slashes."
+msgstr "“{name}” dosya adı olamaz. Eğik çizgi içermeyen bir ad kullanın."
+
+#: src/main.rs
+msgid "This name is too long. Use a shorter name."
+msgstr "Bu ad çok uzun. Daha kısa bir ad kullanın."
+
+#. Translators: keep {name} as written; it is the name the person typed.
+#: src/main.rs
+#, rust-format
+msgid ""
+"A file named “{name}” already exists in this folder. Choose another name."
+msgstr "Bu klasörde “{name}” adlı bir dosya zaten var. Başka bir ad seçin."
+
+#: src/main.rs
+msgid ""
+"This disk cannot rename without risking another file. Rename it in the file "
+"manager."
+msgstr ""
+"Bu disk, başka bir dosyayı silme riski olmadan yeniden adlandırmaya izin "
+"vermiyor. Dosya yöneticisinden yeniden adlandırın."
+
+#. Translators: keep {error} as written; the system fills in why.
+#: src/main.rs
+#, rust-format
+msgid "Could not rename: {error}."
+msgstr "Yeniden adlandırılamadı: {error}."
+
+#: packaging/suggest-name
+msgid "Suggest a name"
+msgstr "Ad öner"
+
+#: packaging/big-docinfo.desktop
+msgid "Suggest a name…"
+msgstr "Ad öner…"

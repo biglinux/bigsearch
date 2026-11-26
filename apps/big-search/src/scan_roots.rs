@@ -12,7 +12,7 @@ pub enum SymlinkPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MountKind {
+pub(crate) enum MountKind {
     Local,
     Network,
     Virtual,
@@ -217,7 +217,7 @@ fn mount_kind_for_path(path: &Path) -> MountKind {
         .map_or(MountKind::Unknown, |mount| classify_fstype(&mount.fstype))
 }
 
-fn classify_fstype(fstype: &str) -> MountKind {
+pub(crate) fn classify_fstype(fstype: &str) -> MountKind {
     match fstype {
         "ext2" | "ext3" | "ext4" | "btrfs" | "xfs" | "f2fs" | "bcachefs" | "zfs" | "ntfs"
         | "ntfs3" | "exfat" | "vfat" | "fuseblk" | "hfsplus" | "apfs" => MountKind::Local,
@@ -248,7 +248,8 @@ fn prune_nested(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
     kept
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
 
@@ -256,8 +257,7 @@ mod tests {
     fn resolve_roots_expands_and_prunes() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-roots-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::test_env::scratch_dir("lsearch-roots");
         let home = base.join("home");
         let ext = base.join("ext"); // a real external tree, linked from home
         std::fs::create_dir_all(home.join("realdir")).unwrap();
@@ -292,16 +292,13 @@ mod tests {
             "nested pruned: {on:?}"
         );
         assert_eq!(on.len(), 2, "exactly home + ext: {on:?}");
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn symlink_policy_takes_windows_user_dirs() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-winlink-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::test_env::scratch_dir("lsearch-winlink");
         let home = base.join("home");
         let windows = base.join("WindowsDisk");
         std::fs::create_dir_all(&home).unwrap();
@@ -336,16 +333,13 @@ mod tests {
             !roots.contains(&win_root),
             "windows root rejected: {roots:?}"
         );
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn symlink_policy_takes_linux_home_dirs() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-linuxlink-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::test_env::scratch_dir("lsearch-linuxlink");
         let home = base.join("home");
         let old_root = base.join("OldLinux");
         std::fs::create_dir_all(&home).unwrap();
@@ -369,16 +363,13 @@ mod tests {
             "linux user home accepted: {roots:?}"
         );
         assert!(!roots.contains(&old_root), "linux root rejected: {roots:?}");
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn personal_symlink_policy_rejects_network_targets() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-netlink-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::test_env::scratch_dir("lsearch-netlink");
         let home = base.join("home");
         let network = base.join("nas");
         std::fs::create_dir_all(&home).unwrap();
@@ -403,16 +394,13 @@ mod tests {
             !roots.contains(&network),
             "network link rejected: {roots:?}"
         );
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn symlink_policy_accepts_local_data_dir() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("lsearch-datalink-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::test_env::scratch_dir("lsearch-datalink");
         let home = base.join("home");
         let local_photos_target = base.join("DataDisk/Photos");
         std::fs::create_dir_all(&home).unwrap();
@@ -431,8 +419,6 @@ mod tests {
             roots.contains(&canonical_local_photos_target),
             "plain local data accepted: {roots:?}"
         );
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

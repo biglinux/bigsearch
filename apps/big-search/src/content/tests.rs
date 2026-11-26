@@ -3,9 +3,7 @@ use crate::test_env::{ENV_LOCK, EnvVarGuard};
 
 #[test]
 fn pending_batch_reports_more_work() {
-    let base = std::env::temp_dir().join(format!("lsearch-content-batch-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-batch");
     let first = base.join("first.md");
     let second = base.join("second.md");
     std::fs::write(&first, b"first body").unwrap();
@@ -14,7 +12,8 @@ fn pending_batch_reports_more_work() {
     let content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     let batch = pending_batch_with_byte_limit(
         vec![first.clone(), second.clone()],
         &content_state,
@@ -27,17 +26,13 @@ fn pending_batch_reports_more_work() {
     let batch = pending_batch_with_byte_limit(vec![second.clone()], &content_state, 2, u64::MAX);
     assert_eq!(batch.files, vec![second]);
     assert!(!batch.has_more);
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 /// A tag write changes an extended attribute and nothing else, so only
 /// forgetting the row makes the pass read the file again.
 #[test]
 fn forgotten_row_is_read_again() {
-    let base = std::env::temp_dir().join(format!("lsearch-content-forget-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-forget");
     let note = base.join("note.md");
     std::fs::write(&note, b"a body").unwrap();
     let (mtime, size) = catalogue::meta(&note).unwrap();
@@ -45,7 +40,8 @@ fn forgotten_row_is_read_again() {
     let mut content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     content_state.set(&note, mtime, size);
     assert!(
         pending_batch_with_byte_limit(vec![note.clone()], &content_state, 10, u64::MAX)
@@ -60,18 +56,11 @@ fn forgotten_row_is_read_again() {
         vec![note],
         "forgetting the row is what makes the same bytes worth reading again"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn pending_batch_stops_at_byte_budget() {
-    let base = std::env::temp_dir().join(format!(
-        "lsearch-content-byte-budget-{}",
-        std::process::id()
-    ));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-byte-budget");
     let first = base.join("first.txt");
     let second = base.join("second.txt");
     std::fs::write(&first, vec![b'a'; 1024 * 1024]).unwrap();
@@ -80,21 +69,17 @@ fn pending_batch_stops_at_byte_budget() {
     let content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     let batch =
         pending_batch_with_byte_limit(vec![first.clone(), second], &content_state, 50, 1024 * 1024);
     assert_eq!(batch.files, vec![first]);
     assert!(batch.has_more);
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn pending_batch_prioritizes_low_cost_files() {
-    let base =
-        std::env::temp_dir().join(format!("lsearch-content-priority-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-priority");
     let large_pdf = base.join("large.pdf");
     let small_note = base.join("small.md");
     let large = std::fs::File::create(&large_pdf).unwrap();
@@ -105,7 +90,8 @@ fn pending_batch_prioritizes_low_cost_files() {
     let content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     let batch = pending_batch_with_byte_limit(
         vec![large_pdf, small_note.clone()],
         &content_state,
@@ -114,16 +100,11 @@ fn pending_batch_prioritizes_low_cost_files() {
     );
     assert_eq!(batch.files, vec![small_note]);
     assert!(batch.has_more);
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn catalog_batch_defers_recent_edits() {
-    let base =
-        std::env::temp_dir().join(format!("lsearch-content-cooldown-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-cooldown");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -137,7 +118,8 @@ fn catalog_batch_defers_recent_edits() {
     std::fs::write(&editing, b"conteudo").unwrap();
 
     let mut catalog =
-        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE)
+            .unwrap();
     catalog.set(&quiet, now - 3_600, 10); // untouched for 1h
     catalog.set(&editing, now - 10, 20); // saved 10s ago
     catalog.persist().unwrap();
@@ -156,16 +138,13 @@ fn catalog_batch_defers_recent_edits() {
             .unwrap();
     assert_eq!(warm.files.len(), 2);
     assert_eq!(warm.deferred, 0);
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 /// A deleted file must stop answering content searches.
 #[test]
 fn deleted_files_stop_answering_content_searches() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let base = std::env::temp_dir().join(format!("lsearch-ghost-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
+    let base = crate::test_env::scratch_dir("lsearch-ghost");
     std::fs::create_dir_all(base.join("files")).unwrap();
     let _env = [
         EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
@@ -218,8 +197,6 @@ fn deleted_files_stop_answering_content_searches() {
 
     // Idempotent: nothing left to prune on a second run.
     assert_eq!(prune_orphaned_content(&index, 100).unwrap(), (0, false));
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 /// The sweep must not become a one-shot: clearing content state is exactly
@@ -227,9 +204,7 @@ fn deleted_files_stop_answering_content_searches() {
 #[test]
 fn clearing_state_rearms_unreferenced_sweep() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let base = std::env::temp_dir().join(format!("lsearch-rearm-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-rearm");
     let _env = [
         EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
         EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap()),
@@ -245,16 +220,11 @@ fn clearing_state_rearms_unreferenced_sweep() {
         !crate::index::is_unreferenced_pruned(&dir),
         "limpar o estado de conteudo tem de re-armar a varredura"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn skipped_entries_become_tombstones() {
-    let base =
-        std::env::temp_dir().join(format!("lsearch-content-tombstone-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-tombstone");
 
     let movie = base.join("filme.bin");
     let note = base.join("nota.md");
@@ -264,16 +234,21 @@ fn skipped_entries_become_tombstones() {
     let vanished = base.join("apagado.md");
     // Extension-less, so a sniff candidate, but nothing to extract.
     let folder = base.join("uma-pasta");
+    // A text name on a FIFO: opening it would block the worker.
+    let pipe = base.join("fila.txt");
     std::fs::write(&movie, b"binario").unwrap();
     std::fs::write(&note, b"texto").unwrap();
     std::fs::create_dir_all(&folder).unwrap();
+    crate::test_env::make_fifo(&pipe);
 
     let mut catalog =
-        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE)
+            .unwrap();
     catalog.set(&movie, 100, 50); // never an extraction candidate
     catalog.set(&note, 100, 10);
     catalog.set(&vanished, 100, 10);
     catalog.set(&folder, 100, 4096);
+    catalog.set(&pipe, 100, 0);
     catalog.persist().unwrap();
 
     let (batch, _) =
@@ -285,10 +260,11 @@ fn skipped_entries_become_tombstones() {
         batch.non_candidates,
         vec![
             (vanished.clone(), 100, 10),
+            (pipe.clone(), 100, 0),
             (movie.clone(), 100, 50),
             (folder.clone(), 100, 4096),
         ],
-        "deleted file, policy-skipped file and directory are all tombstoned"
+        "deleted file, FIFO, policy-skipped file and directory are all tombstoned"
     );
 
     // Record the tombstones + the extracted file in the content namespace:
@@ -296,7 +272,8 @@ fn skipped_entries_become_tombstones() {
     let mut content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
     for (path, mtime, size) in &batch.non_candidates {
         content_state.set(path, *mtime, *size);
     }
@@ -309,8 +286,6 @@ fn skipped_entries_become_tombstones() {
     assert!(next.files.is_empty());
     assert!(next.non_candidates.is_empty());
     assert!(!next.has_more);
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -321,9 +296,7 @@ fn symlinks_skip_content_extraction() {
     // own XDG_DATA_HOME: without the lock it would race other tests for the
     // process-wide variable and, with none set, write to the real database.
     let _lock = ENV_LOCK.lock().unwrap();
-    let base = std::env::temp_dir().join(format!("lsearch-content-symlink-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-symlink");
     let target = base.join("target.md");
     let link = base.join("link.md");
     let _env = [
@@ -335,12 +308,66 @@ fn symlinks_skip_content_extraction() {
 
     // Through the pipeline: a link must not duplicate its target's body.
     let index = crate::index::open_content_or_create(&base.join("idx")).unwrap();
-    index_content_limited(&index, vec![target.clone(), link.clone()], None).unwrap();
+    index_content_limited(&index, vec![target.clone(), link], None).unwrap();
     let hits = crate::query::search_content(&index.reader().unwrap(), "target", 10).unwrap();
     assert_eq!(hits.len(), 1, "only the real file is extracted");
     assert_eq!(hits[0].path, target.to_string_lossy());
+}
 
-    std::fs::remove_dir_all(&base).ok();
+#[test]
+fn extraction_passes_over_fifo() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-fifo");
+    let note = base.join("note.md");
+    let pipe = base.join("pipe.txt");
+    let _env = [
+        EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
+        EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap()),
+    ];
+    std::fs::write(&note, b"reachable body").unwrap();
+    crate::test_env::make_fifo(&pipe);
+
+    // A file listed by a watcher event skips the selection's settling.
+    let index = crate::index::open_content_or_create(&base.join("idx")).unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker_index = index.clone();
+    std::thread::spawn(move || {
+        let indexed = index_content_limited(&worker_index, vec![pipe, note], None);
+        let _ = done_tx.send(indexed.map_err(|e| format!("{e:#}")));
+    });
+    let indexed = done_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("extraction waits on the FIFO");
+    assert_eq!(indexed, Ok(1));
+    let hits = crate::query::search_content(&index.reader().unwrap(), "reachable", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+}
+
+/// A file another process holds a write lease on is left pending, not recorded
+/// unread: the pass after the lease is gone indexes it.
+#[test]
+fn leased_file_waits_for_next_pass() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content-lease");
+    let shared = base.join("shared.md");
+    let _env = [
+        EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
+        EnvVarGuard::set("XDG_CONFIG_HOME", base.join("config").to_str().unwrap()),
+    ];
+    std::fs::write(&shared, b"leased body").unwrap();
+    let index = crate::index::open_content_or_create(&base.join("idx")).unwrap();
+
+    let mut holder = crate::test_env::hold_write_lease(&shared);
+    let under_lease = index_content_limited(&index, vec![shared.clone()], None);
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    assert_eq!(under_lease.unwrap(), 0);
+    assert_eq!(
+        index_content_limited(&index, vec![shared], None).unwrap(),
+        1
+    );
+    let hits = crate::query::search_content(&index.reader().unwrap(), "leased", 10).unwrap();
+    assert_eq!(hits.len(), 1);
 }
 
 #[test]
@@ -396,39 +423,26 @@ fn content_knobs_resolve_overrides() {
 
 #[test]
 fn worker_pool_width_follows_machine() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _clear = EnvVarGuard::unset("BIG_SEARCH_CONTENT_WORKERS");
-    let cores = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(1);
-    let expected = if crate::settings::low_memory_machine() || cores <= 2 {
-        1
-    } else {
-        2
-    };
-    assert_eq!(default_workers(), expected);
-    {
-        let _zero = EnvVarGuard::set("BIG_SEARCH_CONTENT_WORKERS", "0");
-        assert_eq!(default_workers(), expected, "0 workers is not usable");
-    }
-    {
-        let _three = EnvVarGuard::set("BIG_SEARCH_CONTENT_WORKERS", "3");
-        assert_eq!(default_workers(), 3);
-    }
-    {
-        let _nine = EnvVarGuard::set("BIG_SEARCH_CONTENT_WORKERS", "9");
-        assert_eq!(default_workers(), 4, "pool width is capped at 4");
-    }
+    assert_eq!(pool_width(8, false, None), 2);
+    assert_eq!(pool_width(2, false, None), 1);
+    assert_eq!(pool_width(8, true, None), 1);
+    assert_eq!(
+        pool_width(8, false, Some("0")),
+        2,
+        "0 workers is not usable"
+    );
+    assert_eq!(pool_width(8, false, Some("three")), 2);
+    assert_eq!(pool_width(2, false, Some("3")), 3);
+    assert_eq!(
+        pool_width(8, false, Some("9")),
+        4,
+        "pool width is capped at 4"
+    );
 }
 
 #[test]
 fn catalog_byte_budget_is_exclusive() {
-    let base = std::env::temp_dir().join(format!(
-        "lsearch-catalog-byte-boundary-{}",
-        std::process::id()
-    ));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-catalog-byte-boundary");
     let mib = 1u64 << 20;
     // The catalogue records the sizes the budget uses; the files only have to
     // exist, since a missing one is tombstoned instead of queued.
@@ -437,7 +451,8 @@ fn catalog_byte_budget_is_exclusive() {
         std::fs::write(path, b"x").unwrap();
     }
     let mut catalog =
-        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        catalogue::State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE)
+            .unwrap();
     catalog.set(&a, 1_000, mib);
     catalog.set(&b, 1_000, mib);
     catalog.set(&c, 1_000, mib);
@@ -454,18 +469,11 @@ fn catalog_byte_budget_is_exclusive() {
         pending_catalog_batch_with_byte_limit(&catalog, None, 10, 1, Duration::ZERO).unwrap();
     assert_eq!(one.files, vec![a.clone()]);
     assert!(one.has_more);
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn pending_byte_budget_is_exclusive() {
-    let base = std::env::temp_dir().join(format!(
-        "lsearch-pending-byte-boundary-{}",
-        std::process::id()
-    ));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-pending-byte-boundary");
     let mib = 1usize << 20;
     let first = base.join("a.txt");
     let second = base.join("b.txt");
@@ -476,7 +484,8 @@ fn pending_byte_budget_is_exclusive() {
     let content_state = catalogue::State::empty(
         &base.join("state.sqlite"),
         crate::catalogue::CONTENT_NAMESPACE,
-    );
+    )
+    .unwrap();
 
     let files = vec![first.clone(), second.clone(), third.clone()];
     let batch = pending_batch_with_byte_limit(files.clone(), &content_state, 50, 2 * mib as u64);
@@ -486,15 +495,12 @@ fn pending_byte_budget_is_exclusive() {
     let all = pending_batch_with_byte_limit(files, &content_state, 50, 8 * mib as u64);
     assert_eq!(all.files, vec![first, second, third]);
     assert!(!all.has_more);
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn catalog_pass_indexes_every_batch() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let base = std::env::temp_dir().join(format!("lsearch-catalog-pass-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
+    let base = crate::test_env::scratch_dir("lsearch-catalog-pass");
     std::fs::create_dir_all(base.join("files")).unwrap();
     let _env = [
         EnvVarGuard::set("XDG_DATA_HOME", base.join("data").to_str().unwrap()),
@@ -550,15 +556,11 @@ fn catalog_pass_indexes_every_batch() {
         index_content_limited(&index, extra.to_vec(), None).unwrap(),
         2
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn body_upsert_keeps_one_document() {
-    let base = std::env::temp_dir().join(format!("lsearch-content-{}", std::process::id()));
-    std::fs::remove_dir_all(&base).ok();
-    std::fs::create_dir_all(&base).unwrap();
+    let base = crate::test_env::scratch_dir("lsearch-content");
     let path = base.join("note.txt");
 
     let content_index = crate::index::open_content_or_create(&base.join("content-idx")).unwrap();
@@ -569,7 +571,7 @@ fn body_upsert_keeps_one_document() {
         writer.commit().unwrap();
     }
     let reader = content_index.reader().unwrap();
-    assert_eq!(crate::query::count(&reader).unwrap(), 1);
+    assert_eq!(crate::query::count(&reader), 1);
     assert_eq!(
         crate::query::search_content(&reader, "new", 10)
             .unwrap()
@@ -581,6 +583,4 @@ fn body_upsert_keeps_one_document() {
             .unwrap()
             .is_empty()
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }

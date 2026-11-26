@@ -225,8 +225,7 @@ fn sniff(path: &Path) -> Option<String> {
     // Room for the whole head up front: an empty Vec makes `read_to_end` probe
     // with a tiny read and then grow, several syscalls for every file sniffed.
     let mut head = Vec::with_capacity(HEAD_BYTES as usize);
-    std::fs::File::open(path)
-        .ok()?
+    crate::extract::open_regular(path)?
         .take(HEAD_BYTES)
         .read_to_end(&mut head)
         .ok()?;
@@ -238,7 +237,7 @@ fn sniff(path: &Path) -> Option<String> {
     // A media signature inside text is a coincidence ("### freedreno" holds
     // QuickTime's `free` atom at byte 4), for 40 KiB of real audio, video or a
     // raster image always hold a NUL. Other signatures found in text (PGP
-    // armour, HTML, SVG) are what the text is.
+    // armor, HTML, SVG) are what the text is.
     let media = ["video/", "audio/", "image/"]
         .iter()
         .any(|major| mime.starts_with(major))
@@ -251,15 +250,17 @@ fn sniff(path: &Path) -> Option<String> {
 
 /// Where shared-mime-info lives: the user's data dir, then the system's.
 fn data_dirs() -> Vec<PathBuf> {
-    let home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
     let system = std::env::var("XDG_DATA_DIRS")
         .ok()
         .filter(|dirs| !dirs.is_empty())
         .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
-    home.into_iter()
-        .chain(system.split(':').map(PathBuf::from))
+    std::iter::once(crate::config::data_home())
+        .chain(
+            system
+                .split(':')
+                .map(PathBuf::from)
+                .filter(|dir| dir.is_absolute()),
+        )
         .collect()
 }
 
@@ -370,9 +371,7 @@ mod tests {
     #[test]
     fn content_settles_ambiguous_extensions() {
         let db = database();
-        let dir = std::env::temp_dir().join(format!("lsearch-mime-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_env::scratch_dir("lsearch-mime");
         let write = |name: &str, bytes: &[u8]| {
             let path = dir.join(name);
             std::fs::write(&path, bytes).unwrap();
@@ -410,15 +409,12 @@ mod tests {
             db.of(&write("odd.ts", &png), None).as_deref(),
             Some("image/png")
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn content_alone_types_extensionless_files() {
         let db = database();
-        let dir = std::env::temp_dir().join(format!("lsearch-mime-bare-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_env::scratch_dir("lsearch-mime-bare");
         let write = |name: &str, bytes: &[u8]| {
             let path = dir.join(name);
             std::fs::write(&path, bytes).unwrap();
@@ -446,15 +442,12 @@ mod tests {
                 .as_deref(),
             Some("text/plain")
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn directories_and_empty_files_by_inode() {
         let db = database();
-        let dir = std::env::temp_dir().join(format!("lsearch-mime-inode-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_env::scratch_dir("lsearch-mime-inode");
         let write = |name: &str, bytes: &[u8]| {
             let path = dir.join(name);
             std::fs::write(&path, bytes).unwrap();
@@ -476,7 +469,6 @@ mod tests {
             assert_eq!(db.of(path, Some(&metadata)).as_deref(), Some(inode));
             assert_eq!(db.of(path, None).as_deref(), Some(inode));
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

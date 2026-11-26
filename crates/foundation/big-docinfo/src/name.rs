@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! The suggested file name: `[date] [kind] title.ext`, built from fields, never
 //! guessed.
 //!
@@ -183,7 +180,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_read_as_the_title_is_written() {
+    fn names_read_as_written() {
         let name = |kind, title, date| suggested_name(kind, title, date, "pdf");
         assert_eq!(
             name(

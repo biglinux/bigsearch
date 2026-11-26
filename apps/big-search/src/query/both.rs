@@ -55,18 +55,21 @@ impl Candidate {
 /// The final tie-break is the path, raw rather than folded: determinism is all
 /// it has to provide, and folding would allocate a second string per candidate.
 /// That tie-break carries more weight than it looks: the name field is indexed
-/// as ngrams with [`IndexRecordOption::Basic`], which stores no term
+/// as ngrams with [`tantivy::schema::IndexRecordOption::Basic`], which stores no term
 /// frequencies, so BM25 over it gives every document matching the same grams
 /// the same score (`alpha.md` and `alpha_alpha.md` tie for `alpha`). The name
 /// band is therefore mostly one big tie, and the path is what actually orders
 /// it. The content band does rank, because the body field keeps frequencies.
-pub fn search_both(
+pub(crate) fn search_both(
     reader: &IndexReader,
     content_reader: &IndexReader,
     q: &str,
+    filter: &Filter,
     limit: usize,
 ) -> Result<Vec<Hit>> {
-    let names = search(reader, q, &Filter::default(), limit)?;
+    // The content index knows no folder or type, but the name index does:
+    // narrowed there, the names spend the limit on files the filter keeps.
+    let names = search(reader, q, filter, limit)?;
     let contents = search_content(content_reader, q, limit)?;
 
     let mut candidates = merge_by_path(names, contents, q);
@@ -135,5 +138,6 @@ fn merge_by_path(names: Vec<Hit>, contents: Vec<Hit>, q: &str) -> Vec<Candidate>
     merged.into_values().collect()
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests;

@@ -53,8 +53,10 @@ runtime.
 ```text
  daemon (user service, unprivileged)
  +------------------------------------------------------------------------+
- | start    scan (ignore walker) ----> name index      state.sqlite       |
- |            reconciles against the state store                          |
+ | start    watch the folders the last run saved; the first start,        |
+ |            changed sources or ignore rules, or `rescan` walk (ignore   |
+ |            walker) and reconcile with the state store                  |
+ |            ----> name index   state.sqlite                             |
  |                                                                        |
  | running  watcher: one inotify watch per visible folder                 |
  |            250 ms coalescing, then upsert or delete                    |
@@ -70,8 +72,8 @@ runtime.
    big-search CLI, settings page, other BigLinux programs
 ```
 
-A query never waits for extraction, and indexing runs on CPU time nobody else
-wants (section 7).
+A query never waits for extraction, and indexing yields the CPU to queries
+(section 7).
 
 | Module | Owns |
 |---|---|
@@ -106,7 +108,8 @@ The name index holds one document per visible file:
 
 The content index holds `path` and `body`. `body` stores no text and keeps
 either document lists or term frequencies (`content_index_mode`, `auto` by
-default); changing the mode changes the schema and recreates the content index.
+default). `auto` chooses only when the content index is created and then keeps
+what it holds; setting `basic` or `freqs` to the other detail recreates it.
 Keeping the two apart lets a name schema change rebuild only the name index:
 the content rows stay unless the content index is empty.
 
@@ -118,8 +121,12 @@ never the bottleneck, and cost 104 MB of RSS.
 
 Both indexes and the state store are a cache derived from the filesystem, so
 the daemon never calls `fsync` on the indexes (`nosync_dir.rs`). The worst a
-forced reboot costs is re-indexing the files whose commits did not reach the
-disk, which the startup reconcile does anyway. A torn index fails to open and
+forced reboot costs is documents whose commits did not reach the disk. Each
+start compares the name index with the catalogue and re-adds the name
+documents the catalogue still lists (`index::repair_deflated_against_state`);
+a stale or missing document whose catalogue row is current, a content document
+included, needs `big-search rebuild`, since a rescan compares the disk with
+the catalogue only. A torn index fails to open and
 `index::open_or_create` recreates it. Measured over ten minutes of near-idle
 churn, tantivy's syncs were 145 calls to write a few kilobytes, and 4.07 GB of
 logical writes landed as 17.9 GB at the block layer. The directory also watches
@@ -152,7 +159,7 @@ tantivy.
 ### Name search
 
 Names are folded once, before the grams (`index::name_text` over
-`extract::fold_lower`: precomposed or decomposed accents, Latin through
+`fold::fold_lower`: precomposed or decomposed accents, Latin through
 tantivy's `AsciiFoldingFilter`, ё to е, Greek tonos and final sigma, separators
 as spaces and a space at each end). The post-filter reads the same text, so
 recall and verification agree.
@@ -212,7 +219,7 @@ filter, and counts its total from the postings up to a ceiling
 
 ### Folding and scripts
 
-Every text is put in NFKC before anything else reads it (`extract::compose`,
+Every text is put in NFKC before anything else reads it (`fold::compose`,
 used by `fold_lower` and by the content tokenizer, so names, pages, content and
 queries agree): Korean syllables written as jamo, kana with a separate voicing
 mark (macOS names, some PDFs), halfwidth katakana, Arabic presentation forms,
@@ -224,14 +231,16 @@ this finds 100 % of Korean NFD documents (0 % without), and of Japanese NFD and
 halfwidth documents (79 % and 37 % without), with no other result changed.
 
 Content words are folded at index time like names (`index::ScriptFold` over
-`extract::fold_script_into`, then ASCII folding): combining marks, ё, Greek
+`fold::fold_script_into`, then ASCII folding): combining marks, ё, Greek
 accents and final sigma, Arabic hamza alef, alef maqsura and Persian yeh,
 Persian kaf, ta marbuta as heh, vowel signs, tatweel and the article. The
 tokenizer keeps combining marks inside a word, so a decomposed accent does not
 split it. Folding at index time means a change to the fold re-indexes content:
 the analyzer's name changes with what it emits (`index::BODY`, `index::NGRAM`),
 so the on-disk schema differs and the index rebuilds; 88,055 documents took
-about 13 minutes on the notebook, part of it under heavy load. A 42-query test
+about 13 minutes on the notebook, part of it under heavy load. `index::BODY`
+also changes when extraction does, since a file read once is not read again
+until it changes. A 42-query test
 in 12 languages finds 41 with folding and the Chinese table below, against 23
 without. German "oe" for "ö" stays unfolded: it would make every "oe" in
 Portuguese or Dutch match "ö".
@@ -281,10 +290,23 @@ store, 1.6 MB of stored paths, so it stays as is.
 ## 4. Scan
 
 `scan.rs` walks each root with the `ignore` crate's `WalkBuilder`, the walker
-behind `fd` and `rg`: hidden entries are skipped, every gitignore source applies
-(the repository's, the global one, `.git/info/exclude`, parent folders), and the
-effective ignore file, the built-in defaults followed by the user's
-`~/.config/big-search/ignore` so the user's lines win, takes precedence.
+behind `fd` and `rg`, with its own filters off: one decision, `scan::Scope`,
+judges each entry, and the watcher and a forced reindex ask it about each
+folder from below the source holding a path down to the path, so no pass keeps
+what another leaves out. Hidden entries are skipped; the effective ignore file,
+the built-in defaults followed by the user's `~/.config/big-search/ignore` so
+the user's lines win, comes first, so no folder's file brings back what it
+leaves out; then the first ignore file with an opinion decides: the `.ignore`
+files of the folders above the entry, nearest first, then, inside a work tree
+(a folder holding `.git`, or `.jj` for a Jujutsu repository), its `.gitignore`
+files, its `info/exclude` and the global excludes file, which git anchors at
+the root of the work tree. The effective rules are anchored at
+the source holding each entry, so a source nested in another reads
+`/Archive/` as its own `Archive`. A source itself is always in scope and
+nothing above it is tested: a `.gitignore` above a source speaks only for what
+lies below it. The walk reads each folder's files once on the way down; the
+watcher reads them only for a path new to the catalogue. The global excludes
+file is read once per run, as the effective rules are.
 Symlinks are never followed during the walk; a symlinked folder at the top of a
 root is resolved into a root of its own by `scan_roots::resolve_roots` according
 to the symlink policy, and network mounts, virtual mounts and operating-system
@@ -303,10 +325,16 @@ hidden and gitignored churn never wakes the daemon.
   none for what it held, so the tree goes as one `dir` term in the name index
   and one key range in the catalogue, never read into memory; its content
   documents follow through the orphan prune of the next backfill passes.
-- At most 16,384 events wait for the watcher (`MAX_QUEUED_EVENTS`), so a backup
-  or a recursive copy cannot queue its whole tree in memory. Past that, or when
-  the kernel's own queue overflows, the events are dropped and the watcher
-  rescans every root.
+- What the inotify thread hears waits in one batch the watcher takes whole,
+  one entry per path however often it changes, in memory only: what a stop
+  loses, the next start's catch-up or walk finds. Past 16,384 paths
+  (`MAX_PATHS`) they collapse into their folders, each walked whole, so a
+  backup or a recursive copy cannot hold its whole tree in memory. Past 256
+  folders (`MAX_FOLDERS`), or when the kernel's own queue overflows, the batch
+  is dropped and the watcher rescans every root; the log tells the two apart.
+- The inotify thread runs in the indexer's idle class (section 7), so intake
+  yields the CPU to queries; under sustained load the kernel's queue may
+  overflow into that rescan.
 
 ## 6. Extraction
 
@@ -322,7 +350,8 @@ same physical extents are read once (`content_dedupe.rs`).
 
 | Format | Method |
 |---|---|
-| plain text, Markdown, source code, HTML | read in-process; a NUL in the first 8 KiB marks it binary |
+| plain text, Markdown, source code | read in-process; a NUL in the first 8 KiB marks it binary |
+| HTML | the same, then its readable text: scripts, styles and tags dropped, `alt` and `title` text kept, entities decoded |
 | PDF | `pdftotext` subprocess |
 | `docx odt ods odp pptx xlsx` | in-process `zip` and `quick-xml` |
 | EPUB | container, package and spine chapters, read as HTML |
@@ -336,9 +365,10 @@ a wall-clock deadline (`extract_pdf::run_capped`). The text kept per file is
 capped by `extract_max_mb`; at 0, the default, the cap follows the memory the
 service may use, from 4 MiB under 3 GiB to 32 MiB from 12 GiB. Office archives
 are refused past `office_max_mb` (0 chooses 64 or 256 MiB by machine), 4096
-entries or 512 slides, and each part's decompressed size is capped. Plain text
-and PDF have optional size limits (`text_max_mb`, `pdf_max_mb`, 0 by default)
-and PDF a deadline (`pdf_timeout_secs`, 5 s).
+entries or 512 slides or sheets; each part's decompressed size is capped,
+and so is the markup read from one archive (four extraction caps).
+Plain text and PDF have optional size limits (`text_max_mb`, `pdf_max_mb`, 0 by
+default) and PDF a deadline (`pdf_timeout_secs`, 5 s).
 
 ### PDF through `pdftotext`
 
@@ -367,8 +397,12 @@ found by name only.
 ### Office documents, EPUB, mail and RTF in-process
 
 These formats are zip and XML, MIME text or a small markup, so they are read
-in-process with no subprocess: `word/document.xml` for docx, `content.xml` for
-ODF, `xl/sharedStrings.xml` for xlsx, `ppt/slides/*.xml` for pptx. The
+in-process with no subprocess: `word/document.xml` and its headers, footers,
+footnotes and endnotes for docx, `content.xml` for ODF, `xl/sharedStrings.xml`
+and the strings worksheets hold themselves (inline strings and text results of
+formulas, which streaming writers such as Apache POI's emit instead of shared
+ones) for xlsx, `ppt/slides/*.xml` and the speaker notes for pptx. Numeric
+cells are left out: dates are stored as day numbers. The
 maintained office crates (`undoc`, `text_analysis`, `litchi`) read the same
 entries; parsing them here needs fewer dependencies and keeps the zip-bomb caps
 in one place. `undoc` lacks ODT, `text_analysis` bundles a PDF path already
@@ -391,10 +425,15 @@ candidate should a crate replace the subprocess.
 ## 7. Throttle
 
 `throttle::lower_priority` is called by the watcher, the content workers, the
-history worker and a foreground reindex. It moves the calling thread into the
-indexer's cgroup, which has `cpu.idle`, and gives it `SCHED_IDLE` with a
-utilization clamp of 512 out of 1024, nice 19 as the fallback, and
-`IOPRIO_CLASS_IDLE`; the programs it starts inherit all of it. The query
+history worker, a foreground reindex and the short-lived thread that starts
+the inotify reader (`throttle::spawn_lowered`). It moves the calling thread
+into the indexer's cgroup, which has `cpu.idle`, and gives it `SCHED_IDLE`
+with a utilization clamp of 512 out of 1024, nice 19 as the fallback, and
+`IOPRIO_CLASS_IDLE`; the threads and programs it starts inherit all of it.
+The cgroup carries the same clamp (`cpu.uclamp.max`), since the unit's
+`RestrictRealtime=yes` refuses `sched_setattr` and the thread then gets
+`SCHED_IDLE` through `sched_setscheduler`, without a clamp of its own; the log
+says once whether the cgroup's clamp covers it. The query
 threads keep a normal program's weight. The goal is that indexing is never the
 cause of a perceptible slowdown.
 
@@ -405,23 +444,38 @@ Measured on an i5-13400 (6 P and 4 E cores, SMT, `intel_cpufreq` with
 |---|---|
 | nice 19, unit `CPUWeight=20` | 27 % |
 | `SCHED_IDLE`, unit `CPUWeight=20` | 32 % |
-| unit `CPUWeight=idle`, or the indexer's own `cpu.idle` group | about 0 to 1 % |
+| unit `CPUWeight=idle` | about 0 to 1 % |
+| the indexer's own `cpu.idle` group, unit at its normal weight | 46 % |
 | on the core's SMT sibling, any policy | 42 to 50 % |
 
-A thread's policy only counts inside its cgroup, so the unit's weight decides
-against other programs. Making the whole unit idle costs the searches: with 16
-saturated CPUs a 5000-hit query took 412 to 831 ms instead of 109 to 162 ms. So
-the indexer gets a group of its own, in cgroup v2's threaded mode, which lets
-the threads of one process sit in different groups. The unit delegates the cpu
-controller (`Delegate=cpu`, `DelegateSubgroup=main`, and
-`ProtectControlGroups=private` so the daemon writes only inside its own
-namespace); the process and the query threads stay in `main`, and
-`throttle::prepare_idle_cgroup` makes `main/index` threaded with `cpu.idle`, or
-the lowest `cpu.weight` before Linux 5.15. With it, on 16 saturated CPUs, the
-same queries take what they take on an idle machine (77 to 83 ms by name, 14 to
-15 ms by content), and `pdftotext` starts in `main/index`. Started without
-delegation, from a terminal, the daemon leaves cgroups alone and the thread
-policies still apply.
+A thread's policy only counts inside its cgroup, and a group's `cpu.idle` only
+against its siblings, so the unit's weight decides against other programs.
+Making the whole unit idle costs the searches: with 16 saturated CPUs a 5000-hit
+query took 412 to 831 ms instead of 109 to 162 ms. So the indexer gets a group
+of its own, in cgroup v2's threaded mode, which lets the threads of one process
+sit in different groups. The unit delegates the cpu controller (`Delegate=cpu`,
+`DelegateSubgroup=main`, and `ProtectControlGroups=private` so the daemon writes
+only inside its own namespace); the process and the query threads stay in
+`main`, and `throttle::prepare_idle_cgroup` makes `main/index` threaded with
+`cpu.idle`, or the lowest `cpu.weight` before Linux 5.15. With it, on 16
+saturated CPUs, the same queries take what they take on an idle machine (77 to
+83 ms by name, 14 to 15 ms by content), and `pdftotext` starts in `main/index`.
+Started without delegation, from a terminal, the daemon leaves cgroups alone and
+the thread policies still apply.
+
+So indexing yields to the daemon's own queries, and the unit as a whole,
+indexing included, competes with other programs at its normal CPU weight. A
+lower unit weight costs the searches more than it gives back. Measured on the
+notebook with 8 CPU loops in another unit and 20,000 new files to index:
+
+| Unit weight | Indexed in | Search median, max |
+|---|---|---|
+| normal | 11 to 12 s, about 7 % of the machine | 14 to 25 ms, 327 to 549 ms |
+| `CPUWeight=20` | 32 s | 22 ms, 2848 ms |
+| `CPUWeight=idle` | 202 files in 600 s | 186 ms, 15360 ms |
+
+Without load the files were indexed in 3.6 to 4.8 s and searches took 5 to
+8 ms.
 
 On every stop systemd logs "Failed to kill control group …, ignoring: Operation
 not supported": the kernel refuses `cgroup.kill` and process listing in a
@@ -434,7 +488,7 @@ hardware (`throttle::topology`: physical cores and SMT over the CPUs the process
 may use); the scheduler gives each busy program a core of its own while it can,
 so the free cores are the cores minus the CPUs the others kept busy during the
 batch. Measured on machines simulated with `taskset` on P-core pairs, a CPU loop
-in a program's place and two workers flat out in an idle cgroup:
+in a program's place and two workers flat out in a `cpu.idle` cgroup beside it:
 
 | Machine | Program loses |
 |---|---|
@@ -443,12 +497,14 @@ in a program's place and two workers flat out in an idle cgroup:
 | SMT, one free core short | 23 to 28 % |
 | SMT, no free core | 42 to 49 % at 100 % duty, 17 to 24 % at 50 %, 2 to 12 % at 20 % |
 
-So without SMT the CPU never makes the backfill wait. With SMT it runs at a
-20 % duty cycle when the free cores are fewer than its workers, and rests 30 s
-when none is free. Memory pressure, its own and others' I/O pressure (most disk
-schedulers ignore I/O priority) and battery slow it on any machine; the duty
-cycle is 80 % on a calm machine, then 50 %, 20 % and a 30 s rest. Its own CPU
-stall is not a signal: at idle priority it only says that others are busy.
+So without SMT the CPU never makes the backfill wait: a worker sharing a CPU
+with a program in another unit takes only the unit's share of it, as above. With
+SMT it runs at a 20 % duty cycle when the free cores are fewer than its workers,
+and rests 30 s when none is free. Memory pressure, its own and others' I/O
+pressure (most disk schedulers ignore I/O priority) and battery slow it on any
+machine; the duty cycle is 80 % on a calm machine, then 50 %, 20 % and a 30 s
+rest. Its own CPU stall is not a signal: at idle priority it only says that
+others are busy.
 
 The duty cycle follows the CPU time the service used in a batch, not the
 batch's wall time: at idle priority on a busy machine a 250-file batch took
@@ -467,12 +523,71 @@ such as a stalled network mount.
 
 ## 8. State
 
-`catalogue.rs` keeps `namespace, path -> (mtime, size)` in SQLite, a `WITHOUT ROWID`
-table keyed by `(namespace, path)`, with separate `name` and `content`
-namespaces. It drives incremental dedup, delete detection and the reconcile on
-start. Writes are batched in transactions; SQLite runs WAL with `NORMAL` sync.
-Like the indexes, the state is derived from the filesystem, so a crash costs a
-reconcile on the next start.
+`catalogue.rs` keeps `namespace, path -> (mtime, size)` in SQLite, a
+`WITHOUT ROWID` table keyed by `(namespace, path)`, with separate `name` and
+`content` namespaces and a `watch` namespace listing the folders watched. It
+drives incremental dedup, delete detection and the reconcile. Writes are
+batched in transactions; SQLite runs WAL with `NORMAL` sync. Like the indexes,
+the state is derived from the filesystem: rows a crash loses come back with a
+reconcile, which `big-search rescan` runs.
+
+A start walks the sources only when no record vouches for the saved folder list.
+The record (`watch_fingerprint` and `watch_started` in the `meta` table) holds a
+fingerprint of the available sources, the effective ignore rules and the global
+git ignore file, and when that run started. The saved list spares a restart the
+read of every entry's metadata, the cost that dominates on a hard disk.
+
+A start walks when:
+
+- no record matches: the first start, a changed source set or ignore file, a
+  stop while paused, a watch the run could not place, a watcher that stopped on
+  an error, a walk or rebuild cut short, `big-search reindex`;
+- the clock reads earlier than the last run's start (a clock set back during a
+  run moves the record's start back with it at the next save);
+- a source that may change where this machine does not see it is available
+  (`settings::is_detachable`): one marked removable or network, or one on or
+  holding a FAT, exFAT or network mount or a mount under `/run/media`, `/media`
+  or `/mnt/usb`. Folder times there need not move, and FAT inode numbers change
+  between mounts.
+
+Otherwise it watches the saved folders, each only as a directory under a kept
+folder or as a root, so a symlink put in place of a folder is never followed.
+The catch-up then compares:
+
+- a saved folder that is no longer the one watched (another folder renamed into
+  its place, by its inode, or a file, a symlink or nothing): it leaves with its
+  tree, and what took its place is indexed. One that cannot be read keeps its
+  entries and the folders listed below it, and the run is not recorded, so the
+  next start walks;
+- the direct entries of every folder modified or changed (`ctime`, which
+  `cp -a`, `rsync -a` and `tar` cannot set back) since the last run started:
+  folders and files created, renamed or deleted while the daemon was stopped.
+  A catalogued, watched folder among them only gets its row refreshed, since it
+  has a pass of its own; any other folder is walked whole;
+- a folder this user could not read: it stays listed without a watch, and once
+  made readable (`chmod`, `chown`) its change time puts it in the catch-up, or
+  its attribute event reaches the running watcher.
+
+A file rewritten in place changes no folder, an edited `.gitignore` or `.ignore`
+inside a source changes no fingerprint, and joining a group changes no folder:
+all three wait for the walk such a start runs once, a minute after it, at the
+watcher's background priority, or for `big-search rescan`. Like a rescan, that
+walk drops the run record until it ends, so a stop during it makes the next
+start walk.
+
+Mounts change no folder either. The daemon holds `/proc/self/mountinfo` open and
+wakes only when the kernel flags a change on it: a disk mounted or unmounted
+in or above a source starts a rescan, and a source that comes or goes (a removable
+disk plugged in) changes the roots the daemon started with, so it exits with
+status 75 and the unit starts it again (`RestartForceExitStatus=75`).
+
+That exit and a stop (SIGTERM from the service manager, or SIGINT) wait for the
+watcher: after the events already queued, it gathers what the kernel reports
+for one more debounce window, applies it, and lets the versions worker note
+every save it was sent, so a document saved just before a logout keeps its
+versions where a kill would leave them parked at the next start. A walk or the
+start's sync can hold the watcher longer, so the daemon exits after 5 s
+without it.
 
 The settings are conservative for old machines: `cache_size=-2048` (2 MiB),
 file-backed temporary storage (`SQLITE_TMPDIR` points at the data folder), and
@@ -517,6 +632,33 @@ only the rows up to the requested page, where a size index would cost every
 catalogue write. A `mime` or `kind` filter still goes to the name index, which
 alone knows types and folders, unordered and capped.
 
+### Environment
+
+These variables override the configuration, for one run or a unit drop-in; the
+running service reads them at start. A boolean is `1`, `true`, `yes` or `on`,
+or `0`, `false`, `no` or `off`, in any case; any other value is ignored.
+
+| Variable | Overrides |
+|---|---|
+| `BIG_SEARCH_NAMES_ONLY`, `BIG_SEARCH_CONTENT`, `BIG_SEARCH_META` | `names_only`, `content`, `metadata` |
+| `BIG_SEARCH_CONTENT_INDEX_MODE` | `content_index_mode` |
+| `BIG_SEARCH_EXTRACT_MAX_MB`, `BIG_SEARCH_TEXT_MAX_MB`, `BIG_SEARCH_PDF_MAX_MB` | `extract_max_mb`, `text_max_mb`, `pdf_max_mb` |
+| `BIG_SEARCH_OFFICE_MAX_MB`, `BIG_SEARCH_CONTENT_MAX_MB` (wins) | `office_max_mb` |
+| `BIG_SEARCH_PDF_TIMEOUT_SECS`, `BIG_SEARCH_CONTENT_COOLDOWN_SECS` | `pdf_timeout_secs`, `content_cooldown_secs` |
+| `BIG_SEARCH_FOLLOW_LINKS` | `follow_symlinks` |
+| `BIG_SEARCH_ORIGIN`, `BIG_SEARCH_ORIGIN_WATCH`, `BIG_SEARCH_ORIGIN_BROWSER_HISTORY` | `[origin]` `enabled` (and the watch it starts), `browser_history` |
+| `BIG_SEARCH_ORIGIN_XATTR`, `BIG_SEARCH_ORIGIN_QUERY`, `BIG_SEARCH_ORIGIN_MAX_BATCH` | origin from extended attributes, origin in query results, origin paths gathered before a write |
+| `BIG_SEARCH_META_SNIFF`, `_AUDIO`, `_VIDEO`, `_IMAGE`, `BIG_SEARCH_META_MAX_MB` | metadata by content type and its read cap (`meta.rs`) |
+| `BIG_SEARCH_CONTENT_WORKERS`, `BIG_SEARCH_DEDUP_CONTENT` | extraction workers (up to 4), reading reflinked copies once |
+| `BIG_SEARCH_BACKGROUND_WRITER_MB`, `BIG_SEARCH_BULK_WRITER_MB`, `BIG_SEARCH_CONTENT_WRITER_MB` | tantivy writer memory |
+| `BIG_SEARCH_BENCH` | prints timings from `reindex` |
+
+Debug builds and tests also read `BIG_SEARCH_CATALOG_CONTENT_BATCH`,
+`BIG_SEARCH_DAEMON_CONTENT_BATCH`, `BIG_SEARCH_DAEMON_CONTENT_BATCH_MB`,
+`BIG_SEARCH_DAEMON_CONTENT_IDLE_MS` and `BIG_SEARCH_SAVED_START_CHECK_MS`,
+which shrink batches and waits, and `BIG_SEARCH_KEEP_PRIORITY`, which keeps
+the indexer at normal priority; a release build ignores them.
+
 ## 10. Dependencies
 
 `apps/big-search/Cargo.toml` is the list: tantivy, `rusqlite` for the state,
@@ -531,6 +673,43 @@ D-Bus. `deny.toml` admits crates.io only, and `Cargo.lock` is committed.
   `CAP_SYS_ADMIN`.
 - Every path, event and file is untrusted. The walk never follows symlinks;
   configured roots are resolved and checked before anything is indexed.
+- A path a client names for the daemon to read (`reindex`, `save_version`, the
+  `register_*` targets) is taken only when, with every symlink on the way
+  followed, it lands inside a source as resolved when the daemon started, and
+  is keyed by where it lands; `..` is refused everywhere. `versions` and
+  `forget_versions` answer for the rows kept under the path as spelled, and
+  only when there are none for those under where it lands: a kept key was a
+  real path when written, and a symlink put in its place since leads to
+  another document. For that reason `save_version` through a path with rows
+  kept under it that lands on a file elsewhere is refused, since the restore
+  that follows could write one document's version over another's; with
+  nothing there it proceeds. `forget_versions` errs toward erasing: the rows
+  kept under the path as spelled and under where it lands, those parked from
+  either, and every row recorded for the file where it lands (filesystem,
+  `ino`, birth time), whoever they were kept for.
+- History follows a document only through what the watcher hears: a rename
+  moves its rows, a folder's rename the rows below it, and every other row
+  below the destination is parked (a folder is renamed only onto an empty
+  one, so they are deleted documents' or those of documents moved away while
+  the service was stopped). A heard save keeps the row at the path, since an
+  editor's save is a new file there. Nothing hands rows to a file by its
+  identity. A row is parked when its path holds a file it does not record
+  that the service cannot have seen arrive: one born before the run (checked
+  for every row at a start, before anything heard), or one arriving where
+  the row's document was found gone by the missing sweep; also a row that
+  reaches its file through a folder replaced by a link. A parked row has no
+  path, is never listed or given one again, is erased by `forget_versions`
+  through the path it was parked from, and expires as a missing document's
+  does. So a document moved, or edited, while the service was stopped starts
+  a new history where it is; its earlier versions wait, parked or at the
+  path it left, until they expire. A pause stops indexing, not this: heard
+  saves and renames still reach the versions worker. A folder left unwatched
+  (past `max_user_watches`) hears nothing, so its documents fare as if
+  edited while stopped. At one path, files are told apart by
+  `ino` and birth time; the filesystem is its `f_fsid`, which XFS draws from
+  the device number, so it serves only to reach a file's rows under other
+  paths. It never keeps a version of a file reached through a folder
+  replaced by a link, and checks a reindex again before it reads.
 - Extraction subprocesses get argv arrays, never `sh -c`; a failure or a
   timeout skips the file and is logged, and never stops the daemon.
 - The socket lives in `$XDG_RUNTIME_DIR`, mode `0600`, `AF_UNIX` only, same UID.

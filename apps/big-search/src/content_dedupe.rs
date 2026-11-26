@@ -208,13 +208,17 @@ impl ContentSignatures {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "legacy: migrate to history::identity, since the signatures persist st_dev"
+)]
 fn physical_content_identity(path: &Path, size: u64) -> Option<String> {
     if size == 0 {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = crate::extract::open_regular(path)?;
     let metadata = file.metadata().ok()?;
-    if !metadata.is_file() || metadata.len() != size {
+    if metadata.len() != size {
         return None;
     }
     if metadata.nlink() > 1 {
@@ -357,16 +361,14 @@ struct FiemapExtent {
     fe_reserved: [u32; 3],
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
 
     #[test]
     fn content_signatures_skip_shared_physical_identity() {
-        let base =
-            std::env::temp_dir().join(format!("lsearch-content-signatures-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::test_env::scratch_dir("lsearch-content-signatures");
         let first = base.join("first.md");
         let second = base.join("second.md");
         std::fs::write(&first, b"same personal note").unwrap();
@@ -382,8 +384,6 @@ mod tests {
             signatures.claim_identity(&second, identity(), |_| identity()),
             ContentClaim::Duplicate
         );
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -410,9 +410,7 @@ mod tests {
 
     #[test]
     fn edited_representative_loses_its_identity() {
-        let base =
-            std::env::temp_dir().join(format!("lsearch-content-edited-{}", std::process::id()));
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::test_env::scratch_dir("lsearch-content-edited");
         let (first, second) = (base.join("first.md"), base.join("second.md"));
         std::fs::write(&first, b"edited note").unwrap();
         std::fs::write(&second, b"old note").unwrap();
@@ -433,17 +431,11 @@ mod tests {
             signatures.claim_identity(&first, identity(), |_| identity()),
             ContentClaim::Duplicate
         );
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn equal_text_needs_physical_identity() {
-        let base = std::env::temp_dir().join(format!(
-            "lsearch-content-no-identity-{}",
-            std::process::id()
-        ));
-        std::fs::remove_dir_all(&base).ok();
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::test_env::scratch_dir("lsearch-content-no-identity");
         let first = base.join("first.md");
         let second = base.join("second.md");
         std::fs::write(&first, b"same personal note").unwrap();
@@ -458,8 +450,23 @@ mod tests {
             signatures.claim_identity(&second, None, |_| unreachable!()),
             ContentClaim::Unique
         );
+    }
 
-        std::fs::remove_dir_all(&base).ok();
+    /// A FIFO renamed in after the worker's check has no identity, and no wait
+    /// for a writer under the signature lock.
+    #[test]
+    fn fifo_has_no_identity_without_waiting() {
+        let base = crate::test_env::scratch_dir("content-dedupe-fifo");
+        let fifo = base.join("a.bin");
+        crate::test_env::make_fifo(&fifo);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(physical_content_identity(&fifo, 4096));
+        });
+        let identity = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("physical_content_identity waits on the FIFO");
+        assert_eq!(identity, None);
     }
 
     #[test]
@@ -468,7 +475,7 @@ mod tests {
             .unwrap()
             .join("target")
             .join(format!("lsearch-content-reflink-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let first = base.join("first.bin");
         let second = base.join("second.bin");
@@ -484,14 +491,16 @@ mod tests {
                 state.to_le_bytes()
             })
             .collect();
-        std::fs::write(&first, bytes).unwrap();
+        let mut written = std::fs::File::create(&first).unwrap();
+        written.write_all(&bytes).unwrap();
         // Force extent allocation: a freshly written file may still be in
         // delalloc, which FIEMAP reports as an unsafe flag → identity None and
         // a flaky assert depending on writeback timing.
-        std::fs::File::open(&first).unwrap().sync_all().unwrap();
+        written.sync_all().unwrap();
+        drop(written);
 
         if crate::history::clone_file(&first, &second).is_err() {
-            std::fs::remove_dir_all(&base).ok();
+            let _ = std::fs::remove_dir_all(&base);
             eprintln!("skipped: this filesystem cannot clone files");
             return;
         }
@@ -499,7 +508,7 @@ mod tests {
         let size = std::fs::metadata(&first).unwrap().len();
         let first_identity = physical_content_identity(&first, size);
         let second_identity = physical_content_identity(&second, size);
-        std::fs::remove_dir_all(&base).ok();
+        let _ = std::fs::remove_dir_all(&base);
         // Extents with unsafe FIEMAP flags (encrypted, inline) have no identity
         // by design; then neither clone may have one.
         if first_identity.is_none() {

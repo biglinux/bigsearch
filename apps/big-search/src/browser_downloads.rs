@@ -84,7 +84,7 @@ pub fn import(writer: &OriginWriter) -> usize {
 /// Named exactly, never a walk: profile folders also hold `Cookies` and
 /// `Login Data`.
 fn history_files() -> Vec<PathBuf> {
-    let config = home().join(".config");
+    let config = big_search_config::config_home();
     let mut found = Vec::new();
     for browser in CHROMIUM_BROWSERS {
         let root = config.join(browser);
@@ -102,10 +102,6 @@ fn history_files() -> Vec<PathBuf> {
         }
     }
     found
-}
-
-fn home() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }
 
 fn import_one(writer: &OriginWriter, history: &Path) -> Result<usize> {
@@ -219,7 +215,6 @@ mod tests {
     #[test]
     fn only_the_newest_unchanged_download_counts() {
         let dir = crate::test_env::scratch_dir("bs-browser-downloads");
-        std::fs::create_dir_all(&dir).unwrap();
         let file = |name: &str| {
             let path = dir.join(name);
             std::fs::write(&path, b"x").unwrap();
@@ -262,6 +257,5 @@ mod tests {
             still_on_disk(rows),
             [(PathBuf::from(fresh), "new.example".to_string(), now - 5)]
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

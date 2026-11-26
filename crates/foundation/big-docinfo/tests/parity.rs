@@ -1,9 +1,6 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! Every field of every fixture document, against a recorded answer.
 //!
-//! `fixtures/expected.jsonl` holds the recorded answers. A behaviour change is
+//! `fixtures/expected.jsonl` holds the recorded answers. A behavior change is
 //! measured on the evaluation corpus, and the answers are re-recorded with
 //! `BIG_DOCINFO_BLESS=1 cargo test -p big-docinfo`.
 //! The public documents of the corpus carry real names and stay out of this

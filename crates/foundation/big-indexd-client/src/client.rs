@@ -6,18 +6,18 @@ use crate::{
     RegisterDerivedRequest, RegisterMoveRequest, Reply, Request, RequestBody, Status, Unavailable,
     VersionsAnswer,
 };
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// How long a request may take before the caller gets an error instead of a
-/// thread that never returns.
+/// How long one read or write on the socket may block before the caller gets
+/// an error instead of a thread that never returns.
 ///
 /// Without a deadline, a daemon that accepted the connection and then stopped
 /// answering (a wedged commit, a stopped process still holding the socket)
 /// blocks the calling thread forever, and `PersistentClient`'s single retry
-/// only fires on an I/O error, which a silent hang never produces.
+/// only fires on a closed connection, which a silent hang never produces.
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The largest reply this client will assemble.
@@ -46,10 +46,10 @@ fn read_reply_line(reader: &mut impl BufRead, line: &mut String) -> Result<(), C
     Ok(())
 }
 
-/// Apply the request deadline to both directions of `stream`.
-fn apply_deadlines(stream: &UnixStream) -> Result<(), ClientError> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+/// Apply `deadline` to reads and writes on `stream`.
+fn apply_deadlines(stream: &UnixStream, deadline: Duration) -> Result<(), ClientError> {
+    stream.set_read_timeout(Some(deadline))?;
+    stream.set_write_timeout(Some(deadline))?;
     Ok(())
 }
 
@@ -68,9 +68,14 @@ fn apply_deadlines(stream: &UnixStream) -> Result<(), ClientError> {
 /// refuse it for.
 #[must_use]
 pub fn default_socket() -> Option<PathBuf> {
-    // An empty or relative value is unset (XDG Base Directory spec), as the
-    // daemon reads it; joining it would name a socket under the current folder.
-    std::env::var_os("XDG_RUNTIME_DIR")
+    socket_in(std::env::var_os("XDG_RUNTIME_DIR"))
+}
+
+/// The socket under the runtime directory `runtime`. An empty or relative
+/// value is unset (XDG Base Directory spec): joining it would name a socket
+/// under the current folder. The daemon binds this path.
+fn socket_in(runtime: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    runtime
         .map(PathBuf::from)
         .filter(|runtime| runtime.is_absolute())
         .map(|runtime| runtime.join("biglinux").join("indexd.sock"))
@@ -91,6 +96,7 @@ struct PersistentConnection {
 pub struct PersistentClient {
     sock: PathBuf,
     connection: Option<PersistentConnection>,
+    deadline: Duration,
 }
 
 impl Client {
@@ -108,28 +114,22 @@ impl Client {
         default_socket().map(Client::new)
     }
 
-    fn roundtrip(&self, body: RequestBody) -> Result<Reply, ClientError> {
-        let stream = UnixStream::connect(&self.sock)?;
-        apply_deadlines(&stream)?;
-        let request = Request {
-            v: PROTOCOL_VERSION,
-            body,
-        };
-        let mut w = stream.try_clone()?;
-        serde_json::to_writer(&mut w, &request)?;
-        w.write_all(b"\n")?;
-        w.flush()?;
+    /// Whether a daemon appears to be listening (a cheap connect probe).
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        UnixStream::connect(&self.sock).is_ok()
+    }
 
-        let mut line = String::new();
-        read_reply_line(&mut BufReader::new(stream), &mut line)?;
-        let reply: Reply = serde_json::from_str(line.trim())?;
-        if let Reply::Error { message, .. } = &reply {
-            return Err(ClientError::Daemon(message.clone()));
-        }
-        Ok(reply)
+    fn roundtrip(&self, body: RequestBody) -> Result<Reply, ClientError> {
+        exchange(&mut connect(&self.sock, IO_TIMEOUT)?, &request_line(body)?)
     }
 
     /// Run a query; the daemon filters, pages, and attaches metadata server-side.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn query(
         &self,
         q: &str,
@@ -141,6 +141,11 @@ impl Client {
     }
 
     /// Run a query and request origin summaries for the visible page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn query_with_origin(
         &self,
         q: &str,
@@ -174,6 +179,11 @@ impl Client {
     }
 
     /// Fetch full origin/provenance details for one path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn origin(&self, path: &str) -> Result<Option<OriginProvenance>, ClientError> {
         match self.roundtrip(RequestBody::Origin(OriginRequest {
             path: path.to_string(),
@@ -186,6 +196,10 @@ impl Client {
     }
 
     /// Register a successful file copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_copy(
         &self,
         src: &str,
@@ -200,6 +214,10 @@ impl Client {
     }
 
     /// Register a successful move or rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_move(
         &self,
         src: &str,
@@ -214,6 +232,10 @@ impl Client {
     }
 
     /// Register a file created by an application.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_created(&self, path: &str, app_id: Option<&str>) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::RegisterCreated(RegisterCreatedRequest {
             path: path.to_string(),
@@ -222,6 +244,10 @@ impl Client {
     }
 
     /// Register a file derived from another file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn register_derived(
         &self,
         src: &str,
@@ -236,6 +262,11 @@ impl Client {
     }
 
     /// Cataloged count + paused flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent, refuses, or answers
+    /// with another kind of reply.
     pub fn status(&self) -> Result<Status, ClientError> {
         match self.roundtrip(RequestBody::Status)? {
             Reply::Status {
@@ -356,16 +387,35 @@ impl Client {
     }
 
     /// Pause indexing (queries keep working against the current index).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn pause(&self) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::Pause)
     }
 
     /// Resume indexing and reconcile changes missed while paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
     pub fn resume(&self) -> Result<(), ClientError> {
         self.expect_ok(RequestBody::Resume)
     }
 
-    /// Request a full rebuild of the index from source files.
+    /// Reconcile the sources with the catalogue, for changes made while the
+    /// service was stopped. The daemon refuses it while indexing is paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the daemon is absent or refuses.
+    pub fn rescan(&self) -> Result<(), ClientError> {
+        self.expect_ok(RequestBody::Rescan)
+    }
+
+    /// Read every catalogued folder from the start. Queries keep answering
+    /// meanwhile, from what is catalogued so far.
     ///
     /// # Errors
     ///
@@ -375,12 +425,7 @@ impl Client {
     }
 
     fn expect_ok(&self, body: RequestBody) -> Result<(), ClientError> {
-        match self.roundtrip(body)? {
-            Reply::Ok { .. } => Ok(()),
-            other => Err(ClientError::Protocol(format!(
-                "expected ok reply, got {other:?}"
-            ))),
-        }
+        ok_from(self.roundtrip(body)?)
     }
 }
 
@@ -390,6 +435,7 @@ impl PersistentClient {
         Self {
             sock: sock.into(),
             connection: None,
+            deadline: IO_TIMEOUT,
         }
     }
 
@@ -402,45 +448,42 @@ impl PersistentClient {
         default_socket().map(Self::new)
     }
 
-    fn connect(&self) -> Result<PersistentConnection, ClientError> {
-        let stream = UnixStream::connect(&self.sock)?;
-        apply_deadlines(&stream)?;
-        let reader = BufReader::new(stream.try_clone()?);
-        Ok(PersistentConnection { stream, reader })
-    }
-
     fn connection(&mut self) -> Result<&mut PersistentConnection, ClientError> {
-        if self.connection.is_none() {
-            self.connection = Some(self.connect()?);
-        }
-        Ok(self
-            .connection
-            .as_mut()
-            .expect("connection was just opened"))
+        let connection = match self.connection.take() {
+            Some(connection) => connection,
+            None => connect(&self.sock, self.deadline)?,
+        };
+        Ok(self.connection.insert(connection))
     }
 
+    /// Sent again only when a reused connection turns out closed: the daemon
+    /// restarted or dropped it while idle. A timeout is not retried, so a
+    /// stuck daemon costs one deadline. After any failure but the daemon's own
+    /// error reply the connection is dropped, so a late answer is never read
+    /// as the next one.
     fn roundtrip(&mut self, body: RequestBody) -> Result<Reply, ClientError> {
-        let request = Request {
-            v: PROTOCOL_VERSION,
-            body,
-        };
-        let mut request_bytes = serde_json::to_vec(&request)?;
-        request_bytes.push(b'\n');
-
-        for attempt in 0..2 {
-            let result = {
-                let connection = self.connection()?;
-                persistent_roundtrip(connection, &request_bytes)
-            };
-            match result {
-                Ok(reply) => return Ok(reply),
-                Err(ClientError::Io(_)) if attempt == 0 => {
-                    self.connection = None;
-                }
-                Err(e) => return Err(e),
+        let request_bytes = request_line(body)?;
+        let reused = self.connection.is_some();
+        let result = match exchange(self.connection()?, &request_bytes) {
+            Err(ClientError::Io(error))
+                if reused
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                    ) =>
+            {
+                self.connection = None;
+                exchange(self.connection()?, &request_bytes)
             }
+            result => result,
+        };
+        if result
+            .as_ref()
+            .is_err_and(|error| !matches!(error, ClientError::Daemon(_)))
+        {
+            self.connection = None;
         }
-        unreachable!("persistent retry loop always returns");
+        result
     }
 
     /// Forget the versions kept for one document.
@@ -452,18 +495,39 @@ impl PersistentClient {
     ///
     /// Returns [`ClientError`] when the daemon is absent or answers oddly.
     pub fn forget_versions(&mut self, path: &str) -> Result<(), ClientError> {
-        match self.roundtrip(RequestBody::ForgetVersions(PathRequest {
+        ok_from(self.roundtrip(RequestBody::ForgetVersions(PathRequest {
             path: path.to_string(),
-        }))? {
-            Reply::Ok { .. } => Ok(()),
-            other => Err(ClientError::Protocol(format!(
-                "expected ok reply, got {other:?}"
-            ))),
-        }
+        }))?)
     }
 }
 
-fn persistent_roundtrip(
+fn ok_from(reply: Reply) -> Result<(), ClientError> {
+    match reply {
+        Reply::Ok { .. } => Ok(()),
+        other => Err(ClientError::Protocol(format!(
+            "expected ok reply, got {other:?}"
+        ))),
+    }
+}
+
+fn connect(sock: &Path, deadline: Duration) -> Result<PersistentConnection, ClientError> {
+    let stream = UnixStream::connect(sock)?;
+    apply_deadlines(&stream, deadline)?;
+    let reader = BufReader::new(stream.try_clone()?);
+    Ok(PersistentConnection { stream, reader })
+}
+
+/// The request as one newline-terminated line, so it goes out in one write.
+fn request_line(body: RequestBody) -> Result<Vec<u8>, ClientError> {
+    let mut line = serde_json::to_vec(&Request {
+        v: PROTOCOL_VERSION,
+        body,
+    })?;
+    line.push(b'\n');
+    Ok(line)
+}
+
+fn exchange(
     connection: &mut PersistentConnection,
     request_bytes: &[u8],
 ) -> Result<Reply, ClientError> {
@@ -483,6 +547,40 @@ fn persistent_roundtrip(
 mod tests {
     use super::*;
 
+    /// Guards: bound: a reply line up to the ceiling is read, one byte more is
+    /// refused instead of growing without end.
+    #[test]
+    fn reply_line_capped() {
+        let ceiling = usize::try_from(MAX_REPLY_BYTES).unwrap();
+        let mut at_cap = vec![b'a'; ceiling - 1];
+        at_cap.push(b'\n');
+        let mut line = String::new();
+        read_reply_line(&mut at_cap.as_slice(), &mut line).unwrap();
+        assert_eq!(line.len(), ceiling);
+
+        let mut past_cap = vec![b'a'; ceiling];
+        past_cap.push(b'\n');
+        let mut line = String::new();
+        let refused = read_reply_line(&mut past_cap.as_slice(), &mut line);
+        assert!(
+            matches!(&refused, Err(ClientError::Io(error)) if error.kind() == io::ErrorKind::InvalidData),
+            "{refused:?}"
+        );
+    }
+
+    /// Guards: security refusal: a runtime directory that is unset, empty or
+    /// relative names no socket, so none lands under the working folder.
+    #[test]
+    fn socket_needs_absolute_runtime() {
+        for runtime in [None, Some(""), Some("run/user/1000")] {
+            assert_eq!(socket_in(runtime.map(Into::into)), None, "{runtime:?}");
+        }
+        assert_eq!(
+            socket_in(Some("/run/user/1000".into())),
+            Some(PathBuf::from("/run/user/1000/biglinux/indexd.sock"))
+        );
+    }
+
     #[test]
     fn persistent_client_reuses_its_connection() {
         use std::os::unix::net::UnixListener;
@@ -493,7 +591,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let socket_path = std::env::temp_dir().join(format!(
+        // In `/tmp`: a socket path must fit `sun_path` (108 bytes), and `TMPDIR` can be long.
+        let socket_path = std::path::Path::new("/tmp").join(format!(
             "big-indexd-persistent-{}-{unique}.sock",
             std::process::id()
         ));
@@ -518,6 +617,54 @@ mod tests {
         client.forget_versions("/b").unwrap();
 
         server_thread.join().unwrap().unwrap();
-        std::fs::remove_file(socket_path).ok();
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn silent_daemon_costs_one_deadline() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // In `/tmp`: a socket path must fit `sun_path` (108 bytes), and `TMPDIR` can be long.
+        let socket_path = std::path::Path::new("/tmp")
+            .join(format!("big-indexd-silent-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        // Takes the request and never answers; a second connection would be a
+        // resend.
+        let server = std::thread::spawn({
+            let done = done.clone();
+            move || {
+                let mut held = Vec::new();
+                while !done.load(Ordering::Relaxed) {
+                    if let Ok((stream, _)) = listener.accept() {
+                        held.push(stream);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                held.len()
+            }
+        });
+
+        let mut client = PersistentClient {
+            deadline: Duration::from_secs(1),
+            ..PersistentClient::new(socket_path.clone())
+        };
+        let (sent, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sent.send(client.forget_versions("/home/p/a")));
+        // Half the default deadline: a client that kept the default, or hangs,
+        // fails here instead of holding the test; the connection count below
+        // tells a resend.
+        let outcome = outcome.recv_timeout(IO_TIMEOUT / 2);
+        done.store(true, Ordering::Relaxed);
+        let _ = std::fs::remove_file(&socket_path);
+        assert!(
+            matches!(outcome, Ok(Err(ClientError::Io(_)))),
+            "{outcome:?}"
+        );
+        assert_eq!(server.join().unwrap(), 1);
     }
 }

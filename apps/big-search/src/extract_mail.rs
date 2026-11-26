@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! An e-mail message saved as a file (`.eml`, RFC 5322 with MIME): its headers
 //! and the text of its body, decoded.
 //!
@@ -12,6 +9,14 @@
 
 /// Parts read from nested `multipart/*`, against a message built to recurse.
 const MAX_DEPTH: usize = 6;
+
+/// The headers a message's text opens with, as written there and by name.
+const INDEXED_HEADERS: [(&str, &str); 4] = [
+    ("Subject", "subject"),
+    ("From", "from"),
+    ("To", "to"),
+    ("Date", "date"),
+];
 
 /// The text of a message and its subject.
 ///
@@ -25,13 +30,8 @@ pub(crate) fn read_eml(bytes: &[u8]) -> Option<(String, Option<String>)> {
     let header = |name: &str| header_value(headers, name).map(|v| decode_words(&raw_text(&v)));
     let subject = header("subject").filter(|s| !s.trim().is_empty());
     let mut text = String::new();
-    for (label, value) in [
-        ("Subject", subject.clone()),
-        ("From", header("from")),
-        ("To", header("to")),
-        ("Date", header("date")),
-    ] {
-        if let Some(value) = value {
+    for (label, name) in INDEXED_HEADERS {
+        if let Some(value) = header(name).filter(|value| !value.trim().is_empty()) {
             text.push_str(&format!("{label}: {}\n", value.trim()));
         }
     }

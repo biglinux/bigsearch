@@ -28,17 +28,31 @@ const DOCUMENT_EXTENSIONS: [&str; 13] = [
 /// a person keeps in plain sight and would not want copied.
 const NEVER_KEPT: [&str; 5] = ["senha", "password", ".kdbx", ".key", ".pem"];
 
-/// Whether this document earns a version, and its metadata if so.
+/// Whether this document earns a version: its metadata if so, else why not.
 ///
 /// Cheapest test first. Extensions are an allow list because a block list is
 /// how somebody discovers the problem with a 100 GB file.
-pub fn eligible_metadata(path: &Path) -> Option<std::fs::Metadata> {
+pub(super) fn eligible_metadata(path: &Path) -> Result<std::fs::Metadata, &'static str> {
     eligible_name(path)?;
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES || metadata.len() == 0 {
-        return None;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| "it cannot be read")?;
+    if !metadata.is_file() {
+        return Err("it is not a regular file");
     }
-    Some(metadata)
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err("it is over the size versions are kept up to");
+    }
+    if metadata.len() == 0 {
+        return Err("it is empty");
+    }
+    // The watcher's paths pass no link, but a folder on the way may have been
+    // replaced by one since: the file there is another document, whose
+    // version would join this path's history and take on its identity.
+    let folder = path.parent().ok_or("it has no folder")?;
+    let real = std::fs::canonicalize(folder).map_err(|_| "its folder cannot be resolved")?;
+    if real != folder {
+        return Err("a folder on its path is a link");
+    }
+    Ok(metadata)
 }
 
 /// Whether a path is even the kind of file that earns versions.
@@ -47,6 +61,11 @@ pub fn eligible_metadata(path: &Path) -> Option<std::fs::Metadata> {
 /// reports before it costs a channel send and a place in the worker's queue.
 #[must_use]
 pub fn may_be_a_document(path: &Path) -> bool {
+    name_refusal(path).is_none()
+}
+
+/// Why the name alone keeps `path` out of the versions.
+fn name_refusal(path: &Path) -> Option<&'static str> {
     // The extension first, without building a string: it rejects almost every
     // path, and the name check allocates.
     let document = path
@@ -57,30 +76,37 @@ pub fn may_be_a_document(path: &Path) -> bool {
                 .iter()
                 .any(|allowed| extension.eq_ignore_ascii_case(allowed))
         });
-    document
-        && path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                let name = name.to_ascii_lowercase();
-                !NEVER_KEPT.iter().any(|marker| name.contains(marker))
-            })
+    if !document {
+        return Some("it has no document extension");
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Some("its name is not UTF-8");
+    };
+    let name = name.to_ascii_lowercase();
+    NEVER_KEPT
+        .iter()
+        .any(|marker| name.contains(marker))
+        .then_some("its name marks a password or a key")
 }
 
 /// The half of eligibility that is about the name alone, with nothing read from
 /// disk, so it can also answer about a path that has disappeared.
-pub(super) fn eligible_name(path: &Path) -> Option<()> {
-    if !may_be_a_document(path) {
-        return None;
+pub(super) fn eligible_name(path: &Path) -> Result<(), &'static str> {
+    if let Some(refusal) = name_refusal(path) {
+        return Err(refusal);
     }
     // Rows are keyed by UTF-8 text: a lossy key for a path in a non-UTF-8
     // folder never exists on disk, so its versions would expire under it.
-    path.to_str()?;
-    if scope().excluded(path, false) {
-        return None;
+    if path.to_str().is_none() {
+        return Err("its folder's name is not UTF-8");
     }
-    crate::settings::sources().owner(path)?;
-    Some(())
+    if scope().excluded(path, false) {
+        return Err("an exclusion rule covers it");
+    }
+    if crate::settings::sources().owner(path).is_none() {
+        return Err("it is not in a searched folder");
+    }
+    Ok(())
 }
 
 fn scope() -> &'static crate::scan::Scope {
@@ -88,17 +114,14 @@ fn scope() -> &'static crate::scan::Scope {
     SCOPE.get_or_init(crate::scan::Scope::compile)
 }
 
-/// The nearest folder above `path` that holds a `.git`: a directory in an
-/// ordinary clone, a file in a linked worktree or a submodule.
-///
-/// The walk stops at the catalogued folder that owns `path`: a `.git` above it
-/// belongs to something the person did not ask to have searched.
-pub(super) fn git_work_tree(path: &Path) -> Option<&Path> {
+/// The nearest work-tree root above `path` ([`crate::scan::work_tree_root`]),
+/// looked for no higher than the source that owns `path`.
+pub(super) fn work_tree(path: &Path) -> Option<&Path> {
     let top = crate::settings::sources()
         .owner(path)
         .map(|source| source.path.as_path());
     for dir in path.ancestors().skip(1) {
-        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+        if crate::scan::work_tree_root(dir).is_some() {
             return Some(dir);
         }
         if Some(dir) == top {
@@ -108,40 +131,12 @@ pub(super) fn git_work_tree(path: &Path) -> Option<&Path> {
     None
 }
 
-/// Whether git ignores `path` inside `work_tree`.
-///
-/// Git's precedence: the `.gitignore` nearest the file first, up to the top of
-/// the work tree, then `.git/info/exclude`, then the person's global excludes
-/// file. The first file with an opinion decides, `!` re-includes included.
-pub(super) fn gitignored(work_tree: &Path, path: &Path) -> bool {
-    use ignore::gitignore::{Gitignore, GitignoreBuilder};
-    for dir in path.ancestors().skip(1) {
-        let (rules, _) = Gitignore::new(dir.join(".gitignore"));
-        match rules.matched_path_or_any_parents(path, false) {
-            ignore::Match::Ignore(_) => return true,
-            ignore::Match::Whitelist(_) => return false,
-            ignore::Match::None => {}
-        }
-        if dir == work_tree {
-            break;
-        }
-    }
-    let mut builder = GitignoreBuilder::new(work_tree);
-    if let Some(global) = ignore::gitignore::gitconfig_excludes_path() {
-        builder.add(global);
-    }
-    builder.add(work_tree.join(".git/info/exclude"));
-    builder
-        .build()
-        .is_ok_and(|rules| rules.matched_path_or_any_parents(path, false).is_ignore())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn git_work_trees_and_ignores_found() {
+    fn work_trees_and_ignores_found() {
         let root = crate::test_env::scratch_dir("bs-history-git");
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join(".git/info")).unwrap();
@@ -153,17 +148,24 @@ mod tests {
         std::fs::create_dir_all(repo.join("sub")).unwrap();
         std::fs::write(repo.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
 
+        // A Jujutsu repository with no `.git` is one too.
+        std::fs::create_dir_all(root.join("jj/.jj")).unwrap();
+
         assert_eq!(
-            git_work_tree(&repo.join("docs/drafts/a.md")),
+            work_tree(&repo.join("docs/drafts/a.md")),
             Some(repo.as_path())
         );
         assert_eq!(
-            git_work_tree(&repo.join("sub/b.md")),
+            work_tree(&repo.join("sub/b.md")),
             Some(repo.join("sub").as_path())
         );
-        assert_eq!(git_work_tree(&root.join("loose.md")), None);
+        assert_eq!(
+            work_tree(&root.join("jj/c.md")),
+            Some(root.join("jj").as_path())
+        );
+        assert_eq!(work_tree(&root.join("loose.md")), None);
 
-        let ignored = |relative: &str| gitignored(&repo, &repo.join(relative));
+        let ignored = |relative: &str| crate::scan::repo_ignored(&repo.join(relative), false);
         assert!(ignored("build/report.md"));
         assert!(ignored("docs/drafts/log.txt"));
         assert!(ignored("private.md"));
@@ -171,8 +173,6 @@ mod tests {
         // The nearest `.gitignore` overrides the one above it.
         assert!(!ignored("docs/notes.txt"));
         assert!(!ignored("docs/drafts/a.md"));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Only documents, and never the files somebody keeps their passwords in.

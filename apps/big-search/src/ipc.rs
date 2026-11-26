@@ -10,7 +10,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -22,8 +22,9 @@ pub struct Control {
     pub commands: Sender<WatchMessage>,
     pub paused: Arc<AtomicBool>,
     pub activity: Arc<AtomicU8>,
-    /// Files whose content extraction is deferred by the edit cooldown; exposed
-    /// on query/status replies so UIs can show a "content still indexing" hint.
+    /// Files whose content extraction is deferred by the edit cooldown or by
+    /// another process holding them busy; query and status replies carry it
+    /// so a client can say content is still being indexed.
     pub pending_content: Arc<AtomicU64>,
     /// Folders the watcher could not watch.
     pub unwatched_dirs: Arc<AtomicU64>,
@@ -65,14 +66,18 @@ fn err(message: impl Into<String>) -> Reply {
 
 /// Serve requests on `sock` until killed. Holds the index open; clients may send
 /// multiple newline-delimited requests per connection. Only same-UID peers are
-/// admitted (defence in depth over 0600).
+/// admitted (defense in depth over 0600).
+///
+/// # Errors
+///
+/// Returns an error when the socket cannot be prepared or bound.
 pub fn serve(
     index: IndexReader,
     content_index: IndexReader,
     sock: &Path,
     control: Control,
-    origin_db: std::path::PathBuf,
-    state_db: std::path::PathBuf,
+    origin_db: PathBuf,
+    state_db: PathBuf,
     history: crate::history::SharedHistory,
 ) -> Result<()> {
     let listener = bind_private_socket(sock)?;
@@ -155,9 +160,8 @@ fn bind_private_socket(sock: &Path) -> Result<UnixListener> {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("restrict {}", dir.display()))?;
     }
-    if sock.exists() {
-        std::fs::remove_file(sock).ok();
-    }
+    // A socket left by a stopped daemon; the bind below reports what stays.
+    let _ = std::fs::remove_file(sock);
     let listener = UnixListener::bind(sock).with_context(|| format!("bind {}", sock.display()))?;
     std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))
         .context("socket perms 0600")?;
@@ -206,7 +210,7 @@ fn spawn_connection(
     let catalogue = catalogue::CatalogueReader::new(state_db);
     // Shared with the versions writer: only it knows whether reflinks work
     // and whether space ran out.
-    let history = std::sync::Arc::clone(history);
+    let history = history.clone();
     let spawned = std::thread::Builder::new()
         .name("ipc-conn".into())
         .spawn(move || {
@@ -232,9 +236,11 @@ fn spawn_connection(
 
 /// Whether the connected peer runs as the same UID as this daemon (SO_PEERCRED).
 fn peer_is_self(stream: &UnixStream) -> bool {
-    // SAFETY: getsockopt on a valid connected Unix socket fd; ucred is POD.
+    // SAFETY: an all-zero `ucred` is a valid value of the C struct.
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the fd is the stream's, alive for the call; `cred` and `len` are
+    // valid for writes of the size `len` states.
     let rc = unsafe {
         libc::getsockopt(
             stream.as_raw_fd(),
@@ -329,6 +335,7 @@ fn read_capped_line(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>) -> i
     }
 }
 
+// shape: maps fields: each request to the reply that answers it.
 fn dispatch(
     index: &IndexReader,
     content_index: &IndexReader,
@@ -358,8 +365,20 @@ fn dispatch(
         RequestBody::Status => status_reply(index, content_index, control),
         // Hand the command to the watcher thread over the shared channel; it applies
         // it between batches. Accepted asynchronously (the work may be long).
-        RequestBody::Pause => send_control_command(control, WatchControlCommand::Pause),
-        RequestBody::Resume => send_control_command(control, WatchControlCommand::Resume),
+        // The flag flips here, the moment the command is accepted, so a
+        // request right after it sees the new state; the watcher only reads it.
+        RequestBody::Pause => {
+            control.paused.store(true, Ordering::Relaxed);
+            send_control_command(control, WatchControlCommand::Pause)
+        }
+        RequestBody::Resume => {
+            control.paused.store(false, Ordering::Relaxed);
+            send_control_command(control, WatchControlCommand::Resume)
+        }
+        RequestBody::Rescan if control.paused.load(Ordering::Relaxed) => {
+            err("indexing is paused; `big-search resume` resumes it and rescans")
+        }
+        RequestBody::Rescan => send_control_command(control, WatchControlCommand::Rescan),
         RequestBody::Rebuild => send_control_command(control, WatchControlCommand::Rebuild),
         RequestBody::Reindex(request) => reindex_reply(control, request),
         // Done here so the reply says whether the rows are gone.
@@ -369,9 +388,17 @@ fn dispatch(
         // this immediately before it overwrites the document, and an answer that
         // arrives after the overwrite is no answer at all.
         RequestBody::SaveVersion(request) => save_version_reply(history, request),
-        RequestBody::ForgetVersions(request) => history_reply(history, |store| {
-            store.forget(std::path::Path::new(&request.path))
-        }),
+        RequestBody::ForgetVersions(request) => {
+            let Some(spellings) = version_spellings(&request.path) else {
+                return err(format!("{} is relative or holds ..", request.path));
+            };
+            // The file the path leads to now: its versions kept under a path
+            // it had before go too.
+            let resolved = settings::sources().resolved_client_path(Path::new(&request.path));
+            history_reply(history, |store| {
+                store.forget(&spellings, resolved.as_deref())
+            })
+        }
         RequestBody::ClearHistory => {
             history_reply(history, crate::history::History::forget_everything)
         }
@@ -471,13 +498,13 @@ fn status_reply(index: &IndexReader, content_index: &IndexReader, control: &Cont
     let paused = control.paused.load(Ordering::Relaxed);
     Reply::Status {
         v: PROTOCOL_VERSION,
-        indexed: index::document_count(index).unwrap_or(0),
+        indexed: index::document_count(index),
         paused,
         activity: crate::watch::activity_label(paused, control.activity.load(Ordering::Relaxed))
             .to_string(),
-        capabilities: daemon_capabilities(),
+        capabilities: daemon_capabilities(content_index),
         pending_content: control.pending_content.load(Ordering::Relaxed),
-        content_docs: index::document_count(content_index).unwrap_or(0),
+        content_docs: index::document_count(content_index),
         name_index_bytes: flat_directory_file_bytes(&config::index_dir()),
         content_index_bytes: flat_directory_file_bytes(&config::content_index_dir()),
         unwatched_dirs: control.unwatched_dirs.load(Ordering::Relaxed),
@@ -485,15 +512,14 @@ fn status_reply(index: &IndexReader, content_index: &IndexReader, control: &Cont
 }
 
 fn reindex_reply(control: &Control, request: big_indexd_client::ReindexRequest) -> Reply {
-    let path = std::path::PathBuf::from(request.path);
     if control.paused.load(Ordering::Relaxed) {
         return err("indexing is paused".to_string());
     }
     // A forced read walks and watches the path: never one the person
     // did not ask to have searched, nor one relative to the daemon.
-    if !path.is_absolute() || settings::sources().owner(&path).is_none() {
-        return err(format!("{} is not in a searched folder", path.display()));
-    }
+    let Some(path) = settings::sources().resolved_client_path(Path::new(&request.path)) else {
+        return err(format!("{} is not in a searched folder", request.path));
+    };
     send_control_command(control, WatchControlCommand::ReindexPath(path))
 }
 
@@ -510,8 +536,11 @@ fn versions_reply(
     history: &crate::history::SharedHistory,
     request: big_indexd_client::PathRequest,
 ) -> Reply {
-    let store = history.lock().expect("versions store lock");
-    let versions = match store.versions(std::path::Path::new(&request.path)) {
+    let Some(spellings) = version_spellings(&request.path) else {
+        return err(format!("{} is relative or holds ..", request.path));
+    };
+    let store = history.lock();
+    let versions = match store.versions(&spellings) {
         Ok(versions) => versions,
         Err(e) => return err(format!("versions: {e:#}")),
     };
@@ -537,16 +566,31 @@ fn versions_reply(
     }
 }
 
+/// The keys a client path may have versions under, in order: as spelled (a
+/// stored key was a real path when kept, and a symlink put in its place later
+/// leads to another document), then resolved inside a source, as
+/// [`save_version_reply`] keys it. `None` when relative or holding `..`.
+fn version_spellings(path: &str) -> Option<Vec<PathBuf>> {
+    let spelled = settings::normalized_client_path(Path::new(path))?;
+    let resolved = settings::sources().resolved_client_path(&spelled);
+    Some(std::iter::once(spelled).chain(resolved).collect())
+}
+
 fn save_version_reply(
     history: &crate::history::SharedHistory,
     request: big_indexd_client::PathRequest,
 ) -> Reply {
+    // The copy reads the file: never one outside the searched folders.
+    let Some(path) = settings::sources().resolved_client_path(Path::new(&request.path)) else {
+        return err(format!("{} is not in a searched folder", request.path));
+    };
+    let spelled = settings::normalized_client_path(Path::new(&request.path));
     history_reply(history, |store| {
+        if let Some(spelled) = spelled.filter(|spelled| *spelled != path) {
+            store.check_restore_through(&spelled, &path)?;
+        }
         store
-            .save_version(
-                std::path::Path::new(&request.path),
-                crate::history::Reason::BeforeRestore,
-            )
+            .save_version(&path, crate::history::Reason::BeforeRestore)
             .map(|_| ())
     })
 }
@@ -586,16 +630,15 @@ fn flat_directory_file_bytes(dir: &Path) -> u64 {
     total
 }
 
-fn daemon_capabilities() -> Vec<String> {
+fn daemon_capabilities(content_index: &IndexReader) -> Vec<String> {
     let mut capabilities = origin::capabilities();
     if settings::content_index_enabled() {
-        capabilities.push(format!(
-            "content-index-mode:{}",
-            settings::resolved_content_index_mode().as_str()
-        ));
+        let mode = index::stored_content_mode(content_index.searcher().index())
+            .unwrap_or_else(settings::resolved_content_index_mode);
+        capabilities.push(format!("content-index-mode:{}", mode.as_str()));
         capabilities.push(format!("extract-cap:{}", settings::extract_max_mb_label()));
     } else {
-        capabilities.push("names-only".to_string());
+        capabilities.push(big_indexd_client::NAMES_ONLY.to_string());
     }
     // Advertised so clients can detect support without a round trip.
     capabilities.push("sources".to_string());
@@ -606,7 +649,9 @@ fn daemon_capabilities() -> Vec<String> {
     // `filter.mime` (a type or `major/*`) is answered, and hits carry `mime`.
     capabilities.push("mime-filter".to_string());
     // `filter.kind` keeps folders or files.
-    capabilities.push("kind-filter".to_string());
+    capabilities.push(big_indexd_client::KIND_FILTER.to_string());
+    // The `rescan` command.
+    capabilities.push(big_indexd_client::RESCAN.to_string());
     capabilities
 }
 
@@ -636,11 +681,15 @@ fn history_reply(
     history: &crate::history::SharedHistory,
     change: impl FnOnce(&mut crate::history::History) -> anyhow::Result<()>,
 ) -> Reply {
-    let mut store = history.lock().expect("versions store lock");
+    let mut store = history.lock();
     match change(&mut store) {
         Ok(()) => Reply::Ok {
             v: PROTOCOL_VERSION,
         },
-        Err(error) => err(error.to_string()),
+        Err(error) => err(format!("{error:#}")),
     }
 }
+
+#[cfg(test)]
+#[cfg(not(miri))]
+mod tests;

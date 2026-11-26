@@ -2,6 +2,7 @@
 //! separate content index (`path`, `body`).
 use crate::catalogue::State;
 use crate::cjk_tokenizer::CjkFriendlyTokenizer;
+use crate::settings::{ContentIndexMode, ResolvedContentIndexMode};
 use anyhow::{Context, Result};
 use std::path::Path;
 use tantivy::indexer::IndexWriterOptions;
@@ -14,19 +15,21 @@ use tantivy::tokenizer::{
 };
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
-/// Registered analyzer for the `name` field: [`NameGrams`] of [`name_text`].
-/// Its name changes with what it emits (last: `name_grams`, before NFKC and
-/// single CJK characters), so the on-disk schema differs and the name index
-/// rebuilds.
+/// Registered analyzer for the `name` field: `NameGrams` of [`name_text`].
+/// Its name changes with what it emits, so the on-disk schema differs and
+/// the name index rebuilds. A retired name, never to be used again: `name_grams`.
 pub const NGRAM: &str = "name_nfkc";
 /// Registered analyzer for the `body` field: CJK-bigram aware with every CJK
 /// character alone too, word-splitting otherwise, folded like names
-/// ([`ScriptFold`] then ASCII folding). Renamed the same way (last:
-/// `body_folded`), so the content index rebuilds with it.
-pub const BODY: &str = "body_nfkc";
+/// ([`ScriptFold`] then ASCII folding). Renamed the same way, and when
+/// extraction changes the text it is handed, so the content index rebuilds
+/// and every file is read again. Names already used, never to
+/// be used again since an index left by an older build would match them:
+/// `body_folded`, `body_nfkc`, `body_text`, `body_words`.
+pub const BODY: &str = "body_readable";
 /// The analyzer content queries go through: [`BODY`] without the single
 /// characters of a CJK run (see [`CjkFriendlyTokenizer`]).
-pub const BODY_QUERY: &str = "body_nfkc_query";
+pub const BODY_QUERY: &str = "body_query";
 const DEFAULT_BACKGROUND_WRITER_MEMORY_MB: usize = 15;
 const DEFAULT_BULK_WRITER_MEMORY_MB: usize = 32;
 const MIN_WRITER_MEMORY_MB: usize = 15;
@@ -34,12 +37,13 @@ const MAX_INDEX_TO_STATE_EXTRA_PERCENT: u64 = 20;
 const MAX_INDEX_TO_STATE_SURPLUS: u64 = 10_000;
 const MIN_REPAIRABLE_NAME_DEFICIT: u64 = 1_000;
 
-/// Posting detail used for the content body field. The schema changes when this
-/// setting changes, so the content sidecar is recreated cleanly on next open.
+/// Posting detail for a new content index. An explicit mode that differs from
+/// the stored one recreates the content index at the next writer open; `auto`
+/// keeps what is stored (see `reusable_content_schema`).
 pub fn content_record_option() -> IndexRecordOption {
     match crate::settings::resolved_content_index_mode() {
-        crate::settings::ResolvedContentIndexMode::Basic => IndexRecordOption::Basic,
-        crate::settings::ResolvedContentIndexMode::Freqs => IndexRecordOption::WithFreqs,
+        ResolvedContentIndexMode::Basic => IndexRecordOption::Basic,
+        ResolvedContentIndexMode::Freqs => IndexRecordOption::WithFreqs,
     }
 }
 
@@ -184,7 +188,7 @@ impl TokenStream for NameGramStream<'_> {
 }
 
 /// The text the `name` field indexes and every name comparison reads: folded
-/// (see [`crate::extract::fold_lower`]), separators as spaces, and a space at
+/// (see [`crate::fold::fold_lower`]), separators as spaces, and a space at
 /// each end. The spaces make the edges of words grams of their own (" go"
 /// exists only where a word starts with "go", "go " only where one ends with
 /// it), so one or two letters find the names that are those letters
@@ -211,7 +215,7 @@ pub fn stem_key(name: &str) -> String {
 
 /// The folded words of a name or of a name query, split at separators.
 pub fn name_words(text: &str) -> Vec<String> {
-    crate::extract::fold_lower(text)
+    crate::fold::fold_lower(text)
         .split(is_name_separator)
         .filter(|word| !word.is_empty())
         .map(str::to_owned)
@@ -262,7 +266,7 @@ fn register_body_tokenizer(index: &Index) {
     }
 }
 
-/// The folding of [`crate::extract::fold_script_into`] for content words, so a
+/// The folding of `fold::fold_script_into` for content words, so a
 /// word is indexed and queried the way names are compared: "отчет" finds
 /// "Отчёт", "αναφορα" "Αναφορά", "احمد" "أحمد", a decomposed accent its
 /// precomposed twin. An Arabic word also loses its article (ال, وال, بال,
@@ -317,7 +321,7 @@ impl<T: TokenStream> TokenStream for ScriptFoldStream<'_, T> {
             return true;
         }
         self.buffer.clear();
-        crate::extract::fold_script_into(text, self.buffer);
+        crate::fold::fold_script_into(text, self.buffer);
         if self
             .buffer
             .starts_with(|c: char| ('\u{0600}'..='\u{06FF}').contains(&c))
@@ -359,6 +363,11 @@ pub struct ContentFields {
     pub body: Field,
 }
 
+/// The name index's field handles, looked up by name in `index`'s schema.
+///
+/// # Errors
+///
+/// Returns an error when the schema lacks a field this build expects.
 pub fn fields(index: &Index) -> Result<Fields> {
     let schema = index.schema();
     Ok(Fields {
@@ -373,7 +382,7 @@ pub fn fields(index: &Index) -> Result<Fields> {
     })
 }
 
-pub fn content_fields(index: &Index) -> Result<ContentFields> {
+pub(crate) fn content_fields(index: &Index) -> Result<ContentFields> {
     let schema = index.schema();
     Ok(ContentFields {
         path: schema.get_field("path").context("field path")?,
@@ -389,15 +398,23 @@ pub fn content_fields(index: &Index) -> Result<ContentFields> {
 /// wipe the catalogue, and a query racing a daemon that holds the writer lock
 /// but has not yet bound its socket would do it underneath the daemon. A read
 /// command must fail instead.
+///
+/// # Errors
+///
+/// Returns an error when the index is missing or unreadable. An index of
+/// another schema opens without its analyzers.
 pub fn open_read_only(dir: &Path) -> Result<Index> {
     open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open)
 }
 
 /// [`open_read_only`] for searching: mapped for small random reads (see
-/// [`NoFsyncDirectory::open_for_queries`]). Commands that walk every document
+/// `NoFsyncDirectory::open_for_queries`). Commands that walk every document
 /// (`count`, `list`) keep [`open_read_only`] and the kernel's read-ahead.
 ///
-/// [`NoFsyncDirectory::open_for_queries`]: crate::nosync_dir::NoFsyncDirectory::open_for_queries
+/// # Errors
+///
+/// Returns an error when the index is missing or unreadable. An index of
+/// another schema opens without its analyzers.
 pub fn open_for_queries(dir: &Path) -> Result<Index> {
     open_read_only_with(dir, crate::nosync_dir::NoFsyncDirectory::open_for_queries)
 }
@@ -405,6 +422,10 @@ pub fn open_for_queries(dir: &Path) -> Result<Index> {
 /// A reader for answering queries on an index from [`open_for_queries`]: its
 /// cache of decompressed store blocks holds 8 per segment instead of tantivy's
 /// 100. A query reads only the documents of its page, a few blocks.
+///
+/// # Errors
+///
+/// Returns an error when the index cannot be read.
 pub fn query_reader(index: &Index) -> Result<tantivy::IndexReader> {
     Ok(index
         .reader_builder()
@@ -424,10 +445,7 @@ fn open_read_only_with(
     })?;
     if index.schema() == build_name_schema() {
         register_name_tokenizer(&index);
-    } else if [IndexRecordOption::Basic, IndexRecordOption::WithFreqs]
-        .into_iter()
-        .any(|record| index.schema() == build_content_schema_for(record))
-    {
+    } else if content_record_of(&index.schema()).is_some() {
         // A read-only client must follow the stored schema. Its current RAM,
         // cgroup or configuration may differ from the writer's profile; that
         // changes future builds, not how an existing content index is queried.
@@ -437,17 +455,59 @@ fn open_read_only_with(
 }
 
 /// Open the on-disk index, creating it on first use. Tokenizer is always registered.
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be created or the index cannot be opened or
+/// recreated.
 pub fn open_or_create(dir: &Path) -> Result<Index> {
-    let index = open_or_create_with_schema(dir, build_name_schema)?;
+    let index = open_or_create_with_schema(dir, build_name_schema, |schema| {
+        *schema == build_name_schema()
+    })?;
     register_name_tokenizer(&index);
     Ok(index)
 }
 
 /// Open the on-disk content index, creating it on first use.
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be created or the index cannot be opened or
+/// recreated.
 pub fn open_content_or_create(dir: &Path) -> Result<Index> {
-    let index = open_or_create_with_schema(dir, build_content_schema)?;
+    let index = open_or_create_with_schema(dir, build_content_schema, reusable_content_schema)?;
     register_body_tokenizer(&index);
     Ok(index)
+}
+
+/// Whether an existing content index of `schema` is kept. In `auto` mode either
+/// posting detail is: the memory rule sizes by the caller's limit (the unit's
+/// `MemoryHigh` for the service, the machine's RAM in a shell), so applying it at
+/// every open would rebuild the index each time the two alternate.
+fn reusable_content_schema(schema: &Schema) -> bool {
+    match crate::settings::content_index_mode() {
+        ContentIndexMode::Auto => content_record_of(schema).is_some(),
+        ContentIndexMode::Basic | ContentIndexMode::Freqs => *schema == build_content_schema(),
+    }
+}
+
+/// The posting detail of a content index of `schema`, `None` for any other schema.
+fn content_record_of(schema: &Schema) -> Option<IndexRecordOption> {
+    [IndexRecordOption::Basic, IndexRecordOption::WithFreqs]
+        .into_iter()
+        .find(|record| *schema == build_content_schema_for(*record))
+}
+
+/// The posting detail `index` holds, which in `auto` mode may differ from what
+/// [`content_record_option`] resolves now; `None` when it is no content index.
+pub fn stored_content_mode(index: &Index) -> Option<ResolvedContentIndexMode> {
+    content_record_of(&index.schema()).map(|record| {
+        if record == IndexRecordOption::Basic {
+            ResolvedContentIndexMode::Basic
+        } else {
+            ResolvedContentIndexMode::Freqs
+        }
+    })
 }
 
 /// Test fixtures select posting detail explicitly rather than depending on RAM
@@ -460,13 +520,21 @@ pub(crate) fn create_content_fixture(dir: &Path, record: IndexRecordOption) -> R
     Ok(index)
 }
 
-fn open_or_create_with_schema(dir: &Path, build_schema: fn() -> Schema) -> Result<Index> {
+fn open_or_create_with_schema(
+    dir: &Path,
+    build_schema: fn() -> Schema,
+    reusable: fn(&Schema) -> bool,
+) -> Result<Index> {
     std::fs::create_dir_all(dir).with_context(|| format!("create index dir {}", dir.display()))?;
     match open_existing(dir) {
-        // Reuse only if the on-disk schema matches the current one; otherwise the
-        // schema evolved (e.g. a new field) → rebuild from scratch.
-        Ok(index) if index.schema() == build_schema() => Ok(index),
-        Ok(_) => recreate(dir, build_schema),
+        Ok(index) if reusable(&index.schema()) => Ok(index),
+        Ok(_) => {
+            log::info!(
+                "index at {} has another schema; rebuilding it",
+                dir.display()
+            );
+            recreate(dir, build_schema)
+        }
         Err(error) if is_non_empty_dir(dir) => {
             log::warn!(
                 "failed to open index at {}; recreating it: {error:#}",
@@ -516,12 +584,22 @@ fn is_non_empty_dir(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Deletes the name index in `dir` and creates an empty one.
+///
+/// # Errors
+///
+/// Returns an error when the old index cannot be removed or the new one created.
 pub fn recreate_on_disk(dir: &Path) -> Result<Index> {
     let index = recreate(dir, build_name_schema)?;
     register_name_tokenizer(&index);
     Ok(index)
 }
 
+/// Deletes the content index in `dir` and creates an empty one.
+///
+/// # Errors
+///
+/// Returns an error when the old index cannot be removed or the new one created.
 pub fn recreate_content_on_disk(dir: &Path) -> Result<Index> {
     let index = recreate(dir, build_content_schema)?;
     register_body_tokenizer(&index);
@@ -532,6 +610,11 @@ pub fn is_content_state_synced(dir: &Path) -> bool {
     content_state_sync_marker(dir).exists()
 }
 
+/// Records that the content state matches the content index in `dir`.
+///
+/// # Errors
+///
+/// Returns an error when the marker file cannot be written.
 pub fn mark_content_state_synced(dir: &Path) -> Result<()> {
     let marker = content_state_sync_marker(dir);
     if marker.exists() {
@@ -557,7 +640,7 @@ pub fn is_unreferenced_pruned(dir: &Path) -> bool {
     unreferenced_prune_marker(dir).exists()
 }
 
-pub fn mark_unreferenced_pruned(dir: &Path) -> Result<()> {
+pub(crate) fn mark_unreferenced_pruned(dir: &Path) -> Result<()> {
     let marker = unreferenced_prune_marker(dir);
     if marker.exists() {
         return Ok(());
@@ -580,15 +663,15 @@ fn recreate(dir: &Path, build_schema: fn() -> Schema) -> Result<Index> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
-            std::fs::remove_dir_all(&path).ok();
+            let _ = std::fs::remove_dir_all(&path);
         } else {
-            std::fs::remove_file(&path).ok();
+            let _ = std::fs::remove_file(&path);
         }
     }
     create_in(dir, build_schema()).context("recreate index")
 }
 
-pub fn background_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
+pub(crate) fn background_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
     low_impact_writer(
         index,
         writer_memory_budget_mb(
@@ -598,6 +681,12 @@ pub fn background_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> 
     )
 }
 
+/// A writer with the memory budget of a full walk.
+///
+/// # Errors
+///
+/// Returns an error when the writer cannot be created, as when another process holds the
+/// index lock.
 pub fn bulk_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
     low_impact_writer(
         index,
@@ -605,6 +694,12 @@ pub fn bulk_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
     )
 }
 
+/// A writer for the content index, with the background budget.
+///
+/// # Errors
+///
+/// Returns an error when the writer cannot be created, as when another process holds the
+/// index lock.
 pub fn content_writer(index: &Index) -> Result<IndexWriter<TantivyDocument>> {
     low_impact_writer(
         index,
@@ -669,14 +764,14 @@ pub fn worth_compacting(segments: &[(u32, u32)]) -> bool {
     changed > 0 && changed * 10 >= total
 }
 
-pub fn document_count(reader: &tantivy::IndexReader) -> Result<u64> {
-    Ok(reader.searcher().num_docs())
+pub fn document_count(reader: &tantivy::IndexReader) -> u64 {
+    reader.searcher().num_docs()
 }
 
 /// Visit the `path` of every live document. Resolves the field by name rather
 /// than through [`fields`] so it serves the content index too: that schema has
 /// no `name`/`source`, and the orphan sweep has to walk it.
-pub fn for_each_indexed_path(
+pub(crate) fn for_each_indexed_path(
     index: &Index,
     mut visit: impl FnMut(&Path) -> Result<()>,
 ) -> Result<()> {
@@ -701,6 +796,12 @@ pub fn max_repairable_name_deficit(cached_paths: u64) -> u64 {
         .max(MIN_REPAIRABLE_NAME_DEFICIT)
 }
 
+/// Adds back the name documents of catalogued paths the index lost, and
+/// returns how many.
+///
+/// # Errors
+///
+/// Returns an error when the index or the catalogue cannot be read or written.
 pub fn repair_deflated_against_state(index: &Index, state: &mut State) -> Result<u64> {
     let f = fields(index)?;
     state.begin_scan()?;
@@ -747,197 +848,4 @@ pub fn is_divergent_document_count(indexed_documents: u64, cached_paths: u64) ->
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tantivy::schema::FieldType;
-
-    fn grams(text: &str) -> Vec<String> {
-        let mut tokenizer = NameGrams;
-        let mut stream = tokenizer.token_stream(text);
-        let mut out = Vec::new();
-        while stream.advance() {
-            out.push(stream.token().text.clone());
-        }
-        out
-    }
-
-    /// The name grams are tantivy's 2- and 3-grams, plus each CJK character.
-    #[test]
-    fn name_grams_add_cjk_characters() {
-        for text in [" relatorio final ", " go ", " a ", "", " ab"] {
-            let mut ngram = tantivy::tokenizer::NgramTokenizer::all_ngrams(2, 3).unwrap();
-            let mut stream = ngram.token_stream(text);
-            let mut expected = Vec::new();
-            while stream.advance() {
-                expected.push(stream.token().text.clone());
-            }
-            assert_eq!(grams(text), expected, "for {text:?}");
-        }
-        assert_eq!(
-            grams(" 报告 x"),
-            [
-                " 报", " 报告", "报", "报告", "报告 ", "告", "告 ", "告 x", " x"
-            ]
-        );
-    }
-
-    #[test]
-    fn compacts_after_a_tenth_changes() {
-        assert!(!worth_compacting(&[]));
-        assert!(!worth_compacting(&[(1000, 0)]));
-        assert!(!worth_compacting(&[(1000, 50), (40, 0)]));
-        // 60 files edited: 60 deleted and 60 new versions, 6 % of 1060.
-        assert!(!worth_compacting(&[(1000, 60), (60, 0)]));
-        assert!(worth_compacting(&[(1000, 120), (120, 0)]));
-        assert!(worth_compacting(&[(1000, 100)]));
-        assert!(worth_compacting(&[(1000, 0), (70, 0), (50, 0)]));
-        // The daemon's own name index before the change: 1 of 3 documents dead.
-        assert!(worth_compacting(&[
-            (102_746, 34_296),
-            (18_215, 851),
-            (16_389, 9),
-            (7_403, 1),
-            (1, 0)
-        ]));
-    }
-
-    #[test]
-    fn inflated_count_allows_small_drift() {
-        assert!(!is_inflated_document_count(0, 0));
-        assert!(is_inflated_document_count(1, 0));
-        assert!(!is_inflated_document_count(120_000, 100_000));
-        assert!(is_inflated_document_count(120_001, 100_000));
-    }
-
-    #[test]
-    fn schema_avoids_position_indexing() {
-        let schema = build_name_schema();
-        let path = schema.get_field("path").unwrap();
-        let name = schema.get_field("name").unwrap();
-        let source = schema.get_field("source").unwrap();
-
-        let path_entry = schema.get_field_entry(path);
-        assert!(path_entry.is_indexed());
-        assert!(path_entry.is_stored());
-        assert!(!path_entry.has_fieldnorms());
-
-        let name_entry = schema.get_field_entry(name);
-        let name_record = match name_entry.field_type() {
-            FieldType::Str(options) => options.get_indexing_options().unwrap().index_option(),
-            other => panic!("name should be text, got {other:?}"),
-        };
-        let source_entry = schema.get_field_entry(source);
-
-        assert_eq!(name_record, IndexRecordOption::Basic);
-        // Norms rank a shorter name first among names with the same grams.
-        assert!(name_entry.has_fieldnorms());
-        assert!(!source_entry.is_indexed());
-        assert!(source_entry.is_stored());
-    }
-
-    #[test]
-    fn body_stays_out_of_name_index() {
-        let name_schema = build_name_schema();
-        assert!(name_schema.get_field("body").is_err());
-
-        let content_schema = build_content_schema();
-        let body = content_schema.get_field("body").unwrap();
-        let body_record = match content_schema.get_field_entry(body).field_type() {
-            FieldType::Str(options) => options.get_indexing_options().unwrap().index_option(),
-            other => panic!("body should be text, got {other:?}"),
-        };
-        assert_eq!(body_record, content_record_option());
-    }
-
-    #[test]
-    fn read_only_content_keeps_stored_profile() {
-        for record in [IndexRecordOption::Basic, IndexRecordOption::WithFreqs] {
-            let dir = std::env::temp_dir().join(format!(
-                "big-search-read-profile-{}-{record:?}",
-                std::process::id()
-            ));
-            std::fs::remove_dir_all(&dir).ok();
-            let index = create_content_fixture(&dir, record).unwrap();
-            let fields = content_fields(&index).unwrap();
-            let mut writer = index.writer::<TantivyDocument>(15_000_000).unwrap();
-            writer
-                .add_document(
-                    tantivy::doc!(fields.path => "/sample.txt", fields.body => "CAFÉ 東京"),
-                )
-                .unwrap();
-            writer.commit().unwrap();
-            writer.wait_merging_threads().unwrap();
-            let before = std::fs::read(dir.join("meta.json")).unwrap();
-            drop(index);
-            let read_only = open_read_only(&dir).unwrap();
-            assert_eq!(read_only.schema(), build_content_schema_for(record));
-            let reader = read_only.reader().unwrap();
-            for query in ["cafe", "東京"] {
-                let hits = crate::query::search_content(&reader, query, 10).unwrap();
-                assert_eq!(hits.len(), 1, "{record:?}: {query}");
-                assert_eq!(hits[0].path, "/sample.txt");
-            }
-            assert_eq!(std::fs::read(dir.join("meta.json")).unwrap(), before);
-            drop(reader);
-            drop(read_only);
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    #[test]
-    fn corrupt_index_is_recreated() {
-        let dir = std::env::temp_dir().join(format!("bs-index-corrupt-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("meta.json"), b"not tantivy metadata").unwrap();
-
-        let index = open_or_create(&dir).unwrap();
-
-        assert_eq!(document_count(&index.reader().unwrap()).unwrap(), 0);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn deflated_index_repair_adds_missing_paths() {
-        let dir = std::env::temp_dir().join(format!("bs-index-repair-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let index = open_or_create(&dir.join("idx")).unwrap();
-        let f = fields(&index).unwrap();
-        let mut writer = bulk_writer(&index).unwrap();
-        crate::scan::add_name_only(&writer, &f, Path::new("/catalog/keep-alpha.txt"), None)
-            .unwrap();
-        writer.commit().unwrap();
-        drop(writer);
-
-        let mut state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
-        state.set(Path::new("/catalog/keep-alpha.txt"), 10, 1);
-        state.set(Path::new("/catalog/missing-beta.txt"), 20, 2);
-        state.set(Path::new("/catalog/missing-gamma.txt"), 30, 3);
-        state.persist().unwrap();
-        let mut state = State::load(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
-
-        assert_eq!(
-            repair_deflated_against_state(&index, &mut state).unwrap(),
-            2
-        );
-        assert_eq!(
-            document_count(&index.reader().unwrap()).unwrap(),
-            state.len() as u64
-        );
-        assert_eq!(
-            crate::query::search(
-                &index.reader().unwrap(),
-                "alpha",
-                &big_indexd_client::Filter::default(),
-                10
-            )
-            .unwrap()[0]
-                .path,
-            "/catalog/keep-alpha.txt"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-}
+mod tests;

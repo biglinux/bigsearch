@@ -1,12 +1,14 @@
 //! Tantivy directory that never calls `fsync`.
 //!
 //! Both indexes are a cache derived from the filesystem, so the worst a forced
-//! reboot can cost is re-indexing the files whose commits did not reach the
-//! disk, work the startup reconcile already does. Paying `fsync` to avoid that
-//! costs far more than the work it saves: tantivy issues two per commit (the
-//! `meta.json` temporary at `MmapDirectory::atomic_write`, then the index
-//! directory at `sync_directory`), and on btrfs each one is a log-tree
-//! transaction that amplifies a few kilobytes into many block-layer writes.
+//! reboot can cost is documents whose commits did not reach the disk. The next
+//! start re-adds name documents the catalogue still lists
+//! (`index::repair_deflated_against_state`); `big-search rebuild` re-indexes
+//! everything else. Paying `fsync` to avoid that costs far more than the work
+//! it saves: tantivy issues two per commit (the `meta.json` temporary at
+//! `MmapDirectory::atomic_write`, then the index directory at
+//! `sync_directory`), and on btrfs each one is a log-tree transaction that
+//! amplifies a few kilobytes into many block-layer writes.
 //!
 //! After a power cut the index may be torn rather than merely stale. That is
 //! survivable because a torn index fails to open and
@@ -22,7 +24,7 @@
 //! for as long as the index is open, one thread per index: an idle daemon would
 //! wake four times a second to learn that nothing had changed.
 use notify::event::{EventKind, ModifyKind, RenameMode};
-use notify::{RecursiveMode, Watcher};
+use notify::{Config, EventKindMask, RecommendedWatcher, RecursiveMode, Watcher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -103,15 +105,22 @@ impl MetaWatch {
     fn start(root: &Path) -> Option<Self> {
         let callbacks = Arc::new(WatchCallbackList::default());
         let fired = callbacks.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        // Only the kinds that can publish a commit: notify's default adds
+        // IN_OPEN, and every reload opens files in this folder.
+        let config = Config::default().with_event_kinds(
+            EventKindMask::CREATE | EventKindMask::MODIFY_DATA | EventKindMask::MODIFY_NAME,
+        );
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
                 if event.is_ok_and(|event| is_meta_commit(&event)) {
                     // Same as tantivy's poller: wait for the reloads before the next event.
                     let _ = fired.broadcast().wait();
                 }
-            })
-            .map_err(|e| log::warn!("index watch unavailable, polling instead: {e}"))
-            .ok()?;
+            },
+            config,
+        )
+        .map_err(|e| log::warn!("index watch unavailable, polling instead: {e}"))
+        .ok()?;
         watcher
             .watch(root, RecursiveMode::NonRecursive)
             .map_err(|e| log::warn!("index watch unavailable, polling instead: {e}"))
@@ -227,15 +236,14 @@ impl Directory for NoFsyncDirectory {
     }
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
 
     #[test]
     fn atomic_write_leaves_no_temp() {
-        let dir = std::env::temp_dir().join(format!("bs-nosync-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_env::scratch_dir("bs-nosync");
         let directory = NoFsyncDirectory::open(&dir).unwrap();
 
         directory
@@ -265,8 +273,6 @@ mod tests {
             leftovers.is_empty(),
             "temp files left behind: {leftovers:?}"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A commit wakes the readers once, and reading `meta.json` (which is what a
@@ -274,9 +280,7 @@ mod tests {
     #[test]
     fn only_commits_wake_the_watch() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let dir = std::env::temp_dir().join(format!("bs-nosync-watch-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_env::scratch_dir("bs-nosync-watch");
         let directory = NoFsyncDirectory::open(&dir).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
@@ -311,16 +315,13 @@ mod tests {
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(calls.load(Ordering::SeqCst), 2, "a read woke the watch");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A reader opened before the commits sees them without being reopened:
     /// the daemon's query readers live for its whole life.
     #[test]
     fn a_long_lived_reader_follows_commits() {
-        let dir = std::env::temp_dir().join(format!("bs-nosync-reload-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::test_env::scratch_dir("bs-nosync-reload");
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = crate::index::fields(&index).unwrap();
         let reader = index.reader().unwrap();
@@ -335,7 +336,6 @@ mod tests {
         assert_eq!(reader.searcher().num_docs(), 1);
 
         drop(writer);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The daemon's layout: the watcher writes through one instance, queries read
@@ -343,8 +343,7 @@ mod tests {
     /// each commit, and its files must carry the advice (`rr` in smaps).
     #[test]
     fn query_instance_follows_the_writer() {
-        let dir = std::env::temp_dir().join(format!("bs-nosync-query-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::test_env::scratch_dir("bs-nosync-query");
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = crate::index::fields(&index).unwrap();
         let mut writer = crate::index::background_writer(&index).unwrap();
@@ -385,7 +384,6 @@ mod tests {
         );
 
         drop(writer);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Commit repeatedly through the real index stack. Run under `strace` this is
@@ -393,8 +391,7 @@ mod tests {
     /// either way: dropping the syncs must not drop the data.
     #[test]
     fn commits_through_the_index_stay_searchable() {
-        let dir = std::env::temp_dir().join(format!("bs-nosync-idx-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::test_env::scratch_dir("bs-nosync-idx");
         let index = crate::index::open_or_create(&dir).unwrap();
         let f = crate::index::fields(&index).unwrap();
         let mut writer = crate::index::background_writer(&index).unwrap();
@@ -406,10 +403,7 @@ mod tests {
         }
         drop(writer);
 
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            20
-        );
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 20);
         assert_eq!(
             crate::query::search(
                 &index.reader().unwrap(),
@@ -427,10 +421,8 @@ mod tests {
         drop(index);
         let reopened = crate::index::open_or_create(&dir).unwrap();
         assert_eq!(
-            crate::index::document_count(&reopened.reader().unwrap()).unwrap(),
+            crate::index::document_count(&reopened.reader().unwrap()),
             20
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

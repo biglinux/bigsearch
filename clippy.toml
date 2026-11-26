@@ -1,4 +1,6 @@
 msrv = "1.98.1"
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
 
 # ── Complexity thresholds ──────────────────────────────────────────
 cognitive-complexity-threshold = 25
@@ -24,6 +26,9 @@ allowed-duplicate-crates = []
 disallowed-methods = [
     { path = "std::process::Command::new", reason = "spawn only behind a reviewed argv, deadline and output cap (see extract_pdf.rs)" },
     { path = "std::io::stdin", reason = "stdin blocks; the daemon has no interactive input" },
+    { path = "zip::read::ZipArchive::new", reason = "open archives through extract::capped_zip, which refuses one declaring too many entries" },
+    { path = "libc::statvfs", reason = "ask history::disk (identity, disk_capacity), which reads f_fsid and the free space" },
+    { path = "std::os::unix::fs::MetadataExt::dev", reason = "a file kept across a restart is told by history::identity: btrfs draws st_dev anew at each mount" },
 ]
 
 disallowed-types = [

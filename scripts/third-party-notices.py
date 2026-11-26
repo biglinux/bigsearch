@@ -14,7 +14,7 @@ text of that license. Anything else is an error, so a new dependency without a
 license text is noticed instead of shipped silently.
 
     scripts/third-party-notices.py > THIRD-PARTY-NOTICES
-    scripts/third-party-notices.py --package big-search-settings
+    scripts/third-party-notices.py --package big-docinfo-cli
 
 Cargo is run as $CARGO when that is set.
 """

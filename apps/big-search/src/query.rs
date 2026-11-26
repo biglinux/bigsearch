@@ -11,13 +11,15 @@ mod both;
 mod content;
 mod listing;
 mod names;
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests;
 
-pub use both::search_both;
+pub(crate) use both::search_both;
 use content::count_content;
-pub use content::search_content;
-pub use listing::{count, list_matching, list_paths};
+pub(crate) use content::search_content;
+pub(crate) use listing::list_matching;
+pub use listing::{count, list_paths};
 pub use names::search;
 use names::{count_names, indexed_mime};
 
@@ -43,6 +45,29 @@ pub struct QueryIndexes<'a> {
     pub catalogue: &'a crate::catalogue::CatalogueReader,
 }
 
+/// One page of the catalogue in `order`, its exact total and the page size.
+/// The page is what gets `stat`ed, so it stays under the same ceiling as the
+/// candidates of the other modes; the client pages past it.
+fn catalogue_page(
+    indexes: &QueryIndexes<'_>,
+    filter: &Filter,
+    order: ListOrder,
+    page: &Page,
+) -> Result<(Vec<Hit>, usize, usize)> {
+    let limit = page.limit.min(CANDIDATE_CEILING);
+    let (total, paths) = indexes.catalogue.list(filter, order, page.offset, limit)?;
+    let hits = paths
+        .into_iter()
+        .map(|path| Hit {
+            name: file_name(&path),
+            source: crate::settings::source_name(Path::new(&path)),
+            path,
+            ..Default::default()
+        })
+        .collect();
+    Ok((hits, total, limit))
+}
+
 /// Run a full query: base search → cheap path filters → `stat`-based date/size
 /// filters → page → metadata enrichment. Everything the GUI would otherwise do
 /// (and leak over) happens here, server-side and bounded.
@@ -50,6 +75,11 @@ pub struct QueryIndexes<'a> {
 /// The `list` and `largest` modes instead read the catalogue, newest or
 /// largest first, with an exact `total`; see
 /// [`crate::catalogue::CatalogueReader::list`].
+///
+/// # Errors
+///
+/// Returns an error when an index or the catalogue cannot be read, or a content mode runs
+/// without a content index.
 pub fn run_query(
     indexes: QueryIndexes<'_>,
     q: &str,
@@ -78,32 +108,21 @@ pub fn run_query(
         "largest" => Some(ListOrder::Largest),
         _ => None,
     };
-    let (mut hits, total, limit) = if let Some(order) = order
+    let (mut hits, total, limit, truncated) = if let Some(order) = order
         && filter.mime.is_empty()
         && filter.kind.is_none()
     {
-        // The page is what gets `stat`ed, so it stays under the same ceiling as
-        // the candidates of the other modes; the client pages past it.
-        let limit = page.limit.min(CANDIDATE_CEILING);
-        let (total, paths) = indexes.catalogue.list(filter, order, page.offset, limit)?;
-        let hits: Vec<Hit> = paths
-            .into_iter()
-            .map(|path| Hit {
-                name: file_name(&path),
-                source: crate::settings::source_name(Path::new(&path)),
-                path,
-                ..Default::default()
-            })
-            .collect();
-        (hits, total, limit)
+        let (hits, total, limit) = catalogue_page(&indexes, filter, order, page)?;
+        (hits, total, limit, false)
     } else {
-        let (kept, total) = ranked(&indexes, q, mode, filter, page, &names, &name_fields)?;
+        let (kept, total, truncated) =
+            ranked(&indexes, q, mode, filter, page, &names, &name_fields)?;
         let hits = kept
             .into_iter()
             .skip(page.offset)
             .take(page.limit)
             .collect();
-        (hits, total, page.limit)
+        (hits, total, page.limit, truncated)
     };
     let end = page.offset.saturating_add(limit);
     let next_offset = (end < total).then_some(end);
@@ -122,11 +141,13 @@ pub fn run_query(
         total,
         next_offset,
         content_pending: 0, // the daemon overwrites this from its live gauge
+        truncated,
     })
 }
 
 /// Every candidate of the index-backed modes that passes `filter`, in rank
-/// order, and how many match in all.
+/// order, how many match in all, and whether the base search stopped at the
+/// ceiling.
 fn ranked(
     indexes: &QueryIndexes<'_>,
     q: &str,
@@ -135,14 +156,15 @@ fn ranked(
     page: &Page,
     names: &tantivy::Searcher,
     name_fields: &crate::index::Fields,
-) -> Result<(Vec<Hit>, usize)> {
+) -> Result<(Vec<Hit>, usize, bool)> {
     let (paged, fetch) = candidates_to_read(mode, filter, page);
     let (base, counted) = search_by_mode(indexes, q, mode, filter, paged, fetch)?;
+    let truncated = base.len() >= CANDIDATE_CEILING;
     let mut kept = keep_path_matches(base, filter);
     keep_type_matches(&mut kept, filter, names, name_fields);
     keep_stat_matches(&mut kept, filter);
     let total = counted.map_or(kept.len(), |counted| counted.max(kept.len()));
-    Ok((kept, total))
+    Ok((kept, total, truncated))
 }
 
 /// The base search of `mode`, and the count of a paged query whose page did
@@ -162,11 +184,11 @@ fn search_by_mode(
     };
     let base = match mode {
         "content" => search_content(content_reader()?, q, fetch)?,
-        "both" => search_both(indexes.name, content_reader()?, q, fetch)?,
+        "both" => search_both(indexes.name, content_reader()?, q, filter, fetch)?,
         // Everything the index holds, for a caller that is narrowing by
         // filter rather than by words: "every PDF under my home folder" has
-        // no text to search for, and the name search refuses a query shorter
-        // than two letters because the ngram index cannot narrow one.
+        // no text to search for, and the name search finds nothing without a
+        // word.
         "list" | "largest" => list_matching(indexes.name, filter, CANDIDATE_CEILING)?,
         _ => search(indexes.name, q, filter, fetch)?,
     };
@@ -285,7 +307,7 @@ fn keep_stat_matches(kept: &mut Vec<Hit>, filter: &Filter) {
 /// Fills in the extension, type and metadata of the visible page.
 ///
 /// A hit that will not stat is one of two very different things, and the
-/// caller renders `available == false` as "offline · on <device>". Deciding
+/// caller renders `available == false` as "offline · on `device`". Deciding
 /// that by existence alone would announce every *deleted* file as living on
 /// an unplugged disk named after the user's home directory. Only a source
 /// that is kept while unreachable (removable/network) may claim it; anything
@@ -293,7 +315,7 @@ fn keep_stat_matches(kept: &mut Vec<Hit>, filter: &Filter) {
 fn enrich_page(hits: &mut Vec<Hit>, names: &tantivy::Searcher, name_fields: &crate::index::Fields) {
     let mut offline_sources = OfflineSources::default();
     hits.retain_mut(|h| {
-        h.ext = ext_of(&h.path);
+        h.ext = crate::extract::ext_of(Path::new(&h.path)).unwrap_or_default();
         if h.mime.is_empty() {
             h.mime = indexed_mime(names, name_fields, &h.path);
         }
@@ -310,7 +332,7 @@ fn enrich_page(hits: &mut Vec<Hit>, names: &tantivy::Searcher, name_fields: &cra
 /// Answers "is this path on a source we keep catalogued while it is unreachable?"
 /// once per source instead of once per hit.
 ///
-/// [`settings::is_available`] reads the source directory, so asking per result
+/// [`crate::settings::is_available`] reads the source directory, so asking per result
 /// would mean a `read_dir` for every missing file in a page.
 #[derive(Default)]
 pub(crate) struct OfflineSources {
@@ -338,15 +360,6 @@ fn file_name(path: &str) -> String {
     Path::new(path)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-/// Lowercase extension of `path` without the dot; empty when there is none.
-fn ext_of(path: &str) -> String {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
         .unwrap_or_default()
 }
 

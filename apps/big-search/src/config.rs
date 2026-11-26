@@ -2,22 +2,19 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
+/// `$XDG_DATA_HOME`, or `~/.local/share` when it is unset or not absolute: the
+/// XDG spec says a relative value must be ignored, or the index would land in
+/// whatever directory the command ran from.
+pub fn data_home() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| big_search_config::home_dir().join(".local/share"))
 }
 
 /// Data directory (`$XDG_DATA_HOME/big-search`): holds the index, cache, etc.
-///
-/// An empty or relative `XDG_DATA_HOME` is ignored, as the XDG spec requires;
-/// otherwise the index would land in whatever directory the command ran from.
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .unwrap_or_else(|| home().join(".local/share"));
-    base.join("big-search")
+    data_home().join("big-search")
 }
 
 /// Create the data directory owner-only, tightening it if group/world-readable.
@@ -26,11 +23,16 @@ pub fn data_dir() -> PathBuf {
 /// complete list of every path in their home, and the content index holds the
 /// extracted *text* of their documents. SQLite and the walker create their files
 /// through the process umask, typically `0022`, which leaves `state.sqlite` and
-/// `content-signatures.json` readable by every local account. Tantivy creates
-/// `index/` as 0700 on its own; nothing else does.
+/// `content-signatures.json` readable by every local account, and the
+/// index directories are created the same way.
 ///
 /// Restricting the directory covers every file inside it, present and future,
 /// without having to remember a mode at each creation site.
+///
+/// # Errors
+///
+/// Returns the I/O error of creating the data directory, reading its mode or
+/// restricting it.
 pub fn ensure_private_data_dir() -> std::io::Result<()> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
@@ -99,41 +101,38 @@ pub fn config_file() -> PathBuf {
     big_search_config::path()
 }
 
-/// Query socket. Lives under the shared `biglinux/` runtime subdir as `indexd.sock`
-/// to honour the `big-indexd` microdaemon contract (clients find it by that path).
+/// Query socket: the path clients look for, so the daemon listens where they
+/// connect. `None` without a session runtime directory; a socket under `/tmp`
+/// would listen where no client looks, in a directory any local account can
+/// create first.
 pub fn socket_path() -> Option<PathBuf> {
-    Some(runtime_subdir()?.join("indexd.sock"))
+    big_indexd_client::default_socket()
 }
 
-/// Single-instance daemon lock (`…/biglinux/indexd.lock`). Held for the daemon's
+/// Single-instance daemon lock, beside the socket. Held for the daemon's
 /// lifetime so a second `daemon` invocation refuses instead of stealing the socket
 /// and colliding on the Tantivy writer lock.
 pub fn lock_path() -> Option<PathBuf> {
-    Some(runtime_subdir()?.join("indexd.lock"))
-}
-
-/// The `biglinux/` runtime subdir holding the socket + lock.
-pub fn runtime_subdir() -> Option<PathBuf> {
-    Some(runtime_dir()?.join("biglinux"))
-}
-
-/// The session's private runtime directory, or nothing.
-///
-/// No `/tmp` fallback: `big_indexd_client::default_socket` has none either, so a
-/// socket there would listen where no client looks, in a directory any local
-/// account can create first.
-fn runtime_dir() -> Option<PathBuf> {
-    // An empty or relative value is unset (XDG Base Directory spec), as the
-    // client reads it.
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
+    Some(socket_path()?.with_file_name("indexd.lock"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_env::{ENV_LOCK, EnvVarGuard};
+
+    /// The data dir lists every private file; one left readable is tightened.
+    #[test]
+    fn readable_data_dir_becomes_private() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let base = crate::test_env::scratch_dir("bs-private");
+        let _data = EnvVarGuard::set("XDG_DATA_HOME", base.to_str().unwrap());
+        std::fs::create_dir_all(data_dir()).unwrap();
+        std::fs::set_permissions(data_dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_data_dir().unwrap();
+        let mode = std::fs::metadata(data_dir()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
 
     #[test]
     fn relative_data_home_is_ignored() {

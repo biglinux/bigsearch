@@ -3,14 +3,18 @@ use super::{EntryKind, Filter, Hit, count_capped, file_name};
 use crate::index::fields;
 use anyhow::Result;
 use std::collections::HashSet;
-use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{IndexReader, TantivyDocument, Term};
 
 /// Substring filename search. Returns up to `limit` paths whose file name contains
-/// `q` (case-insensitive). Queries shorter than 2 chars yield nothing (ngram floor).
+/// `q` (case-insensitive). A word of one or two letters matches only a whole word
+/// of the name.
+///
+/// # Errors
+///
+/// Returns an error when the index cannot be read.
 pub fn search(reader: &IndexReader, q: &str, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
     // A snapshot of the long-lived reader: a reader per query would re-open and
     // mmap every segment.
@@ -110,12 +114,6 @@ fn newest_first_on_ties(
 /// start or end where the query does, are lifted above the rest, so they are
 /// among the candidates even when only a page of them is read.
 fn name_query(f: &crate::index::Fields, words: &[String], filter: &Filter) -> Option<BooleanQuery> {
-    let term = |field, text: &str| -> Box<dyn Query> {
-        Box::new(TermQuery::new(
-            Term::from_field_text(field, text),
-            IndexRecordOption::Basic,
-        ))
-    };
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     for word in words {
         let chars: Vec<char> = word.chars().collect();
@@ -234,12 +232,10 @@ pub(super) fn name_match(name: &str, words: &[String]) -> Option<NameMatch> {
             return None;
         };
     }
-    let stem = Path::new(name)
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_default();
     Some(NameMatch {
-        whole_name: crate::index::name_words(&stem) == words,
+        // The key the index stores for the name, so a hit ranks as whole
+        // exactly when the stem query would find it.
+        whole_name: crate::index::stem_key(name) == words.join(" "),
         words: quality,
     })
 }
@@ -258,62 +254,43 @@ pub(super) fn filter_clauses(
     if let Some(dir) = filter.under.as_deref().map(|d| d.trim_end_matches('/'))
         && !dir.is_empty()
     {
-        clauses.push((
-            Occur::Must,
-            Box::new(TermQuery::new(
-                Term::from_field_text(f.dir, dir),
-                IndexRecordOption::Basic,
-            )),
-        ));
+        clauses.push((Occur::Must, term(f.dir, dir)));
     }
     if !filter.ext.is_empty() {
-        let any_ext: Vec<(Occur, Box<dyn Query>)> = filter
+        let exts = filter
             .ext
             .iter()
-            .map(|ext| {
-                let ext = ext.trim_start_matches('.').to_lowercase();
-                (
-                    Occur::Should,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(f.ext, &ext),
-                        IndexRecordOption::Basic,
-                    )) as Box<dyn Query>,
-                )
-            })
-            .collect();
-        clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_ext))));
+            .map(|ext| ext.trim_start_matches('.').to_lowercase());
+        clauses.push((Occur::Must, any_of(f.ext, exts)));
     }
     // A type or a `major/*` group: the document holds both as terms.
     if !filter.mime.is_empty() {
-        let any_mime: Vec<(Occur, Box<dyn Query>)> = filter
-            .mime
-            .iter()
-            .map(|mime| {
-                (
-                    Occur::Should,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(f.mime, mime),
-                        IndexRecordOption::Basic,
-                    )) as Box<dyn Query>,
-                )
-            })
-            .collect();
-        clauses.push((Occur::Must, Box::new(BooleanQuery::new(any_mime))));
+        clauses.push((Occur::Must, any_of(f.mime, filter.mime.iter().cloned())));
     }
     if let Some(kind) = filter.kind {
         let occur = match kind {
             EntryKind::Folder => Occur::Must,
             EntryKind::File => Occur::MustNot,
         };
-        clauses.push((
-            occur,
-            Box::new(TermQuery::new(
-                Term::from_field_text(f.mime, crate::mime::DIRECTORY),
-                IndexRecordOption::Basic,
-            )),
-        ));
+        clauses.push((occur, term(f.mime, crate::mime::DIRECTORY)));
     }
     clauses
+}
+
+/// Documents whose `field` holds `text` as one term.
+fn term(field: tantivy::schema::Field, text: &str) -> Box<dyn Query> {
+    Box::new(TermQuery::new(
+        Term::from_field_text(field, text),
+        IndexRecordOption::Basic,
+    ))
+}
+
+/// Documents whose `field` holds any of `texts`.
+fn any_of(field: tantivy::schema::Field, texts: impl Iterator<Item = String>) -> Box<dyn Query> {
+    let any: Vec<(Occur, Box<dyn Query>)> = texts
+        .map(|text| (Occur::Should, term(field, &text)))
+        .collect();
+    Box::new(BooleanQuery::new(any))
 }
 
 /// The exact media type a name document stores; empty for none.
@@ -344,5 +321,6 @@ pub(super) fn indexed_mime(
         .unwrap_or_default()
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests;

@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! Text plumbing shared by the finders: accent folding, normalized words, lines.
 //!
 //! Positions in the rules are counted in characters, not bytes, because that is

@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! `big-docinfo`: suggest a name for a document from what it says.
 //!
 //! ```text
@@ -18,41 +15,58 @@
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use big_docinfo::{Hints, analyze};
+use big_docinfo::{DocInfo, Hints, analyze};
+use gettextrs::{gettext, pgettext};
 
 const USAGE: &str = "usage: big-docinfo [--json | --name] FILE | big-docinfo rename FILE NAME";
 /// Longest file name most Linux file systems accept, in bytes.
 const NAME_MAX: usize = 255;
 
-fn main() {
+const LOCALE_DIR: &str = "/usr/share/locale";
+
+fn main() -> ExitCode {
+    // SAFETY: called once, before any thread exists that could read the locale.
+    unsafe { gettextrs::setlocale(gettextrs::LocaleCategory::LcAll, "") };
+    // Without a catalog every message stays in English, the source language.
+    let _ = gettextrs::bindtextdomain("big-docinfo", LOCALE_DIR);
+    let _ = gettextrs::textdomain("big-docinfo");
     // Messages are written for the person reading the dialog: one sentence with
     // the cause and what to do, no paths or error chains.
-    if let Err(err) = run() {
-        eprintln!("{err}");
-        std::process::exit(1);
+    match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::FAILURE
+        }
     }
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<ExitCode> {
     // A file name is bytes: one from an old FAT stick may not be UTF-8.
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match args.as_slice() {
         [cmd, file, name] if cmd == "rename" => {
             let Some(name) = name.to_str() else {
-                bail!("Esse nome tem caracteres inválidos. Use outro nome.");
+                bail!(gettext(
+                    "This name has characters a file name cannot hold. Choose another name."
+                ));
             };
-            rename(Path::new(file), name)
+            rename(Path::new(file), name)?;
         }
-        [flag, file] if flag == "--json" => describe(Path::new(file), Output::Json),
-        [flag, file] if flag == "--name" => describe(Path::new(file), Output::Name),
-        [file] if file.as_bytes().first() != Some(&b'-') => describe(Path::new(file), Output::Text),
+        [flag, file] if flag == "--json" => describe(Path::new(file), Output::Json)?,
+        [flag, file] if flag == "--name" => describe(Path::new(file), Output::Name)?,
+        [file] if file.as_bytes().first() != Some(&b'-') => {
+            describe(Path::new(file), Output::Text)?;
+        }
         _ => {
             eprintln!("{USAGE}");
-            std::process::exit(2);
+            return Ok(ExitCode::from(2));
         }
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 enum Output {
@@ -62,9 +76,22 @@ enum Output {
 }
 
 fn describe(path: &Path, output: Output) -> Result<()> {
-    let file = big_search::extract::described(path).context(
-        "Este arquivo não tem texto legível: o tipo não é suportado ou é um PDF escaneado.",
-    )?;
+    let Some(file) = big_search::extract::described(path) else {
+        // Extraction reads no cause back; opening the file tells an unreadable
+        // one from a type without text.
+        bail!(match std::fs::File::open(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                gettext("This file is no longer there: it was moved or deleted.")
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                gettext("You do not have permission to read this file.")
+            }
+            Err(_) => gettext("This file could not be read."),
+            Ok(_) => gettext(
+                "This file has no readable text: its type is not supported, or it is a scanned PDF.",
+            ),
+        });
+    };
     let ext = extension(path);
     let hints = Hints {
         declared_title: file.declared_title.as_deref(),
@@ -96,47 +123,67 @@ fn describe(path: &Path, output: Output) -> Result<()> {
             println!("{value}");
         }
         Output::Name => println!("{free}"),
-        Output::Text => {
-            let show =
-                |label: &str, value: Option<&str>| println!("{label}: {}", value.unwrap_or("—"));
-            show("Tipo", analysis.kind.map(kind_label));
-            show("Data", analysis.date.as_deref());
-            show("Entidade", analysis.entity.as_deref());
-            show("Título", analysis.title.as_deref());
-            if kept {
-                println!(
-                    "Não encontrei tipo nem título neste documento; o nome atual foi mantido."
-                );
-            }
-            show("Nome", Some(&free));
-        }
+        Output::Text => print_report(&analysis, &free, kept),
     }
     Ok(())
 }
 
+/// The analysis as the dialog shows it, one translated field a line.
+fn print_report(analysis: &DocInfo, free: &str, kept: bool) {
+    let show = |label: &str, value: Option<&str>| {
+        println!(
+            "{label}: {}",
+            big_search::terminal_text(value.unwrap_or("—"))
+        );
+    };
+    show(
+        &pgettext("document field", "Kind"),
+        analysis.kind.map(kind_label).as_deref(),
+    );
+    show(
+        &pgettext("document field", "Date"),
+        analysis.date.as_deref(),
+    );
+    show(
+        &pgettext("document field", "Entity"),
+        analysis.entity.as_deref(),
+    );
+    show(
+        &pgettext("document field", "Title"),
+        analysis.title.as_deref(),
+    );
+    if kept {
+        println!(
+            "{}",
+            gettext("No kind or title found in this document; the current name stays.")
+        );
+    }
+    show(&pgettext("document field", "Name"), Some(free));
+}
+
 /// How a kind reads in the dialog.
-fn kind_label(kind: &str) -> &str {
+fn kind_label(kind: &str) -> String {
     match kind {
-        "nota_fiscal" => "Nota fiscal",
-        "recibo" => "Recibo",
-        "fatura_boleto" => "Fatura ou boleto",
-        "extrato" => "Extrato",
-        "contrato" => "Contrato",
-        "ata" => "Ata",
-        "ato_normativo" => "Lei, decreto ou portaria",
-        "edital" => "Edital",
-        "parecer" => "Parecer ou laudo",
-        "relatorio" => "Relatório",
-        "oficio_carta" => "Ofício ou carta",
-        "email" => "E-mail",
-        "declaracao_certidao" => "Declaração ou certidão",
-        "curriculo" => "Currículo",
-        "manual" => "Manual",
-        "artigo" => "Artigo",
-        "orcamento" => "Orçamento",
-        "anotacoes" => "Anotações",
-        "saude" => "Documento de saúde",
-        other => other,
+        "nota_fiscal" => pgettext("document kind", "Invoice"),
+        "recibo" => pgettext("document kind", "Receipt"),
+        "fatura_boleto" => pgettext("document kind", "Bill or payment slip"),
+        "extrato" => pgettext("document kind", "Statement"),
+        "contrato" => pgettext("document kind", "Contract"),
+        "ata" => pgettext("document kind", "Minutes"),
+        "ato_normativo" => pgettext("document kind", "Law, decree or ordinance"),
+        "edital" => pgettext("document kind", "Public notice"),
+        "parecer" => pgettext("document kind", "Opinion or expert report"),
+        "relatorio" => pgettext("document kind", "Report"),
+        "oficio_carta" => pgettext("document kind", "Official letter or letter"),
+        "email" => pgettext("document kind", "Email"),
+        "declaracao_certidao" => pgettext("document kind", "Declaration or certificate"),
+        "curriculo" => pgettext("document kind", "Résumé"),
+        "manual" => pgettext("document kind", "Manual"),
+        "artigo" => pgettext("document kind", "Article"),
+        "orcamento" => pgettext("document kind", "Quote"),
+        "anotacoes" => pgettext("document kind", "Notes"),
+        "saude" => pgettext("document kind", "Health document"),
+        other => other.to_owned(),
     }
 }
 
@@ -178,7 +225,11 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// (added back if the new name lost it); an existing file is never replaced.
 fn rename(path: &Path, name: &str) -> Result<()> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
-        bail!("“{name}” não serve como nome de arquivo. Use um nome sem barras.");
+        bail!(
+            // Translators: keep {name} as written; it is the name the person typed.
+            gettext("“{name}” cannot be a file name. Use a name without slashes.")
+                .replace("{name}", name)
+        );
     }
     let ext = extension(path);
     let mut name = name.to_owned();
@@ -190,7 +241,7 @@ fn rename(path: &Path, name: &str) -> Result<()> {
         name = format!("{name}.{ext}");
     }
     if name.len() > NAME_MAX {
-        bail!("Esse nome é longo demais. Use um nome mais curto.");
+        bail!(gettext("This name is too long. Use a shorter name."));
     }
     let target: PathBuf = path.parent().unwrap_or(Path::new(".")).join(&name);
     if same_file(&target, path) {
@@ -221,17 +272,24 @@ fn rename_noreplace(from: &Path, to: &Path, name: &str) -> Result<()> {
     let err = std::io::Error::last_os_error();
     match err.raw_os_error() {
         Some(libc::EEXIST) => {
-            bail!("Já existe um arquivo chamado “{name}” nesta pasta. Escolha outro nome.")
+            bail!(
+                gettext(
+                    // Translators: keep {name} as written; it is the name the person typed.
+                    "A file named “{name}” already exists in this folder. Choose another name."
+                )
+                .replace("{name}", name)
+            )
         }
         // File systems without RENAME_NOREPLACE: a hard link also refuses to
         // replace, then the old name goes. Where links are impossible too, stop.
         Some(libc::EINVAL | libc::ENOSYS) => {
-            std::fs::hard_link(from, to).context(
-                "Este disco não permite renomear sem risco de apagar outro arquivo. Renomeie pelo gerenciador de arquivos.",
-            )?;
+            std::fs::hard_link(from, to).with_context(|| {
+                gettext("This disk cannot rename without risking another file. Rename it in the file manager.")
+            })?;
             std::fs::remove_file(from)?;
             Ok(())
         }
-        _ => bail!("Não foi possível renomear: {err}."),
+        // Translators: keep {error} as written; the system fills in why.
+        _ => bail!(gettext("Could not rename: {error}.").replace("{error}", &err.to_string())),
     }
 }

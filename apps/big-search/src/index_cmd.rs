@@ -1,6 +1,5 @@
 //! The `reindex` and `daemon` subcommands: the two that hold the index
-//! writers and the daemon lock. A child module of the crate root, so
-//! `use super::*` supplies the shared imports and the library modules.
+//! writers and the daemon lock.
 
 use super::*;
 
@@ -16,22 +15,35 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
         )?),
         None => None,
     };
+    // Resolved before anything is deleted: a mistyped root must not empty the
+    // index, and a relative one would store paths only this folder can read.
+    let explicit_roots = roots
+        .iter()
+        .map(|root| std::fs::canonicalize(root).with_context(|| format!("reindex {root}")))
+        .collect::<Result<Vec<PathBuf>>>()?;
     throttle::lower_priority();
     settings::seed_config_template();
     scan::seed_user_ignore();
+    // The daemon's folder list does not follow this walk; its next start walks.
+    // The first state write, so a database that will not open refuses the
+    // reindex before any index is touched.
+    watch::forget_saved_run(&catalogue::State::open(
+        &config::state_db_path(),
+        catalogue::WATCH_NAMESPACE,
+    )?)?;
     let mut index = index::open_or_create(&config::index_dir())?;
     let mut content_index = index::open_content_or_create(&config::content_index_dir())?;
     scan::write_effective_ignore()?;
 
-    let (scan_roots, mut state, rebuild_content_from_state) = if roots.is_empty() {
+    let (scan_roots, mut state, rebuild_content_from_state) = if explicit_roots.is_empty() {
         reconcile_plan(&mut index, &mut content_index)?
     } else {
-        explicit_rebuild_plan(roots, &index, &mut content_index)?
+        explicit_rebuild_plan(explicit_roots, &index, &mut content_index)?
     };
 
     let t0 = Instant::now();
     let sync_outcome = scan::sync(&index, &scan_roots, &mut state)?;
-    let names = index.reader()?.searcher().num_docs();
+    let names = index::document_count(&index.reader()?);
     println!(
         "indexed {names} names in {:.2}s",
         t0.elapsed().as_secs_f64()
@@ -93,10 +105,8 @@ fn reconcile_plan(
     // removable/network sources catalogued (a reindex while a device is
     // unplugged must not drop it). A fresh/recreated index starts empty.
     let sources = settings::sources();
-    let available: Vec<PathBuf> = sources
-        .all()
+    let available: Vec<PathBuf> = settings::available_sources()
         .iter()
-        .filter(|s| settings::is_available(s))
         .map(|s| s.path.clone())
         .collect();
     log::info!(
@@ -104,20 +114,21 @@ fn reconcile_plan(
         available,
         sources.all().len()
     );
-    let index_empty = index.reader()?.searcher().num_docs() == 0;
+    let index_empty = index::document_count(&index.reader()?) == 0;
     let state = if index_empty {
+        let state = catalogue::State::empty(
+            &crate::config::state_db_path(),
+            crate::catalogue::NAME_NAMESPACE,
+        )?;
         *content_index = index::recreate_content_on_disk(&config::content_index_dir())?;
         content::clear_content_state()?;
-        catalogue::State::empty(
-            &crate::config::state_db_path(),
-            crate::catalogue::NAME_NAMESPACE,
-        )
+        state
     } else {
         ensure_content_state_matches_index(content_index)?;
-        catalogue::State::load(
+        catalogue::State::open(
             &crate::config::state_db_path(),
             crate::catalogue::NAME_NAMESPACE,
-        )
+        )?
     };
     Ok((
         available,
@@ -128,25 +139,21 @@ fn reconcile_plan(
 
 /// A reindex of explicit roots: a clean full rebuild of exactly those paths.
 fn explicit_rebuild_plan(
-    roots: &[String],
+    explicit: Vec<PathBuf>,
     index: &tantivy::Index,
     content_index: &mut tantivy::Index,
 ) -> Result<(Vec<PathBuf>, catalogue::State, bool)> {
-    let explicit: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
     log::info!("scan roots (explicit): {explicit:?}");
+    let state = catalogue::State::empty(
+        &crate::config::state_db_path(),
+        crate::catalogue::NAME_NAMESPACE,
+    )?;
     let mut writer = index::bulk_writer(index)?;
     writer.delete_all_documents()?;
     writer.commit()?;
     *content_index = index::recreate_content_on_disk(&config::content_index_dir())?;
     content::clear_content_state()?;
-    Ok((
-        explicit,
-        catalogue::State::empty(
-            &crate::config::state_db_path(),
-            crate::catalogue::NAME_NAMESPACE,
-        ),
-        false,
-    ))
+    Ok((explicit, state, false))
 }
 
 fn clear_content_sidecar(content_index: &tantivy::Index) -> Result<()> {
@@ -172,7 +179,7 @@ fn ensure_content_state_matches_index(content_index: &tantivy::Index) -> Result<
     // Only an empty index proves the rows lie: policy-skipped files and files
     // with no extractable body keep a row without a document, so fewer documents
     // than rows is normal and must not wipe the extraction done so far.
-    let indexed_content_documents = index::document_count(&content_index.reader()?)?;
+    let indexed_content_documents = index::document_count(&content_index.reader()?);
     if indexed_content_documents == 0 {
         log::warn!(
             "content index/state divergence detected: {indexed_content_documents} content docs for {cached_content_paths} cached paths; rebuilding content cache"
@@ -198,8 +205,9 @@ fn peak_rss_kb() -> i64 {
 
 /// Total CPU time of this process (all threads), milliseconds, via `getrusage`.
 fn self_cpu_ms() -> f64 {
-    // SAFETY: getrusage on a zeroed rusage with RUSAGE_SELF is always valid.
+    // SAFETY: an all-zero `rusage` is a valid value of the C struct.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `usage` is valid for writes of a whole rusage.
     unsafe {
         libc::getrusage(libc::RUSAGE_SELF, &mut usage);
     }
@@ -253,7 +261,7 @@ pub(super) fn cmd_daemon() -> Result<()> {
     let _daemon_lock = match acquire_daemon_lock(&lock_path)? {
         Some(lock) => lock,
         None => {
-            log::info!("another big-search daemon is already running — exiting");
+            log::info!("another big-search daemon is already running; exiting");
             return Ok(());
         }
     };
@@ -266,7 +274,7 @@ pub(super) fn cmd_daemon() -> Result<()> {
 
     // `paused` and `activity` mirror indexing state for `status`; the channel
     // carries both fs events and lifecycle commands so the watcher reacts without
-    // a polling timer. `pending_content` counts cooldown-deferred extractions.
+    // a polling timer. `pending_content` counts deferred extractions.
     let (commands, rx) = std::sync::mpsc::channel::<watch::WatchMessage>();
     let control = ipc::Control {
         commands,
@@ -275,9 +283,10 @@ pub(super) fn cmd_daemon() -> Result<()> {
         pending_content: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         unwatched_dirs: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
+    stop_on_signal(control.commands.clone())?;
     // One versions store shared by the watcher (writes) and IPC (answers).
-    let history: big_search::history::SharedHistory = std::sync::Arc::new(std::sync::Mutex::new(
-        big_search::history::History::open(&big_search_config::read().history),
+    let history = big_search::history::SharedHistory::new(big_search::history::History::open(
+        &big_search_config::read().history,
     ));
 
     // All indexing runs in the watcher thread at background priority; the main
@@ -286,7 +295,21 @@ pub(super) fn cmd_daemon() -> Result<()> {
         Some(how) => log::info!("indexing runs in its own cgroup ({how})"),
         None => log::info!("indexing shares the service's cgroup (no cgroup delegated)"),
     }
-    spawn_watcher(&index, &content_index, &control, rx, &history)?;
+    // One reading of the sources present, for the walk and the mount watch
+    // alike: a source that comes between two readings would be in neither.
+    let available = settings::available_sources();
+    let started: Vec<PathBuf> = available.iter().map(|s| s.path.clone()).collect();
+    // The mount baseline is read before the walk starts: a disk mounted during
+    // the walk differs from it and starts a rescan.
+    let mounts = mounts::MountTable::open().and_then(|mut table| {
+        let points = table.points()?;
+        Ok((table, points))
+    });
+    spawn_watcher(&index, &content_index, &control, rx, &history, available)?;
+    match mounts {
+        Ok((table, points)) => spawn_mount_watch(control.commands.clone(), started, table, points),
+        Err(e) => log::warn!("mounts are not followed: {e}"),
+    }
 
     let (name_reader, content_reader) = open_query_readers()?;
     ipc::serve(
@@ -300,17 +323,138 @@ pub(super) fn cmd_daemon() -> Result<()> {
     )
 }
 
-/// Start the watcher thread: the startup reconcile, then incremental indexing
-/// for the daemon's life. It ends the process if it ever returns.
+/// Exit status asking systemd for a restart (`RestartForceExitStatus=`).
+const EXIT_RESTART: i32 = 75;
+
+/// How long a stop waits for the watcher, which may be held by a walk or the
+/// start's sync for far longer.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Stop on SIGTERM, which the service manager sends, or SIGINT. Without it a
+/// save heard in the last moments before a stop would never reach the
+/// versions worker, and the next start would take the file for one that
+/// arrived while nothing watched.
+fn stop_on_signal(commands: std::sync::mpsc::Sender<watch::WatchMessage>) -> Result<()> {
+    let mut signals = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+    ])
+    .context("handle SIGTERM and SIGINT")?;
+    std::thread::Builder::new()
+        .name("stop".into())
+        .spawn(move || {
+            if let Some(signal) = signals.forever().next() {
+                log::info!("stopping on signal {signal}");
+                stop(&commands, 0);
+            }
+        })
+        .context("start the stop thread")?;
+    Ok(())
+}
+
+/// Ask the watcher to apply what it heard and end the process with `status`;
+/// end it here after [`STOP_WAIT`] if the watcher has not.
+fn stop(commands: &std::sync::mpsc::Sender<watch::WatchMessage>, status: i32) -> ! {
+    // A watcher that is gone has already ended the process.
+    let _ = commands.send(watch::WatchMessage::Stop(status));
+    std::thread::sleep(STOP_WAIT);
+    log::warn!("the watcher did not stop within {STOP_WAIT:?}; exiting without it");
+    #[expect(
+        clippy::exit,
+        reason = "the service manager stops or restarts the unit with this status"
+    )]
+    std::process::exit(status)
+}
+
+/// Follow the mount table. A disk mounted or unmounted inside a source asks the
+/// watcher for a rescan, since inotify reports neither. A source that comes or
+/// goes (a removable disk plugged in) changes the roots the daemon started
+/// with, so it exits for systemd to start it again with the new set.
+fn spawn_mount_watch(
+    commands: std::sync::mpsc::Sender<watch::WatchMessage>,
+    started: Vec<PathBuf>,
+    mut table: mounts::MountTable,
+    mut before: Vec<(PathBuf, u64)>,
+) {
+    let available = || -> Vec<PathBuf> {
+        settings::available_sources()
+            .iter()
+            .map(|s| s.path.clone())
+            .collect()
+    };
+    let spawned = std::thread::Builder::new()
+        .name("mounts".into())
+        .spawn(move || {
+            let mut now = before.clone();
+            // Checked before the first wait too: a source that came after the
+            // sources were read raises no later event.
+            loop {
+                if available() != started {
+                    log::info!(
+                        "a source came or went; stopping with status {EXIT_RESTART} for the service manager to start it again"
+                    );
+                    stop(&commands, EXIT_RESTART);
+                }
+                if source_mounts_changed(&before, &now, &started) {
+                    log::info!("a disk was mounted or unmounted in or above a source; rescanning");
+                    let rescan =
+                        watch::WatchMessage::ControlCommand(watch::WatchControlCommand::Rescan);
+                    if commands.send(rescan).is_err() {
+                        return;
+                    }
+                }
+                before = now;
+                now = match table.wait().and_then(|()| table.points()) {
+                    Ok(now) => now,
+                    Err(e) => {
+                        log::warn!("mounts are no longer followed: {e}");
+                        return;
+                    }
+                };
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("mounts are not followed: {e}");
+    }
+}
+
+/// Whether a mount in only one of two sorted tables lies inside a root or holds
+/// one: a disk mounted above a source replaces what the source shows. The
+/// mount id tells apart a disk mounted over another at the same point.
+fn source_mounts_changed(
+    before: &[(PathBuf, u64)],
+    now: &[(PathBuf, u64)],
+    roots: &[PathBuf],
+) -> bool {
+    let only_in = |a: &[(PathBuf, u64)], b: &[(PathBuf, u64)]| {
+        a.iter()
+            .filter(|mount| b.binary_search(mount).is_err())
+            .any(|(point, _)| {
+                roots
+                    .iter()
+                    .any(|root| point.starts_with(root) || root.starts_with(point))
+            })
+    };
+    only_in(now, before) || only_in(before, now)
+}
+
+/// Start the watcher thread: the startup sync, then incremental indexing for
+/// the daemon's life. It ends the process if it ever returns.
 fn spawn_watcher(
     index: &tantivy::Index,
     content_index: &tantivy::Index,
     control: &ipc::Control,
     rx: std::sync::mpsc::Receiver<watch::WatchMessage>,
     history: &big_search::history::SharedHistory,
+    available: Vec<&'static settings::Source>,
 ) -> Result<()> {
-    let watch_history = std::sync::Arc::clone(history);
-    let watch_commands = control.commands.clone();
+    // notify's reader thread takes its creator's class: started on a lowered
+    // thread, it reads the kernel's queue in the indexer's idle class.
+    let roots = available.iter().map(|source| source.path.clone()).collect();
+    let commands = control.commands.clone();
+    let inotify = throttle::spawn_lowered(|| watch::start_inotify(commands, roots))
+        .context("start the file watch")??;
+    let watch_history = history.clone();
     let watch_paused = control.paused.clone();
     let watch_activity = control.activity.clone();
     let watch_pending_content = control.pending_content.clone();
@@ -323,6 +467,7 @@ fn spawn_watcher(
             let _watcher_exit_guard = WatcherExitGuard;
             throttle::lower_priority();
             let start = startup_sync(
+                &available,
                 &watch_index,
                 &watch_content_index,
                 &watch_pending_content,
@@ -331,10 +476,16 @@ fn spawn_watcher(
             // Startup sync + first backfill batch allocate bulk writer arenas;
             // return the freed pages before settling into the resident loop.
             throttle::release_idle_memory();
-            if let Err(e) = watch::run(
+            match watch::run(
                 watch_index,
                 watch_content_index,
-                watch::WatchScope::new(&start.roots, start.initial_dirs, Some(start.walk_started)),
+                watch::WatchScope {
+                    roots: &start.roots,
+                    dirs: start.dirs,
+                    watch_list: start.watch_list,
+                    started: start.started,
+                    fingerprint: start.fingerprint,
+                },
                 start.state,
                 watch::WatchRuntime::new(
                     watch_paused,
@@ -342,78 +493,209 @@ fn spawn_watcher(
                     watch_pending_content,
                     watch_unwatched_dirs,
                 ),
-                watch_commands,
+                inotify,
                 rx,
                 watch_history,
             ) {
-                log::error!("watcher stopped: {e:#}");
+                Ok(status) => {
+                    log::info!("stopped; exiting with status {status}");
+                    #[expect(
+                        clippy::exit,
+                        reason = "the stop the watcher took ends the daemon, without the exit guard"
+                    )]
+                    std::process::exit(status);
+                }
+                Err(e) => log::error!("watcher stopped: {e:#}"),
             }
         })?;
     Ok(())
 }
 
-/// What the startup reconcile hands to the incremental watcher.
+/// What the startup sync hands to the incremental watcher.
 struct StartupSync {
     roots: Vec<PathBuf>,
     state: catalogue::State,
-    initial_dirs: Vec<PathBuf>,
-    walk_started: std::time::SystemTime,
+    dirs: watch::StartDirs,
+    watch_list: catalogue::State,
+    started: std::time::SystemTime,
+    fingerprint: Option<i64>,
 }
 
-/// Reconcile the catalogue against the disk, prune stale content and extract
-/// the first content batch. Exits the process when the walk keeps failing.
+/// Find the folders to watch: the list the last run saved when it still
+/// applies, else a walk that reconciles the catalogue with the disk, prunes
+/// stale content and extracts the first content batch. Exits the process when
+/// the walk keeps failing.
 fn startup_sync(
+    available: &[&settings::Source],
     index: &tantivy::Index,
     content_index: &tantivy::Index,
     pending_content: &std::sync::atomic::AtomicU64,
     activity: &std::sync::atomic::AtomicU8,
 ) -> StartupSync {
-    let sources = settings::sources();
-    let roots: Vec<PathBuf> = sources
-        .all()
-        .iter()
-        .filter(|s| settings::is_available(s))
-        .map(|s| s.path.clone())
-        .collect();
+    let started = std::time::SystemTime::now();
+    let roots: Vec<PathBuf> = available.iter().map(|s| s.path.clone()).collect();
+    // A removable disk or a network folder changes on other machines, where
+    // folder times need not move (FAT and exFAT written by Windows).
+    let detachable = available.iter().any(|s| settings::is_detachable(s));
     log::debug!("scan sources: {roots:?}");
-    if let Err(e) = scan::write_effective_ignore() {
-        log::warn!("ignore file: {e:#}");
-    }
-    // Reconcile against the cache: builds a fresh index, or applies only the
-    // deltas accumulated while the daemon was down (crash/offline recovery).
+    let fingerprint = run_fingerprint(&roots);
     let empty = index
         .reader()
-        .map(|r| r.searcher().num_docs() == 0)
-        .unwrap_or(true);
+        .ok()
+        .map(|reader| index::document_count(&reader))
+        .is_none_or(|count| count == 0);
     let mut state = startup_name_state(empty, content_index);
-    let walk_started = std::time::SystemTime::now();
-    let initial_watch_dirs = match sync_with_retry(index, &roots, &mut state) {
-        Ok(sync_outcome) => {
-            log::debug!(
-                "sync: {} changed files may need content",
-                sync_outcome.content_candidates
-            );
-            let _ = state.persist();
-            prune_content_at_start(content_index);
-            backfill_first_batch(content_index, pending_content, activity);
-            let _ = state.persist();
-            sync_outcome.visible_dirs
-        }
-        Err(e) => {
-            // A failed startup sync means the index may be missing most
-            // of the catalogue (e.g. a sandbox/filesystem fault). Serving
-            // a near-empty index silently is worse than dying: exit so
-            // systemd restarts the unit (visible failure, fresh attempt).
-            log::error!("sync failed after retries — exiting for restart: {e:#}");
-            std::process::exit(1);
-        }
-    };
+    let mut watch_list =
+        catalogue::State::load(&config::state_db_path(), catalogue::WATCH_NAMESPACE);
+    // The walk reads the metadata of every entry of the sources. An index
+    // whose last run watched every folder, under the same available sources
+    // and ignore rules, watches that list again instead; `big-search rescan`
+    // walks on request. A clock set back since that run makes folder times
+    // useless for the catch-up.
+    if !empty
+        && !detachable
+        && let Some((dirs, last_started)) = trusted_saved_list(&watch_list, fingerprint, started)
+    {
+        log::info!("watching {} saved folders; no startup walk", dirs.len());
+        return StartupSync {
+            roots,
+            state,
+            dirs: watch::StartDirs::Saved(dirs, last_started),
+            watch_list,
+            started,
+            fingerprint,
+        };
+    }
+    // A start cut short during the walk must walk again, so a record that
+    // cannot be dropped must not outlive this start.
+    if let Err(e) = watch::forget_saved_run(&watch_list) {
+        exit_for_restart(&e.context("forget the saved folders"));
+    }
+    watch_list.clear();
+    let (initial_watch_dirs, unread) = walk_at_start(
+        index,
+        content_index,
+        &roots,
+        &mut state,
+        pending_content,
+        activity,
+    );
     StartupSync {
         roots,
         state,
-        initial_dirs: initial_watch_dirs,
-        walk_started,
+        dirs: watch::StartDirs::Walked(initial_watch_dirs, unread),
+        watch_list,
+        started,
+        fingerprint,
     }
+}
+
+/// The fingerprint a run is recorded under: the sources, the effective ignore
+/// rules and the global git ignore file the walker honors too. `None` when the
+/// rules could not be written, and then the run records nothing.
+fn run_fingerprint(roots: &[PathBuf]) -> Option<i64> {
+    let rules = match scan::write_effective_ignore() {
+        Ok(rules) => rules,
+        Err(e) => {
+            log::warn!("ignore file: {e:#}");
+            return None;
+        }
+    };
+    let git_excludes = match ignore::gitignore::gitconfig_excludes_path() {
+        Some(path) => match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                log::warn!("{}: {e}", path.display());
+                return None;
+            }
+        },
+        None => Vec::new(),
+    };
+    Some(watch::fingerprint(roots, &rules, &git_excludes))
+}
+
+/// The startup walk: reconcile the catalogue with the disk, prune stale
+/// content and extract the first content batch. The folders it saw, and
+/// whether one could not be read for a reason other than permission.
+fn walk_at_start(
+    index: &tantivy::Index,
+    content_index: &tantivy::Index,
+    roots: &[PathBuf],
+    state: &mut catalogue::State,
+    pending_content: &std::sync::atomic::AtomicU64,
+    activity: &std::sync::atomic::AtomicU8,
+) -> (Vec<PathBuf>, bool) {
+    let sync_outcome = match sync_with_retry(index, roots, state) {
+        Ok(sync_outcome) => sync_outcome,
+        // The index may be missing most of the catalogue: serving it silently
+        // is worse than a visible failure and a fresh attempt.
+        Err(e) => exit_for_restart(&e.context("sync failed after retries")),
+    };
+    log::debug!(
+        "sync: {} changed files may need content",
+        sync_outcome.content_candidates
+    );
+    // What a failed save leaves stays in memory, and the next save writes it.
+    if let Err(e) = state.persist() {
+        log::warn!("save the catalogue after the walk: {e:#}");
+    }
+    prune_content_at_start(content_index);
+    backfill_first_batch(content_index, pending_content, activity);
+    if let Err(e) = state.persist() {
+        log::warn!("save the catalogue after the first content batch: {e:#}");
+    }
+    (sync_outcome.visible_dirs, sync_outcome.unread)
+}
+
+/// The saved folders and when their run started, when the record matches
+/// `fingerprint` and the clock has not gone back past that start.
+fn trusted_saved_list(
+    watch_list: &catalogue::State,
+    fingerprint: Option<i64>,
+    started: std::time::SystemTime,
+) -> Option<(Vec<(PathBuf, u64)>, std::time::SystemTime)> {
+    let last_started = watch::saved_run_started(watch_list, fingerprint?)?;
+    if last_started > started {
+        return None;
+    }
+    Some((saved_watch_dirs(watch_list)?, last_started))
+}
+
+/// End a start that cannot go on safely; systemd restarts the unit.
+fn exit_for_restart(error: &anyhow::Error) -> ! {
+    log::error!("{error:#}; exiting for restart");
+    #[expect(
+        clippy::exit,
+        reason = "systemd restarts the unit; nothing above owns a cleanup"
+    )]
+    std::process::exit(1)
+}
+
+/// Every folder of the saved list with its inode, in path order, or None when
+/// the list is empty or unreadable.
+fn saved_watch_dirs(watch_list: &catalogue::State) -> Option<Vec<(PathBuf, u64)>> {
+    const PAGE: usize = 4096;
+    let mut dirs = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = match watch_list.entries_after(after.as_deref(), PAGE) {
+            Ok(page) => page,
+            Err(e) => {
+                log::warn!("read the saved folders: {e:#}");
+                return None;
+            }
+        };
+        let full = page.len() == PAGE;
+        after = page
+            .last()
+            .map(|(path, _, _)| path.to_string_lossy().into_owned());
+        dirs.extend(page.into_iter().map(|(path, _, inode)| (path, inode)));
+        if !full {
+            break;
+        }
+    }
+    (!dirs.is_empty()).then_some(dirs)
 }
 
 /// The name state the startup walk reconciles against.
@@ -424,23 +706,17 @@ fn startup_name_state(empty: bool, content_index: &tantivy::Index) -> catalogue:
     // recreates the name index) must not re-extract every document,
     // hours on a slow disk. Rows of files gone by then are pruned after
     // the walk.
-    if empty {
-        if let Err(e) = ensure_content_state_matches_index(content_index) {
-            log::warn!("check content index state: {e:#}");
-        }
-        catalogue::State::empty(
-            &crate::config::state_db_path(),
-            crate::catalogue::NAME_NAMESPACE,
-        )
-    } else {
-        if let Err(e) = ensure_content_state_matches_index(content_index) {
-            log::warn!("check content index state: {e:#}");
-        }
-        catalogue::State::load(
-            &crate::config::state_db_path(),
-            crate::catalogue::NAME_NAMESPACE,
-        )
+    if let Err(e) = ensure_content_state_matches_index(content_index) {
+        log::warn!("check content index state: {e:#}");
     }
+    let mut state = catalogue::State::load(
+        &crate::config::state_db_path(),
+        crate::catalogue::NAME_NAMESPACE,
+    );
+    if empty {
+        state.clear();
+    }
+    state
 }
 
 fn prune_content_at_start(content_index: &tantivy::Index) {
@@ -533,6 +809,12 @@ struct WatcherExitGuard;
 impl Drop for WatcherExitGuard {
     fn drop(&mut self) {
         log::error!("watcher thread exited; terminating daemon");
+        // The batch it failed on may be lost: the next start walks.
+        let watch_list =
+            catalogue::State::load(&config::state_db_path(), catalogue::WATCH_NAMESPACE);
+        if let Err(e) = watch::forget_saved_run(&watch_list) {
+            log::error!("forget the saved folders: {e:#}");
+        }
         std::process::exit(1);
     }
 }
@@ -568,7 +850,7 @@ fn recover_inflated_index(index: &mut tantivy::Index) -> Result<()> {
         crate::catalogue::NAME_NAMESPACE,
     );
     let cached_paths = cached_state.len() as u64;
-    let indexed_documents = index::document_count(&index.reader()?)?;
+    let indexed_documents = index::document_count(&index.reader()?);
     if !index::is_divergent_document_count(indexed_documents, cached_paths) {
         return Ok(());
     }
@@ -592,4 +874,32 @@ fn recover_inflated_index(index: &mut tantivy::Index) -> Result<()> {
     cached_state.clear();
     cached_state.persist()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_mounts_changed;
+    use std::path::PathBuf;
+
+    #[test]
+    fn mount_in_or_above_source() {
+        let roots = [PathBuf::from("/home/p")];
+        let disk = (PathBuf::from("/home/p/disk"), 40);
+        let elsewhere = (PathBuf::from("/mnt/other"), 41);
+        let before = vec![(PathBuf::from("/"), 1), disk.clone()];
+        let mut stacked = vec![before[0].clone(), disk, (PathBuf::from("/home/p/disk"), 42)];
+        stacked.sort_unstable();
+        assert!(source_mounts_changed(&before, &stacked, &roots));
+        assert!(source_mounts_changed(&stacked, &before, &roots));
+        assert!(!source_mounts_changed(&before, &before, &roots));
+        let mut outside = before.clone();
+        outside.push(elsewhere);
+        outside.sort_unstable();
+        assert!(!source_mounts_changed(&before, &outside, &roots));
+        // A disk mounted over a folder that holds the source.
+        let mut above = before.clone();
+        above.push((PathBuf::from("/home"), 43));
+        above.sort_unstable();
+        assert!(source_mounts_changed(&before, &above, &roots));
+    }
 }

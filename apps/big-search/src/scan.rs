@@ -4,240 +4,41 @@ use crate::catalogue::{self, ScanChange, State};
 use crate::index::Fields;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use std::io::ErrorKind::{NotFound, PermissionDenied};
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
-/// Built-in excludes (build artifacts, vendored deps, generated/lock files) applied
-/// regardless of whether a dir is a git repo. Users extend/override these in
-/// `~/.config/big-search/ignore` (gitignore syntax; `!pattern` re-includes).
-const DEFAULT_IGNORE: &str = "\
-# big-search default ignores — edit ~/.config/big-search/ignore to customize.
-target/
-**/target/**
-node_modules/
-**/node_modules/**
-dist/
-**/dist/**
-build/
-**/build/**
-out/
-**/out/**
-vendor/
-**/vendor/**
-AppData/
-ProgramData/
-Program Files/
-Program Files (x86)/
-Windows/
-$Recycle.Bin/
-System Volume Information/
-Recovery/
-EFI/
-__pycache__/
-**/__pycache__/**
-.venv/
-**/.venv/**
-venv/
-**/venv/**
-bower_components/
-**/bower_components/**
-.next/
-**/.next/**
-.nuxt/
-**/.nuxt/**
-.svelte-kit/
-**/.svelte-kit/**
-.gradle/
-**/.gradle/**
-.tox/
-**/.tox/**
-coverage/
-**/coverage/**
-*.lock
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
-*.min.js
-*.min.css
-*.map
-*.rs.html
-";
+mod scope;
+pub(crate) use scope::work_tree_root;
+pub use scope::{Scope, repo_ignored, seed_user_ignore, write_effective_ignore};
 
 const STATE_FLUSH_ROWS: usize = 2048;
 /// Paths read from each side per page when a pass compares the disk with the
 /// catalogue: bounded memory on a catalogue of millions.
 const SCAN_PAGE: usize = 2048;
 
-/// Documented per-user ignore file, seeded once at `~/.config/big-search/ignore`
-/// so the customisation point is discoverable and self-explaining. Commented out
-/// by default → no extra excludes until the user opts in.
-const USER_IGNORE_TEMPLATE: &str = "\
-# big-search — your personal ignore list (gitignore syntax).
-#
-# These patterns are added ON TOP of the built-in ignores (build artifacts like
-# target/, node_modules/, *.lock and all hidden dot-files are already skipped).
-# Re-read on the next reindex / daemon start. Edit freely — big-search never
-# overwrites this file.
-#
-# Syntax (same as .gitignore):
-#   foo/         skip every directory named foo, anywhere
-#   /foo/        skip foo only at a scan-root top level
-#   *.bak        skip files by glob
-#   !keep.bak    re-include something a previous rule excluded
-#
-# IMPORTANT: excluding a directory also hides the files inside it from name
-# search. Exclude only trees whose contents you never look for (caches,
-# extracted container images, old build/working dirs) — not folders whose files
-# you still want to find (your VMs, ROMs, ISOs and documents stay findable).
-#
-# Examples — uncomment / adapt:
-# *.iso              # don't index ISO images
-# github/            # skip cloned source repos
-# Caches/
-#
-# Related settings live in config.toml, not here:
-#   big-search config set metadata true        # extract media/image metadata
-#   big-search config set follow-symlinks true # index top-level symlinked dirs
-";
-
-/// Seed [`USER_IGNORE_TEMPLATE`] at the user ignore path if it does not exist
-/// yet. Never overwrites: the user's edits are kept. Called from the CLI only:
-/// the service never writes under `$XDG_CONFIG_HOME`.
-pub fn seed_user_ignore() {
-    let path = crate::config::user_ignore();
-    if path.exists() {
-        return;
-    }
-    let Some(parent) = path.parent() else { return };
-    if std::fs::create_dir_all(parent).is_err() {
-        return;
-    }
-    let _ = std::fs::write(&path, USER_IGNORE_TEMPLATE);
-}
-
-/// Write the effective ignore file: built-in defaults followed by the user's
-/// overrides (so user lines win). Call once before walking.
-pub fn write_effective_ignore() -> Result<()> {
-    let path = crate::config::effective_ignore();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let mut content = String::from(DEFAULT_IGNORE);
-    if let Ok(user) = std::fs::read_to_string(crate::config::user_ignore()) {
-        content.push_str("\n# --- user overrides ---\n");
-        content.push_str(&user);
-    }
-    std::fs::write(&path, content).context("write effective ignore")?;
-    Ok(())
-}
-
-/// The walker's scope rules, compiled once to answer for a single path.
-///
-/// The walker gets these rules through `add_ignore`, but a walker can only
-/// answer for entries it produces. Two callers need the same answer without
-/// walking: the watcher, for each inotify event, and every subtree walk, for its
-/// own root. The `ignore` crate never tests the root it is given, so without
-/// this a freshly created `target/` would be walked whole and every directory
-/// in it watched. One compiled matcher, shared, keeps the walker and the
-/// watcher in agreement.
-///
-/// Per-repository `.gitignore` files are not compiled in; [`repo_ignored`]
-/// checks them for paths new to the catalogue only.
-pub struct Scope {
-    ignore: ignore::gitignore::Gitignore,
-}
-
-impl Scope {
-    pub fn compile() -> Self {
-        Self::from_rules(&crate::config::effective_ignore())
-    }
-
-    fn from_rules(rules: &Path) -> Self {
-        // Root `/` so the patterns match anywhere, as `add_ignore` applies them.
-        let mut builder = ignore::gitignore::GitignoreBuilder::new("/");
-        if rules.exists()
-            && let Some(e) = builder.add(rules)
-        {
-            log::warn!("ignore rules unusable, scope falls back to hidden-only: {e:#}");
-        }
-        Self {
-            ignore: builder
-                .build()
-                .unwrap_or_else(|_| ignore::gitignore::Gitignore::empty()),
-        }
-    }
-
-    /// Whether `path` is outside the indexed scope. Checks the path's own
-    /// ancestors too, so a file event inside an excluded tree is refused even
-    /// when the event names only the file.
-    pub fn excluded(&self, path: &Path, is_dir: bool) -> bool {
-        is_hidden(path)
-            || self
-                .ignore
-                .matched_path_or_any_parents(path, is_dir)
-                .is_ignore()
-    }
-}
-
-/// Whether a `.gitignore` of the repository holding `path` excludes it, as the
-/// walker would have decided had it come to `path` from the repository's root.
-///
-/// The walker never tests the root it is given, so a directory its repository
-/// ignores, created again after the scan (`cargo fuzz` recreating
-/// `fuzz/corpus/`), would be walked whole the moment it appears. Asked only for
-/// paths the catalogue does not hold yet, so an event on a known file costs
-/// nothing more.
-pub fn repo_ignored(path: &Path, is_dir: bool) -> bool {
-    // Nearest first: a deeper `.gitignore` overrides a shallower one.
-    let mut rules = Vec::new();
-    for dir in path.ancestors().skip(1) {
-        let file = dir.join(".gitignore");
-        if file.is_file() {
-            rules.push(ignore::gitignore::Gitignore::new(&file).0);
-        }
-        // Outside a repository its ignore files do not apply (the walker's
-        // `require_git`).
-        if dir.join(".git").exists() {
-            return rules
-                .iter()
-                .map(|rules| rules.matched_path_or_any_parents(path, is_dir))
-                .find(|matched| !matched.is_none())
-                .is_some_and(|matched| matched.is_ignore());
-        }
-    }
-    false
-}
-
-/// A dotfile or any path under a dot-directory: the churny majority the design
-/// excludes. Mirrors the walker's `hidden(true)`.
-pub fn is_hidden(path: &Path) -> bool {
-    path.components().any(|c| {
-        matches!(c, std::path::Component::Normal(s) if s.as_encoded_bytes().first() == Some(&b'.'))
-    })
-}
-
-/// `ignore` walker: skip hidden + every gitignore source + our effective ignore.
-/// Symlinks are never followed during the walk (`follow_links(false)`); symlinked
-/// directories the user placed at a scan root are instead resolved
-/// into separate roots by [`crate::scan_roots::resolve_roots`], which avoids chasing the thousands
-/// of deep symlinks a tree contains (and the loops/duplication that brings).
-fn walker(root: &Path) -> ignore::Walk {
+/// `ignore` walker over what `scope` keeps, its own filters off so the walk,
+/// the watcher and a reindex read the same rules; it never follows a symlink
+/// (one at the top of a source is a source of its own).
+fn walker(root: &Path, scope: &Scope) -> ignore::Walk {
+    // The walk is sequential; the lock only meets `filter_entry`'s `Sync`.
+    let filter = std::sync::Mutex::new(scope.walk_filter(root));
     let mut b = WalkBuilder::new(root);
-    b.hidden(true) // skip dotfiles/dirs: churny and never indexed
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(true)
-        .follow_links(false);
-    let eff = crate::config::effective_ignore();
-    if eff.exists() {
-        b.add_ignore(&eff); // highest precedence, prunes the noise dirs everywhere
-    }
+    b.standard_filters(false)
+        .follow_links(false)
+        .filter_entry(move |entry| {
+            filter.lock().unwrap_or_else(PoisonError::into_inner).keeps(
+                entry.path(),
+                entry.depth(),
+                entry.file_type().is_some_and(|t| t.is_dir()),
+            )
+        });
     b.build()
 }
 
 /// Index one entry by name only (no content extraction): the fast scan path.
-pub fn add_name_only(
+pub(crate) fn add_name_only(
     writer: &IndexWriter,
     f: &Fields,
     path: &Path,
@@ -298,7 +99,7 @@ pub fn name_doc_stale(recorded: Option<(i64, u64)>, mtime: i64) -> bool {
 
 /// Drop any document for `path` (the `path` field is a single raw token).
 pub fn delete_path(writer: &IndexWriter, f: &Fields, path: &Path) {
-    writer.delete_term(path_term(f, path));
+    writer.delete_term(path_term(f.path, path));
 }
 
 /// Drop the document for `path` and, when it was a folder, every document
@@ -312,7 +113,7 @@ pub fn delete_tree(writer: &IndexWriter, f: &Fields, path: &Path) {
 /// Replace the document for `path` by name only. Content/metadata extraction is
 /// deferred to the throttled background backfill; doing it here
 /// would make inotify bursts read large files synchronously.
-pub fn upsert_path(
+pub(crate) fn upsert_path(
     writer: &IndexWriter,
     f: &Fields,
     path: &Path,
@@ -322,8 +123,10 @@ pub fn upsert_path(
     add_name_only(writer, f, path, metadata)
 }
 
-pub fn path_term(f: &Fields, path: &Path) -> Term {
-    Term::from_field_text(f.path, &path.to_string_lossy())
+/// The term a document is keyed by in either index: its path as text.
+#[must_use]
+pub fn path_term(field: tantivy::schema::Field, path: &Path) -> Term {
+    Term::from_field_text(field, &path.to_string_lossy())
 }
 
 /// What a cache-aware reconcile actually touched. A metadata-only change (same
@@ -339,9 +142,19 @@ pub struct ReconcileOutcome {
     pub deleted: bool,
     /// Changed files whose content or metadata may need extracting, for the log.
     pub content_candidates: usize,
+    /// A folder the walk could not read for a reason other than permission:
+    /// what changed in it went unseen.
+    pub unread: bool,
 }
 
 impl ReconcileOutcome {
+    /// A catalogued path left the index and the catalogue.
+    pub fn removed(&mut self) {
+        self.index_changed = true;
+        self.state_changed = true;
+        self.deleted = true;
+    }
+
     pub fn any(self) -> bool {
         self.index_changed || self.state_changed
     }
@@ -350,6 +163,7 @@ impl ReconcileOutcome {
         self.index_changed |= other.index_changed;
         self.state_changed |= other.state_changed;
         self.deleted |= other.deleted;
+        self.unread |= other.unread;
         self.content_candidates = self
             .content_candidates
             .saturating_add(other.content_candidates);
@@ -359,6 +173,8 @@ impl ReconcileOutcome {
 pub struct SyncOutcome {
     pub content_candidates: usize,
     pub visible_dirs: Vec<PathBuf>,
+    /// See [`ReconcileOutcome::unread`].
+    pub unread: bool,
 }
 
 /// Reconcile current subtree entries without blindly appending duplicate docs.
@@ -366,7 +182,7 @@ pub struct SyncOutcome {
 ///
 /// `on_dir` gets each visible subdirectory as the walk reaches it, before its
 /// entries are read, so a watch placed there misses nothing created later.
-pub fn reconcile_subtree_inline(
+pub(crate) fn reconcile_subtree_inline(
     writer: &IndexWriter,
     f: &Fields,
     state: &mut State,
@@ -377,10 +193,23 @@ pub fn reconcile_subtree_inline(
     let mut outcome = ReconcileOutcome::default();
     // The walker exempts its own root from the ignore rules, so an excluded
     // directory would otherwise be indexed whole the moment it is created.
-    if scope.excluded(root, true) || (!state.contains(root) && repo_ignored(root, true)) {
+    let skipped = if state.contains(root) {
+        scope.excluded(root, true)
+    } else {
+        scope.walk_skips(root, true)
+    };
+    if skipped {
         return Ok(outcome);
     }
-    for entry in walker(root).flatten() {
+    for entry in walker(root, scope) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                outcome.unread |= unread_folder(&error)
+                    .is_some_and(|(_, kind)| !matches!(kind, NotFound | PermissionDenied));
+                continue;
+            }
+        };
         if entry.depth() == 0 {
             continue;
         }
@@ -412,7 +241,7 @@ pub fn reconcile_subtree_inline(
 /// Every visible directory in `root` including `root` itself (watch targets).
 pub fn visible_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    for entry in walker(root).flatten() {
+    for entry in walker(root, &Scope::compile()).flatten() {
         if entry.file_type().is_some_and(|t| t.is_dir()) {
             dirs.push(entry.path().to_path_buf());
         }
@@ -425,17 +254,23 @@ pub fn visible_dirs(root: &Path) -> Vec<PathBuf> {
 /// Returns content/metadata candidate count plus visible directories found during
 /// the same walk; the content pass reads the catalogue from SQLite in bounded
 /// batches instead of receiving a huge Vec.
+///
+/// # Errors
+///
+/// Returns an error when the catalogue cannot be read or written, or the index cannot be
+/// committed.
 pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncOutcome> {
     let f = crate::index::fields(index)?;
     let mut writer = crate::index::bulk_writer(index)?;
     let mut visible_dirs = Vec::new();
-    let outcome = reconcile_roots(&mut writer, &f, state, roots, &mut |dir| {
+    let outcome = reconcile_roots(&mut writer, &f, state, roots, None, &mut |dir| {
         visible_dirs.push(dir.to_path_buf())
     })?;
     state.persist()?;
     Ok(SyncOutcome {
         content_candidates: outcome.content_candidates,
         visible_dirs,
+        unread: outcome.unread,
     })
 }
 
@@ -443,19 +278,41 @@ pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncO
 /// to recover from an inotify queue overflow (`need_rescan`) and by lifecycle
 /// rebuild/resume. `on_dir` gets every directory walked: after an overflow or
 /// a pause, folders created meanwhile have no watch yet.
-pub fn reconcile_inline(
+pub(crate) fn reconcile_inline(
     writer: &mut IndexWriter,
     f: &Fields,
     state: &mut State,
     roots: &[PathBuf],
     on_dir: &mut dyn FnMut(&Path),
 ) -> Result<ReconcileOutcome> {
-    reconcile_roots(writer, f, state, roots, on_dir)
+    reconcile_roots(writer, f, state, roots, None, on_dir)
+}
+
+/// The full pass limited to `folder`, a catalogued folder in scope: what left
+/// it, or left the scope, goes with its rows, as a walk of the sources would
+/// drop it. The sources nested in it are walked as their own roots, since the
+/// rules anchored at them may let in what the folder's walk leaves out.
+pub(crate) fn reconcile_folder(
+    writer: &mut IndexWriter,
+    f: &Fields,
+    state: &mut State,
+    folder: &Path,
+    on_dir: &mut dyn FnMut(&Path),
+) -> Result<ReconcileOutcome> {
+    let mut roots = vec![folder.to_path_buf()];
+    roots.extend(
+        crate::settings::available_sources()
+            .into_iter()
+            .map(|source| source.path.clone())
+            .filter(|source| source != folder && source.starts_with(folder)),
+    );
+    reconcile_roots(writer, f, state, &roots, Some(folder), on_dir)
 }
 
 /// One pass over `roots`: walk the disk recording each entry's `(mtime, size)`,
 /// then compare that with the catalogue in path order (see
-/// [`State::scan_changes_after`]) and update name documents and `state`.
+/// [`State::scan_changes_after`]) and update name documents and `state`. With
+/// `within`, only the catalogue rows below that folder are compared.
 /// `on_dir` gets every directory walked.
 ///
 /// The index is committed inside the pass, before the catalogue: a catalogue
@@ -465,24 +322,36 @@ fn reconcile_roots(
     f: &Fields,
     state: &mut State,
     roots: &[PathBuf],
+    within: Option<&Path>,
     on_dir: &mut dyn FnMut(&Path),
 ) -> Result<ReconcileOutcome> {
     let mut outcome = ReconcileOutcome::default();
+    let scope = Scope::compile();
     state.scan_pass(|state| {
         // The comparison reads the catalogue as persisted.
         state.persist()?;
         state.begin_scan()?;
-        mark_walked_entries(state, roots, on_dir)?;
+        outcome.unread = mark_walked_entries(state, &scope, roots, on_dir)?;
         // Offline removable/network sources: keep their catalogue rather than treat
         // the unmounted tree as deleted, so their files stay findable (and, later,
         // are reported as living on that device).
-        state.mark_seen_prefixes(&retained_offline_roots())?;
+        let mut offline = retained_offline_roots();
+        offline.retain(|root| within.is_none_or(|folder| root.starts_with(folder)));
+        state.mark_seen_prefixes(&offline)?;
 
-        let mut after = Some(String::new());
-        while let Some(cursor) = after {
+        // The rows below a folder sort from `<folder>/` to the first one
+        // outside it.
+        let mut after = Some(within.map_or_else(String::new, |folder| {
+            format!("{}/", folder.to_string_lossy().trim_end_matches('/'))
+        }));
+        'pages: while let Some(cursor) = after {
             let (changes, next) = state.scan_changes_after(&cursor, SCAN_PAGE)?;
             after = next;
             for change in changes {
+                let (ScanChange::Seen { path, .. } | ScanChange::Gone(path)) = &change;
+                if within.is_some_and(|folder| !path.starts_with(folder)) {
+                    break 'pages;
+                }
                 apply_scan_change(writer, f, state, change, &mut outcome)?;
                 persist_state_if_needed(state)?;
             }
@@ -495,15 +364,33 @@ fn reconcile_roots(
     Ok(outcome)
 }
 
-/// Walk `roots` and mark every entry seen with its `(mtime, size)`.
+/// Walk `roots` and mark every entry seen with its `(mtime, size)`; whether a
+/// folder could not be read for a reason other than permission.
+///
+/// What a folder the walk cannot read held stays marked seen: an unreadable
+/// folder is no evidence that its files are gone.
 fn mark_walked_entries(
     state: &mut State,
+    scope: &Scope,
     roots: &[PathBuf],
     on_dir: &mut dyn FnMut(&Path),
-) -> Result<()> {
+) -> Result<bool> {
+    let mut unread = false;
     for root in roots {
         on_dir(root);
-        for entry in walker(root).flatten() {
+        for entry in walker(root, scope) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    if let Some((folder, kind)) = unread_folder(&error)
+                        && kind != NotFound
+                    {
+                        state.mark_seen_prefixes(&[folder.to_path_buf()])?;
+                        unread |= kind != PermissionDenied;
+                    }
+                    continue;
+                }
+            };
             if entry.depth() == 0 {
                 continue;
             }
@@ -516,11 +403,34 @@ fn mark_walked_entries(
             if entry.file_type().is_some_and(|t| t.is_dir()) {
                 on_dir(path);
             }
-            let Ok(md) = entry.metadata() else { continue };
+            let md = match entry.metadata() {
+                Ok(md) => md,
+                Err(error) => {
+                    let kind = error.io_error().map(std::io::Error::kind);
+                    // Gone between the listing and the lookup: it goes as Gone.
+                    if kind == Some(NotFound) {
+                        continue;
+                    }
+                    // A failed lookup is no evidence the file is gone.
+                    state.mark_seen(path, None)?;
+                    unread |= kind != Some(PermissionDenied);
+                    continue;
+                }
+            };
             state.mark_seen(path, Some(catalogue::meta_pair(&md)))?;
         }
     }
-    Ok(())
+    Ok(unread)
+}
+
+/// The path a walk could not read and why; `None` for an error that is not a
+/// failed read, such as an ignore file that does not parse.
+fn unread_folder(error: &ignore::Error) -> Option<(&Path, std::io::ErrorKind)> {
+    match error {
+        ignore::Error::WithPath { path, err } => Some((path, err.io_error()?.kind())),
+        ignore::Error::WithDepth { err, .. } => unread_folder(err),
+        _ => None,
+    }
 }
 
 /// Bring the name index and `state` in line with one difference the scan found.
@@ -558,9 +468,7 @@ fn apply_scan_change(
         ScanChange::Gone(path) => {
             delete_path(writer, f, &path);
             state.remove(&path);
-            outcome.index_changed = true;
-            outcome.state_changed = true;
-            outcome.deleted = true;
+            outcome.removed();
         }
     }
     Ok(())
@@ -582,7 +490,8 @@ fn persist_state_if_needed(state: &mut State) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
     use crate::index::{fields, open_or_create};
@@ -611,7 +520,8 @@ mod tests {
         let mut writer = index.writer(15_000_000).unwrap();
         // The production walk, not a parallel one: `reconcile_subtree_inline` is
         // what the watcher calls when a directory appears.
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let mut dirs = Vec::new();
         let _ = reconcile_subtree_inline(
             &writer,
@@ -638,8 +548,6 @@ mod tests {
         delete_path(&writer, &f, &tree.join("sub/nested.md"));
         writer.commit().unwrap();
         assert_eq!(name_hits(&index, "nested"), 0);
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -651,7 +559,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let mut writer = index.writer(15_000_000).unwrap();
 
         let outcome = reconcile_subtree_inline(
@@ -667,10 +576,7 @@ mod tests {
         writer.commit().unwrap();
         drop(writer);
         state.persist().unwrap();
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            2
-        );
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 2);
 
         let mut writer = index.writer(15_000_000).unwrap();
         let outcome = reconcile_subtree_inline(
@@ -685,12 +591,61 @@ mod tests {
         assert!(!outcome.any());
         writer.commit().unwrap();
         drop(writer);
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            2
-        );
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 2);
+    }
 
-        std::fs::remove_dir_all(&base).ok();
+    #[test]
+    fn ignored_parent_and_worktree_exclude() {
+        let base = scratch_dir("lsearch-scan-git-layouts");
+        // A rule below an ignored folder brings nothing back (gitignore(5)).
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".git/worktrees/wt")).unwrap();
+        std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+        std::fs::create_dir_all(repo.join("cache")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "cache/\n").unwrap();
+        std::fs::write(repo.join("cache/.gitignore"), "!report.txt\n").unwrap();
+        // A linked worktree reads the exclude file of the repository it shares.
+        std::fs::write(repo.join(".git/info/exclude"), "*.secret\n").unwrap();
+        std::fs::write(repo.join(".git/worktrees/wt/commondir"), "../..\n").unwrap();
+        let worktree = base.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git_dir = repo.join(".git/worktrees/wt");
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+
+        let report = repo_ignored(&repo.join("cache/report.txt"), false);
+        let secret = repo_ignored(&worktree.join("notes.secret"), false);
+        let plain = repo_ignored(&worktree.join("notes.txt"), false);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(report, "a file in an ignored folder came back");
+        assert!(secret, "the worktree skipped the shared exclude file");
+        assert!(!plain);
+    }
+
+    /// A Jujutsu repository with no `.git` is a work tree, as the `ignore`
+    /// crate's walker treats it.
+    #[test]
+    fn jj_repository_reads_its_gitignore() {
+        let base = scratch_dir("lsearch-scan-jj");
+        let repo = base.join("jjrepo");
+        std::fs::create_dir_all(repo.join(".jj")).unwrap();
+        std::fs::create_dir_all(repo.join("generated")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "generated/\n").unwrap();
+        std::fs::write(repo.join("generated/out.txt"), b"x").unwrap();
+        std::fs::write(repo.join("kept.txt"), b"x").unwrap();
+
+        let generated = repo_ignored(&repo.join("generated"), true);
+        let inside = repo_ignored(&repo.join("generated/out.txt"), false);
+        let kept = repo_ignored(&repo.join("kept.txt"), false);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            generated && inside,
+            "the jj repository's .gitignore was skipped"
+        );
+        assert!(!kept);
     }
 
     #[test]
@@ -718,7 +673,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let mut writer = index.writer(15_000_000).unwrap();
         let mut dirs = Vec::new();
         let outcome = reconcile_subtree_inline(
@@ -732,11 +688,7 @@ mod tests {
         .unwrap();
         assert!(dirs.is_empty() && !outcome.any());
         writer.commit().unwrap();
-        assert_eq!(
-            crate::index::document_count(&index.reader().unwrap()).unwrap(),
-            0
-        );
-        std::fs::remove_dir_all(&base).ok();
+        assert_eq!(crate::index::document_count(&index.reader().unwrap()), 0);
     }
 
     #[test]
@@ -749,7 +701,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let writer = index.writer(15_000_000).unwrap();
         let first = reconcile_subtree_inline(
             &writer,
@@ -779,16 +732,6 @@ mod tests {
             "metadata-only change must not rewrite the name index"
         );
         assert!(second.state_changed, "content work must still be scheduled");
-
-        std::fs::remove_dir_all(&base).ok();
-    }
-
-    #[test]
-    fn hidden_detection() {
-        assert!(is_hidden(Path::new("/home/u/.cache/x")));
-        assert!(is_hidden(Path::new("/home/u/.config")));
-        assert!(!is_hidden(Path::new("/home/u/docs/file.txt")));
-        assert!(!is_hidden(Path::new("/home/u/Report.md")));
     }
 
     /// The `ignore` walker exempts its own root, so a `target/` created after
@@ -806,7 +749,7 @@ mod tests {
         // The built-in rules, read from an explicit file: this test must not
         // touch XDG_*, which other tests share through a lock it cannot see.
         let rules = base.join("effective.ignore");
-        std::fs::write(&rules, DEFAULT_IGNORE).unwrap();
+        std::fs::write(&rules, scope::DEFAULT_IGNORE).unwrap();
         let scope = Scope::from_rules(&rules);
 
         assert!(scope.excluded(&tree.join("target"), true), "the dir itself");
@@ -818,7 +761,8 @@ mod tests {
 
         let index = open_or_create(&base.join("idx")).unwrap();
         let f = fields(&index).unwrap();
-        let mut state = State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE);
+        let mut state =
+            State::empty(&base.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
         let writer = index.writer(15_000_000).unwrap();
 
         let mut dirs = Vec::new();
@@ -845,15 +789,12 @@ mod tests {
         )
         .unwrap();
         assert!(in_scope.index_changed);
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn user_ignore_seed_keeps_edits() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let base = std::env::temp_dir().join(format!("lsearch-ignore-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::test_env::scratch_dir("lsearch-ignore");
         let _config = EnvVarGuard::set("XDG_CONFIG_HOME", base.to_str().unwrap());
 
         let path = crate::config::user_ignore();
@@ -871,8 +812,6 @@ mod tests {
         std::fs::write(&path, "github/\n").unwrap();
         seed_user_ignore();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "github/\n");
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -908,7 +847,5 @@ mod tests {
             !paths.iter().any(|path| path.contains("/build/")),
             "build directories should be pruned: {paths:?}"
         );
-
-        std::fs::remove_dir_all(&base).ok();
     }
 }

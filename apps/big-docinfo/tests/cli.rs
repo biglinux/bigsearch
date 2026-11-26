@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! The command as the file manager's menu uses it.
 
 #![allow(
@@ -16,15 +13,31 @@ use std::process::{Command, Output};
 const CONTRACT: &str = "CONTRATO DE LOCAÇÃO RESIDENCIAL\n\nLOCADORA: Marta Ribeiro Saldanha, aposentada.\n\nPorto Alegre, 22 de abril de 2026.\n";
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("big-docinfo-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("scratch dir");
+    use std::os::unix::fs::DirBuilderExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos());
+    let dir = std::env::temp_dir().join(format!(
+        "big-docinfo-{name}-{}-{nanos}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    // Created here and only here: a path someone else planted fails the test.
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .expect("create a fresh scratch directory");
     dir
 }
 
 fn run(args: &[&str]) -> Output {
+    // The source language, whatever catalogs the machine has installed.
     Command::new(env!("CARGO_BIN_EXE_big-docinfo"))
         .args(args)
+        .env_remove("LANGUAGE")
+        .env("LC_ALL", "C.UTF-8")
         .output()
         .expect("spawn big-docinfo")
 }
@@ -80,7 +93,7 @@ fn rename_never_replaces_an_existing_file() {
 }
 
 #[test]
-fn rename_keeps_the_extension_and_rejects_paths() {
+fn rename_keeps_extension_refuses_paths() {
     let dir = scratch("rename");
     let doc = dir.join("a.pdf");
     fs::write(&doc, "x").expect("write");
@@ -132,5 +145,50 @@ fn uninformative_document_keeps_its_name() {
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(json["kept_name"], true);
     assert_eq!(json["free_name"], "Planilha de horas.txt");
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
+/// What a document says reaches the terminal with its control characters
+/// escaped.
+#[test]
+fn report_escapes_control_characters() {
+    let dir = scratch("escape");
+    let doc = dir.join("scan0002.txt");
+    fs::write(&doc, format!("\u{1b}]0;x\u{7}{CONTRACT}")).expect("write");
+    let out = run(&[arg(&doc)]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(!text.contains(['\u{1b}', '\u{7}']), "{text:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Arguments that name no command exit 2, as the README's table says.
+#[test]
+fn usage_error_exits_two() {
+    assert_eq!(run(&["--bogus", "x", "y"]).status.code(), Some(2));
+}
+
+/// The dialog names why a file gave no text: gone, not readable by this user,
+/// or a type with no text to read.
+#[test]
+fn unreadable_file_cause_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("unreadable");
+    let locked = dir.join("locked.txt");
+    fs::write(&locked, CONTRACT).expect("write");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let opaque = dir.join("opaque.bin");
+    fs::write(&opaque, [0u8, 1, 2, 3]).expect("write");
+    let cases = [
+        (dir.join("missing.txt"), "moved or deleted"),
+        (locked, "permission"),
+        (opaque, "no readable text"),
+    ];
+    for (file, cause) in &cases {
+        let out = run(&[arg(file)]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{}", file.display());
+        assert!(stderr.contains(cause), "{}: {stderr}", file.display());
+    }
     fs::remove_dir_all(dir).expect("cleanup");
 }

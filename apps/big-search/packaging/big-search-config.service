@@ -1,0 +1,33 @@
+# Started by big-search-config.path. The pause gathers the writes of one change
+# (a settings window may save several keys) into one restart.
+[Unit]
+Description=Restart big-search to apply its configuration
+Documentation=https://github.com/biglinux/bigsearch
+ConditionUser=!@system
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/sleep 2
+ExecStart=/usr/bin/systemctl --user try-restart big-search.service
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @mount @reboot @swap @obsolete
+CapabilityBoundingSet=
+UMask=0077

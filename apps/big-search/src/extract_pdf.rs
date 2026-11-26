@@ -478,10 +478,8 @@ mod tests {
             .unwrap_or_else(|| bin.to_string_lossy().into_owned())
     }
 
-    fn temporary_extract_dir(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("lsearch-ex-{}-{label}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temporary_extract_dir(label: &str) -> crate::test_env::ScratchDir {
+        crate::test_env::scratch_dir(&format!("lsearch-ex-{label}"))
     }
 
     fn temporary_executable_dir(label: &str) -> std::path::PathBuf {
@@ -530,8 +528,7 @@ mod tests {
         assert_eq!(text.len(), crate::extract::max_extract_bytes());
         assert!(text.bytes().all(|byte| byte == b'a'));
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&bin).ok();
+        let _ = std::fs::remove_dir_all(&bin);
     }
 
     /// A `.doc` is read by what it holds: OLE2 through `antiword` (argv checked by
@@ -576,8 +573,7 @@ mod tests {
         assert_eq!(rtf_described.declared_title.as_deref(), Some("Ata"));
         assert!(other_text.is_none());
         assert_eq!(plain_text.as_deref(), Some("Keymap notes\n"));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&bin).ok();
+        let _ = std::fs::remove_dir_all(&bin);
     }
 
     /// Work is bounded by CPU time: an extractor that spins is stopped by
@@ -612,8 +608,7 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "CPU limit not enforced: took {elapsed:?}"
         );
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&bin).ok();
+        let _ = std::fs::remove_dir_all(&bin);
     }
 
     #[test]
@@ -641,7 +636,6 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "deadline not enforced: took {elapsed:?}"
         );
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&bin).ok();
+        let _ = std::fs::remove_dir_all(&bin);
     }
 }

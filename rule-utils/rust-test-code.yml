@@ -1,0 +1,36 @@
+# Test code (a test module, function, or a #[cfg(test)] impl or struct) may use fixed shared paths and shell one-liners; production code may not.
+# The test attribute may sit under others, as in #[cfg(test)] #[expect(...)] mod tests.
+id: rust-test-code
+language: Rust
+rule:
+  inside:
+    stopBy: end
+    any:
+      - kind: mod_item
+        follows:
+          stopBy:
+            not:
+              kind: attribute_item
+          kind: attribute_item
+          regex: 'cfg\(test\)'
+      - kind: impl_item
+        follows:
+          stopBy:
+            not:
+              kind: attribute_item
+          kind: attribute_item
+          regex: 'cfg\(test\)'
+      - kind: struct_item
+        follows:
+          stopBy:
+            not:
+              kind: attribute_item
+          kind: attribute_item
+          regex: 'cfg\(test\)'
+      - kind: function_item
+        follows:
+          stopBy:
+            not:
+              kind: attribute_item
+          kind: attribute_item
+          regex: 'test\]'

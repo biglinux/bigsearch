@@ -1,7 +1,14 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 use super::*;
+use crate::edit::*;
+
+/// The lines of the `[[source]]` block for `path`, if the file has one.
+fn find_source(lines: &[String], path: &Path) -> Option<std::ops::Range<usize>> {
+    source_blocks(lines).ok()?.into_iter().find_map(|block| {
+        block
+            .is_folder(path)
+            .then_some(block.header..block.whole.end)
+    })
+}
 
 /// A machine nobody has configured shows the recommended amount of work.
 #[test]
@@ -10,7 +17,7 @@ fn untouched_machine_is_balanced() {
 }
 
 #[test]
-fn every_preset_recognises_its_own_values() {
+fn every_preset_recognizes_its_own_values() {
     for preset in Preset::all() {
         let mut defaults = Defaults::default();
         apply_preset_in_memory(&mut defaults, preset);
@@ -69,6 +76,312 @@ fn folder_removal_drops_whole_block() {
 }
 
 #[test]
+fn spaced_source_header_recognized() {
+    let mut lines: Vec<String> = "[[ source ]]\npath = \"/mnt/disk\"\n"
+        .lines()
+        .map(String::from)
+        .collect();
+    assert!(find_source(&lines, Path::new("/mnt/disk")).is_some());
+    add_source_to(
+        &mut lines,
+        &SourceEntry::new(PathBuf::from("/mnt/new")),
+        Path::new("/home/p"),
+    )
+    .unwrap();
+    let sources = read_text(&lines.join("\n")).sources;
+    let paths: Vec<_> = sources.iter().map(|source| source.path.clone()).collect();
+    assert_eq!(
+        paths,
+        [PathBuf::from("/mnt/disk"), PathBuf::from("/mnt/new")]
+    );
+}
+
+#[test]
+fn listed_folders_read_as_toml() {
+    let home = Path::new("/home/p");
+    let added = |text: &str| {
+        let mut lines: Vec<String> = text.lines().map(String::from).collect();
+        add_source_to(&mut lines, &SourceEntry::new("/mnt/new"), home).unwrap();
+        let sources = read_text(&lines.join("\n")).sources;
+        sources
+            .into_iter()
+            .map(|source| source.path)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        added("[[\"source\"]]\npath = \"/mnt/disk\"\n"),
+        [PathBuf::from("/mnt/disk"), PathBuf::from("/mnt/new")]
+    );
+    assert_eq!(
+        added("[origin]\nnote = \"\"\"\n[[source]]\n\"\"\"\n"),
+        [PathBuf::from("/home/p"), PathBuf::from("/mnt/new")]
+    );
+}
+
+#[test]
+fn edits_follow_parsed_folders() {
+    let home = Path::new("/home/p");
+    let lines_of = |text: &str| -> Vec<String> { text.lines().map(String::from).collect() };
+    let folders = |lines: &[String]| -> Vec<PathBuf> {
+        let sources = read_text(&lines.join("\n")).sources;
+        sources.into_iter().map(|source| source.path).collect()
+    };
+
+    let mut quoted =
+        lines_of("[[\"source\"]]\npath = \"/mnt/disk/\"\n\n[[source]]\npath = \"/home/p\"\n");
+    remove_source_from(&mut quoted, Path::new("/mnt/disk"), home).unwrap();
+    assert_eq!(folders(&quoted), [PathBuf::from("/home/p")]);
+
+    let other = "[[\"sour ce\"]]\npath = \"/home/p\"\nkeep = 1\n";
+    let mut lines = lines_of(other);
+    remove_source_from(&mut lines, home, home).expect_err("home is catalogued implicitly");
+    assert_eq!(lines, lines_of(other));
+    assert!(set_content_in(&mut lines, home, home, false).unwrap());
+    assert_eq!(folders(&lines), [PathBuf::from("/home/p")]);
+
+    let in_string = "[origin]\nnote = \"\"\"\n[[source]]\npath = \"/mnt/x\"\n\"\"\"\n";
+    let mut lines = lines_of(in_string);
+    remove_source_from(&mut lines, Path::new("/mnt/x"), home).unwrap();
+    assert_eq!(
+        lines,
+        lines_of(in_string),
+        "a folder TOML does not list is out already"
+    );
+
+    // As many header-like lines as folders, but not the same ones: only the
+    // file read after the edit tells.
+    let disguised = "source = [{ path = \"/a\" }, { path = \"/b\" }]\n[origin]\nnote = \"\"\"\n[[source]]\ncontent = true\n[[source]]\n\"\"\"\n";
+    let refused = remove_source_from(&mut lines_of(disguised), Path::new("/a"), home);
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    let at_value = "source = [{ path = \"/mnt/disk\", content = false }]\n[origin]\nnote = \"\"\"\n[[source]]\npath = \"/mnt/disk\"\n\"\"\"\n";
+    let refused = set_content_in(&mut lines_of(at_value), Path::new("/mnt/disk"), home, false);
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidData);
+
+    let twice = "[[source]]\npath = \"/mnt/disk\"\n\n[[source]]\npath = \"/mnt/disk/\"\ncontent = true\n\n[[source]]\npath = \"/home/p\"\n";
+    let mut lines = lines_of(twice);
+    assert!(set_content_in(&mut lines, Path::new("/mnt/disk"), home, false).unwrap());
+    let sources = read_text(&lines.join("\n")).sources;
+    let disk: Vec<_> = sources
+        .iter()
+        .filter(|source| source.path == Path::new("/mnt/disk"))
+        .map(|source| source.content)
+        .collect();
+    assert_eq!(disk, [Some(false), Some(false)], "{lines:?}");
+    remove_source_from(&mut lines, Path::new("/mnt/disk"), home).unwrap();
+    assert_eq!(folders(&lines), [PathBuf::from("/home/p")]);
+
+    let mut marked =
+        lines_of("\u{feff}[[source]]\npath = \"/mnt/disk\"\n[[source]]\npath = \"/home/p\"\n");
+    remove_source_from(&mut marked, Path::new("/mnt/disk"), home).unwrap();
+    assert_eq!(folders(&marked), [PathBuf::from("/home/p")]);
+
+    let mut not_a_number = lines_of("[[source]]\npath = \"/mnt/disk\"\n\n[extra]\nratio = nan\n");
+    add_source_to(&mut not_a_number, &SourceEntry::new("/mnt/new"), home).unwrap();
+    assert_eq!(
+        folders(&not_a_number),
+        [PathBuf::from("/mnt/disk"), PathBuf::from("/mnt/new")]
+    );
+}
+
+#[test]
+fn unknown_choices_named() {
+    let text = "[defaults]\ncontent_index_mode = \"freq\"\nsymlink_policy = \"local-exact\"\n\n[[source]]\npath = \"/mnt/disk\"\nsymlink_policy = \"everywhere\"\n";
+    assert_eq!(
+        unknown_choices(text),
+        [
+            "content_index_mode = \"freq\"",
+            "symlink_policy = \"everywhere\""
+        ]
+    );
+    assert!(unknown_choices("[defaults]\ncontent_index_mode = \"basic\"\n").is_empty());
+    // A folder does not read this key, so its value is no choice the service
+    // took as the default.
+    let per_folder = "[[source]]\npath = \"/mnt/disk\"\ncontent_index_mode = \"freq\"\n";
+    assert!(unknown_choices(per_folder).is_empty());
+}
+
+/// A setting is changed where the service reads it or not at all; a header
+/// quoted inside a multi-line string is text.
+#[test]
+fn setting_edit_reads_as_asked() {
+    let text = "[origin]\nnote = \"\"\"\n[\"defaults\"]\ncontent = true\n\"\"\"\n\n[defaults]\ncontent=true # keep\n";
+    let lines = || text.lines().map(String::from).collect::<Vec<String>>();
+    let mut changed = lines();
+    let outcome = set_table_values(&mut changed, "[defaults]", &[("content", "false")]);
+    let config = read_text(&changed.join("\n"));
+    assert!(
+        outcome.is_err() || !config.defaults.content,
+        "reported done while the service still reads content = true: {changed:?}"
+    );
+    assert_eq!(
+        parsed(&changed).unwrap()["origin"],
+        parsed(&lines()).unwrap()["origin"]
+    );
+
+    let set = vec!["[defaults]".to_owned(), "content=true # keep".to_owned()];
+    let mut same = set.clone();
+    set_table_values(&mut same, "[defaults]", &[("content", "true")]).unwrap();
+    assert_eq!(same, set, "a value already set was rewritten");
+}
+
+/// A folder added with its own link settings keeps them over the defaults.
+#[test]
+fn added_folder_keeps_overrides() {
+    let text = "[defaults]\nfollow_symlinks = true\n\n[[source]]\npath = \"/home/p\"\n";
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    let source = SourceEntry {
+        follow_symlinks: Some(false),
+        symlink_policy: Some(SymlinkPolicy::LocalExact),
+        ..SourceEntry::new("/mnt/disk")
+    };
+    add_source_to(&mut lines, &source, Path::new("/home/p")).unwrap();
+    let config = read_text(&lines.join("\n"));
+    let added = config
+        .sources
+        .iter()
+        .find(|entry| entry.path == Path::new("/mnt/disk"))
+        .expect("the folder was added");
+    assert_eq!(added.follow_symlinks, Some(false));
+    assert_eq!(added.symlink_policy, Some(SymlinkPolicy::LocalExact));
+}
+
+#[test]
+fn last_folder_kept() {
+    let only = "[[source]]\npath = \"/mnt/disk\"\n";
+    let mut lines: Vec<String> = only.lines().map(String::from).collect();
+    let refused = remove_source_from(&mut lines, Path::new("/mnt/disk"), Path::new("/home/p"));
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(lines, ["[[source]]", "path = \"/mnt/disk\""]);
+}
+
+/// Comments right above a header belong to its table: removing a folder
+/// takes its own and leaves the next table's.
+#[test]
+fn removal_keeps_neighbor_comments() {
+    let text = "[[source]]\npath = \"/home/p\"\n\n# external disk\n[[source]]\npath = \"/mnt/disk\"\ncontent = false\n\n# where files came from\n[origin]\nenabled = true\n";
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    remove_source_from(&mut lines, Path::new("/mnt/disk"), Path::new("/home/p")).unwrap();
+    assert_eq!(
+        lines.join("\n"),
+        "[[source]]\npath = \"/home/p\"\n\n# where files came from\n[origin]\nenabled = true"
+    );
+}
+
+/// Comments are kept with what they describe: the file's own at its top, a
+/// setting commented out under its table, a folder's note above its block.
+#[test]
+fn removal_keeps_other_comments() {
+    let home = Path::new("/home/p");
+    let removed = |text: &str, path: &str| {
+        let mut lines: Vec<String> = text.lines().map(String::from).collect();
+        remove_source_from(&mut lines, Path::new(path), home).unwrap();
+        lines.join("\n")
+    };
+    assert_eq!(
+        removed(
+            "# Search settings\n[[source]]\npath = \"/mnt/disk\"\n\n[[source]]\npath = \"/home/p\"\n",
+            "/mnt/disk"
+        ),
+        "# Search settings\n[[source]]\npath = \"/home/p\""
+    );
+    assert_eq!(
+        removed(
+            "[defaults]\ncontent = true\n# metadata = true\n[[source]]\npath = \"/mnt/disk\"\n[[source]]\npath = \"/home/p\"\n",
+            "/mnt/disk"
+        ),
+        "[defaults]\ncontent = true\n# metadata = true\n[[source]]\npath = \"/home/p\""
+    );
+    let commented =
+        "[[source]]\npath = \"/mnt/disk\"\n# content = false\n[[source]]\npath = \"/home/p\"\n";
+    assert_eq!(
+        removed(commented, "/home/p"),
+        "[[source]]\npath = \"/mnt/disk\"\n# content = false"
+    );
+    assert_eq!(
+        removed(commented, "/mnt/disk"),
+        "[[source]]\npath = \"/home/p\""
+    );
+}
+
+#[test]
+fn mixed_file_ending_in_crlf_edited() {
+    let original = "[origin]\r\nnote = \"\"\"a\nb\"\"\"\r\n[[source]]\r\npath = \"/mnt/disk\"\r\ncontent = true # keep\r\n";
+    let (dir, file) = scratch_file("mixed-crlf", original);
+    edit_file(&file, |lines| {
+        set_content_in(lines, Path::new("/mnt/disk"), Path::new("/home/p"), false).map(|_| ())
+    })
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(text.contains("content = false      # keep\r\n"), "{text:?}");
+    assert!(text.contains("\"\"\"a\nb\"\"\"\r\n"), "{text:?}");
+}
+
+#[test]
+fn no_op_edit_keeps_file() {
+    use std::os::unix::fs::MetadataExt;
+    let (dir, file) = scratch_file("unchanged", "[[source]]\npath = \"/mnt/disk\"\n");
+    let before = std::fs::metadata(&file).unwrap().ino();
+    edit_file(&file, |lines| {
+        add_source_to(lines, &SourceEntry::new("/mnt/disk"), Path::new("/home/p"))
+    })
+    .unwrap();
+    let after = std::fs::metadata(&file).unwrap().ino();
+    let absent = dir.join("absent.toml");
+    edit_file(&absent, |_| Ok(())).unwrap();
+    let created = absent.exists();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(before, after, "an unchanged file was replaced");
+    assert!(!created, "a change that changed nothing created the file");
+}
+
+#[test]
+fn mixed_line_endings_kept() {
+    let original = "[origin]\r\nnote = \"\"\"a\nb\"\"\"\n[[source]]\npath = \"/mnt/disk\"\n";
+    let (dir, file) = scratch_file("mixed", original);
+    edit_file(&file, |lines| {
+        add_source_to(lines, &SourceEntry::new("/mnt/new"), Path::new("/home/p"))
+    })
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        text.starts_with("[origin]\r\nnote = \"\"\"a\nb\"\"\"\n"),
+        "{text:?}"
+    );
+    assert_eq!(read_text(&text).sources.len(), 2);
+}
+
+#[test]
+fn non_utf8_folder_refused() {
+    use std::os::unix::ffi::OsStrExt;
+    let folder = PathBuf::from(std::ffi::OsStr::from_bytes(b"/mnt/caf\xe9"));
+    let mut lines = Vec::new();
+    let refused = add_source_to(&mut lines, &SourceEntry::new(folder), Path::new("/home/p"));
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    assert!(lines.is_empty());
+    // The first folder also writes the home folder, which is no exception.
+    let home = PathBuf::from(std::ffi::OsStr::from_bytes(b"/home/jos\xe9"));
+    let refused = add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), &home);
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    assert!(lines.is_empty());
+}
+
+#[test]
+fn implicit_home_removal_refused() {
+    let mut lines: Vec<String> = "[defaults]\ncontent = true\n"
+        .lines()
+        .map(String::from)
+        .collect();
+    let home = Path::new("/home/p");
+    let refused = remove_source_from(&mut lines, home, home).expect_err("home stays catalogued");
+    assert_eq!(refused.kind(), io::ErrorKind::NotFound);
+    remove_source_from(&mut lines, Path::new("/mnt/disk"), home)
+        .expect("an unlisted folder is out");
+    assert_eq!(lines, ["[defaults]", "content = true"]);
+}
+
+#[test]
 fn one_folder_stops_being_read_inside() {
     let text = "[[source]]\npath = \"/home/p\"\n\n[[source]]\npath = \"/mnt/disk\"\n";
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
@@ -83,7 +396,7 @@ fn one_folder_stops_being_read_inside() {
 /// A file that is not TOML at all keeps the search running, with nothing
 /// recorded about the person.
 #[test]
-fn a_broken_file_turns_privacy_features_off() {
+fn broken_file_disables_privacy() {
     let parsed = read_text("this is not = = toml [[[");
     assert!(parsed.sources.is_empty());
     assert_eq!(parsed.defaults, Defaults::default());
@@ -94,7 +407,7 @@ fn a_broken_file_turns_privacy_features_off() {
 
 /// One bad value loses its own table, not the rest of the file.
 #[test]
-fn a_bad_value_keeps_the_valid_tables() {
+fn bad_value_keeps_valid_tables() {
     let text = "[defaults]\ncontent = false\n\n[origin]\nenabled = true\n\n\
                 [history]\nkeep_days = \"30\"\n\n[[source]]\npath = \"/mnt/data\"\n";
     assert!(parse(text).is_err());
@@ -107,7 +420,7 @@ fn a_bad_value_keeps_the_valid_tables() {
 
 /// A header with a comment after it is still the same table.
 #[test]
-fn commented_headers_are_recognised() {
+fn commented_headers_are_recognized() {
     let text = "[defaults]  # mine\ncontent = true\n\n[[source]] # usb\npath = \"/mnt/disk\"\n";
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     set_in_table(&mut lines, "[defaults]", &[("metadata", "true")]);
@@ -139,9 +452,22 @@ fn folder_found_by_path_value() {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("big-search-config-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    use std::os::unix::fs::DirBuilderExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos());
+    let dir = std::env::temp_dir().join(format!(
+        "big-search-config-{name}-{}-{nanos}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    // Created here and only here: a path someone else planted fails the test.
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .expect("create a fresh scratch directory");
     dir
 }
 
@@ -201,4 +527,186 @@ fn the_budget_fits_the_disk() {
     assert_eq!(history_budget_bytes(0, 2000 * GIB), 10 * GIB);
     assert_eq!(history_budget_bytes(2, 2000 * GIB), 2 * GIB);
     assert_eq!(history_budget_bytes(0, 20 * GIB), GIB);
+}
+
+/// A choice another build added reads as the default, and leaves the rest of
+/// the file, its folders included, as written.
+#[test]
+fn unknown_choice_keeps_the_rest() {
+    let config = parse(
+        r#"
+        [defaults]
+        names_only = true
+        content_index_mode = "positional"
+
+        [[source]]
+        path = "/srv/fotos"
+        symlink_policy = "everywhere"
+        "#,
+    )
+    .expect("the file reads");
+    assert!(config.defaults.names_only);
+    assert_eq!(
+        config.defaults.content_index_mode,
+        ContentIndexMode::default()
+    );
+    assert_eq!(config.sources[0].path, PathBuf::from("/srv/fotos"));
+    assert_eq!(
+        config.sources[0].symlink_policy,
+        Some(SymlinkPolicy::default())
+    );
+}
+
+/// A folder whose name needs escaping in the file is still found.
+#[test]
+fn an_escaped_folder_path_is_found() {
+    let path = Path::new("/mnt/a \"quoted\" \\ disk");
+    let mut lines = Vec::new();
+    append_source(&mut lines, &SourceEntry::new(path));
+    assert!(find_source(&lines, path).is_some(), "{lines:?}");
+}
+
+/// A line break or another control character in a folder name stays inside
+/// its one line of TOML.
+#[test]
+fn control_characters_stay_valid_toml() {
+    let path = Path::new("/home/u/notes\nold\u{1}\u{7f}\ttab");
+    let mut lines = Vec::new();
+    append_source(&mut lines, &SourceEntry::new(path));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let config = parse(&lines.join("\n")).unwrap();
+    assert_eq!(config.sources[0].path, path);
+    assert!(find_source(&lines, path).is_some());
+}
+
+/// The home folder a file without folders stands for gets its own block.
+#[test]
+fn implicit_home_gets_written() {
+    let mut lines = vec!["[defaults]".to_owned(), "content = true".to_owned()];
+    let home = Path::new("/home/p");
+    assert!(set_content_in(&mut lines, home, home, false).unwrap());
+    let parsed = read_text(&lines.join("\n"));
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(parsed.sources[0].path, home);
+    assert_eq!(parsed.sources[0].content, Some(false));
+}
+
+/// A folder the file does not list is not added back.
+#[test]
+fn unlisted_folder_is_refused() {
+    let mut lines = vec!["[[source]]".to_owned(), "path = \"/mnt/disk\"".to_owned()];
+    let before = lines.clone();
+    assert!(!set_content_in(&mut lines, Path::new("/home/p"), Path::new("/home/p"), true).unwrap());
+    assert_eq!(lines, before);
+}
+
+/// The first folder added brings the home folder with it, once.
+#[test]
+fn first_folder_keeps_home() {
+    let home = Path::new("/home/p");
+    let mut lines = vec!["[defaults]".to_owned()];
+    add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), home).unwrap();
+    add_source_to(&mut lines, &SourceEntry::new("/mnt/disk"), home).unwrap();
+    let parsed = read_text(&lines.join("\n"));
+    assert_eq!(
+        parsed.sources,
+        vec![SourceEntry::new(home), SourceEntry::new("/mnt/disk")]
+    );
+}
+
+fn scratch_file(name: &str, text: &str) -> (PathBuf, PathBuf) {
+    let dir = scratch(name);
+    let file = dir.join("config.toml");
+    std::fs::write(&file, text).unwrap();
+    (dir, file)
+}
+
+/// A file that does not parse is not edited: a folder added to it could land
+/// as a second block for one folder, or the rewrite could drop the rest.
+#[test]
+fn broken_file_refuses_new_folder() {
+    let original = "[[source]]\npath = \"/home/p\"\ncontent = = true\n";
+    let (dir, file) = scratch_file("broken", original);
+    let result = edit_file(&file, |lines| {
+        add_source_to(lines, &SourceEntry::new("/mnt/new"), Path::new("/home/p"))
+    });
+    let left = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert_eq!(left, original);
+}
+
+/// A file somebody made read-only is not replaced by the rename.
+#[test]
+fn read_only_file_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let original = "[defaults]\ncontent = true\n";
+    let (dir, file) = scratch_file("read-only", original);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let result = edit_file(&file, |lines| {
+        set_in_table(lines, "[defaults]", &[("content", "false")]);
+        Ok(())
+    });
+    let left = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(left, original);
+}
+
+/// Two writers at once keep each other's changes.
+#[test]
+fn concurrent_writers_keep_both() {
+    let (dir, file) = scratch_file("concurrent", "[defaults]\n");
+    let writers: Vec<_> = ["a", "b"]
+        .into_iter()
+        .map(|prefix| {
+            let file = file.clone();
+            std::thread::spawn(move || {
+                for index in 0..40 {
+                    let key = format!("{prefix}{index}");
+                    edit_file(&file, |lines| {
+                        set_in_table(lines, "[defaults]", &[(key.as_str(), "1")]);
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let table: toml::Table = toml::from_str(&text).unwrap();
+    assert_eq!(table["defaults"].as_table().unwrap().len(), 80, "{text}");
+}
+
+#[test]
+fn inline_table_edit_refused() {
+    let original = "defaults = { content = true }\n";
+    let (dir, file) = scratch_file("inline", original);
+    let refused = edit_file(&file, |lines| {
+        set_in_table(lines, "[defaults]", &[("content", "false")]);
+        Ok(())
+    })
+    .expect_err("a second [defaults] table is invalid TOML");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(text, original);
+}
+
+/// A file written with Windows line endings keeps them.
+#[test]
+fn crlf_file_stays_crlf() {
+    let (dir, file) = scratch_file("crlf", "# mine\r\n[defaults]\r\ncontent = true\r\n");
+    edit_file(&file, |lines| {
+        set_in_table(lines, "[defaults]", &[("content", "false")]);
+        Ok(())
+    })
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(text, "# mine\r\n[defaults]\r\ncontent = false\r\n");
 }

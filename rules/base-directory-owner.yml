@@ -1,0 +1,19 @@
+id: base-directory-owner
+language: Rust
+severity: error
+message: Read home and XDG base directories through big_search_config::home_dir, big_search_config::config_home or config::data_home.
+note: The owners ignore a relative XDG value, as the XDG Base Directory spec requires.
+rule:
+  any:
+    - pattern: std::env::var_os($NAME)
+    - pattern: std::env::var($NAME)
+    - pattern: env::var_os($NAME)
+    - pattern: env::var($NAME)
+constraints:
+  NAME:
+    regex: '^"(HOME|XDG_CONFIG_HOME|XDG_DATA_HOME)"$'
+ignores:
+  - crates/foundation/big-search-config/src/lib.rs
+  - apps/big-search/src/config.rs
+  - '**/tests/**'
+  - '**/tests.rs'

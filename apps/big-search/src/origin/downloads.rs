@@ -5,8 +5,6 @@
 //! it for a regular file sitting directly in the downloads folder, and
 //! `browser_downloads` passes the addresses from a browser's own list through
 //! [`domain_from_url`]. Only the host of an address is ever kept.
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 pub(super) fn should_probe_xdg_origin(path: &Path) -> bool {
@@ -38,22 +36,26 @@ fn is_regular_file(path: &Path) -> bool {
 }
 
 fn downloads_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("XDG_DOWNLOAD_DIR").map(PathBuf::from) {
-        return expand_home(path);
-    }
-    let user_dirs = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|config| config.join("user-dirs.dirs"));
-    if let Some(path) = user_dirs.and_then(|path| parse_user_download_dir(&path)) {
-        return path;
-    }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Downloads"))
-        .unwrap_or_else(|| PathBuf::from("/Downloads"))
+    downloads_dir_from(
+        std::env::var_os("XDG_DOWNLOAD_DIR").map(PathBuf::from),
+        &big_search_config::config_home(),
+        &big_search_config::home_dir(),
+    )
 }
 
-fn parse_user_download_dir(path: &Path) -> Option<PathBuf> {
+/// The session's download folder when it names one, then the one
+/// `user-dirs.dirs` under `config_home` names, then `Downloads` in `home`.
+fn downloads_dir_from(session: Option<PathBuf>, config_home: &Path, home: &Path) -> PathBuf {
+    if let Some(path) = session {
+        return expand_home(path, home);
+    }
+    if let Some(path) = parse_user_download_dir(&config_home.join("user-dirs.dirs"), home) {
+        return path;
+    }
+    home.join("Downloads")
+}
+
+fn parse_user_download_dir(path: &Path, home: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(path).ok()?;
     for line in text.lines() {
         let line = line.trim();
@@ -61,53 +63,31 @@ fn parse_user_download_dir(path: &Path) -> Option<PathBuf> {
             continue;
         };
         let value = value.trim_matches('"');
-        return Some(expand_user_dir_value(value));
+        return Some(expand_user_dir_value(value, home));
     }
     None
 }
 
-fn expand_user_dir_value(value: &str) -> PathBuf {
+fn expand_user_dir_value(value: &str, home: &Path) -> PathBuf {
     if let Some(rest) = value.strip_prefix("$HOME/") {
-        return std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(rest))
-            .unwrap_or_else(|| PathBuf::from(rest));
+        return home.join(rest);
     }
-    expand_home(PathBuf::from(value))
+    expand_home(PathBuf::from(value), home)
 }
 
-fn expand_home(path: PathBuf) -> PathBuf {
+fn expand_home(path: PathBuf, home: &Path) -> PathBuf {
     let Some(text) = path.to_str() else {
         return path;
     };
     if let Some(rest) = text.strip_prefix("~/") {
-        return std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(rest))
-            .unwrap_or(path);
+        return home.join(rest);
     }
     path
 }
 
 pub(super) fn read_xdg_origin_domain(path: &Path) -> Option<String> {
-    let path_c = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let attr_c = CString::new("user.xdg.origin.url").ok()?;
-    let mut buffer = vec![0u8; 4096];
-    // SAFETY: `path_c` and `attr_c` are NUL-terminated C strings; `buffer` points
-    // to valid writable memory for its declared length. getxattr does not retain
-    // any pointer after returning.
-    let read = unsafe {
-        libc::getxattr(
-            path_c.as_ptr(),
-            attr_c.as_ptr(),
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-        )
-    };
-    if read <= 0 {
-        return None;
-    }
-    buffer.truncate(read as usize);
-    let url = std::str::from_utf8(&buffer).ok()?.trim();
-    domain_from_url(url)
+    let url = crate::meta::read_xattr(path, "user.xdg.origin.url")?;
+    domain_from_url(std::str::from_utf8(&url).ok()?.trim())
 }
 
 /// The host an address names, and nothing else from it.
@@ -144,7 +124,22 @@ pub(crate) fn domain_from_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_env::{ENV_LOCK, EnvVarGuard};
+
+    /// The address a browser leaves on the file, read back as its site.
+    #[test]
+    fn origin_attribute_read_as_site() {
+        let dir = crate::test_env::scratch_dir("big-search-origin-xattr");
+        let file = dir.join("a.pdf");
+        std::fs::write(&file, b"pdf").expect("write");
+        assert_eq!(read_xdg_origin_domain(&file), None);
+        let url = b" https://user@Files.Example.org/a.pdf?sig=1\n";
+        if crate::meta::tag_tests::write_xattr(&file, "user.xdg.origin.url", url) {
+            assert_eq!(
+                read_xdg_origin_domain(&file).as_deref(),
+                Some("files.example.org")
+            );
+        }
+    }
 
     /// Only the site survives: no credential, path or query, and nothing that
     /// is not a host name or IP literal.
@@ -179,22 +174,31 @@ mod tests {
     }
 
     #[test]
-    fn downloads_default_to_home_downloads() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _home = EnvVarGuard::set("HOME", "/tmp/bs-origin-home");
-        let _config = EnvVarGuard::unset("XDG_CONFIG_HOME");
-        let _download = EnvVarGuard::unset("XDG_DOWNLOAD_DIR");
+    fn downloads_folder_by_precedence() {
+        let config = crate::test_env::scratch_dir("bs-origin-user-dirs");
+        let home = Path::new("/home/p");
         assert_eq!(
-            downloads_dir(),
-            PathBuf::from("/tmp/bs-origin-home/Downloads")
+            downloads_dir_from(None, &config, home),
+            Path::new("/home/p/Downloads")
+        );
+        std::fs::write(
+            config.join("user-dirs.dirs"),
+            "XDG_DOWNLOAD_DIR=\"$HOME/Baixados\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            downloads_dir_from(None, &config, home),
+            Path::new("/home/p/Baixados")
+        );
+        assert_eq!(
+            downloads_dir_from(Some(PathBuf::from("~/Dl")), &config, home),
+            Path::new("/home/p/Dl")
         );
     }
 
     #[test]
     fn probe_accepts_completed_direct_downloads() {
-        let base =
-            std::env::temp_dir().join(format!("bs-origin-download-probe-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base = crate::test_env::scratch_dir("bs-origin-download-probe");
         let downloads = base.join("Downloads");
         let nested = downloads.join("project");
         std::fs::create_dir_all(&nested).unwrap();
@@ -212,6 +216,5 @@ mod tests {
             &downloads
         ));
         assert!(!should_probe_xdg_origin_in_downloads(&nested, &downloads));
-        std::fs::remove_dir_all(&base).ok();
     }
 }

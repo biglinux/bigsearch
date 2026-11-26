@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// Printed after a change to the file the service reads only when it starts.
+const APPLY_HINT: &str = "The service applies it when it restarts, which big-search-config.path does on its own; otherwise run `systemctl --user restart big-search`, or `big-search reindex` while it is stopped. Files already indexed are read again under the new setting only after `big-search rebuild`.";
+
 /// `config`: inspect and modify the documented config.toml without requiring a text editor.
 pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
     settings::seed_config_template();
@@ -23,12 +26,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
             }
             set_config_key(&tokens[1], &tokens[2])?;
             println!("{} {} = {}", green("set"), tokens[1], tokens[2]);
-            println!(
-                "{}",
-                dim(
-                    "Run `big-search rebuild` (daemon on) or `big-search reindex` for indexing-policy changes."
-                )
-            );
+            println!("{}", dim(APPLY_HINT));
             Ok(())
         }
         Some("preset") => {
@@ -38,12 +36,7 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
             }
             apply_config_preset(&tokens[1])?;
             println!("{} preset {}", green("applied"), tokens[1]);
-            println!(
-                "{}",
-                dim(
-                    "Run `big-search rebuild` (daemon on) or `big-search reindex` to apply this profile."
-                )
-            );
+            println!("{}", dim(APPLY_HINT));
             Ok(())
         }
         Some(other) => {
@@ -56,73 +49,110 @@ pub(super) fn cmd_config(tokens: &[String]) -> Result<()> {
 pub(super) fn print_config_help() {
     let title = bold("big-search config");
     println!(
-        "{title}\n\n{}\n  config show\n  config path\n  config set names-only true|false\n  config set content-index-mode auto|basic|freqs\n  config set extract-max-mb 0|4|8|16|32\n  config preset names-only|low-memory|balanced|complete\n\n{}\n  names-only     menor índice: só nomes/caminhos\n  low-memory     conteúdo ligado, postings Basic, caps conservadores\n  balanced       automático: Basic abaixo de 6 GiB RAM, Freqs acima\n  complete       Freqs + limite maior de extração\n",
-        cyan("Uso:"),
-        cyan("Perfis:"),
+        "{title}\n\n{}\n  config show\n  config path\n  config set names-only|content|metadata|follow-symlinks true|false\n  config set content-index-mode auto|basic|freqs   (also content-mode)\n  config set extract-max-mb N   (0 = automatic)\n  config set text-max-mb|pdf-max-mb N   (0 = no limit)\n  config set office-max-mb N   (0 = automatic; also content-max-mb)\n  config set pdf-timeout-secs N\n  config set content-cooldown-secs N   (also cooldown-secs)\n  config set symlink-policy personal-local|local-exact\n  config preset names-only|low-memory|balanced|complete\n\n{}\n  names-only     smallest index: names and paths only\n  low-memory     content on, Basic postings, conservative caps\n  balanced       automatic: Basic when the service may use below 6 GiB, Freqs above\n  complete       Freqs and a larger extraction cap\n",
+        cyan("Usage:"),
+        cyan("Profiles:"),
     );
 }
 
+/// The choices in the file this build does not know, which read as defaults.
+fn print_unknown_choices() {
+    match std::fs::read_to_string(config::config_file()) {
+        Ok(text) => {
+            for choice in big_search_config::unknown_choices(&text) {
+                println!(
+                    "{} {} is not a known value; read as the default",
+                    yellow("Unknown:"),
+                    terminal_text(&choice)
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => println!("{} {error}", yellow("Unreadable:")),
+    }
+}
+
+// shape: declares a view: one line per effective setting.
 pub(super) fn cmd_config_show() -> Result<()> {
     let requested = settings::content_index_mode().as_str();
-    let resolved = settings::resolved_content_index_mode().as_str();
+    let effective = content_index_detail();
     let ram = settings::total_memory_bytes()
         .map(format_bytes)
-        .unwrap_or_else(|| "desconhecida".to_string());
+        .unwrap_or_else(|| "unknown".to_string());
     let profile = if settings::names_only() {
-        yellow("só nomes")
+        yellow("names only")
     } else {
-        green("nomes + conteúdo")
+        green("names and content")
     };
     println!(
         "{} {}",
-        bold("Arquivo de configuração:"),
+        bold("Configuration file:"),
         config::config_file().display()
     );
-    println!("{} {ram}", bold("RAM total:"));
+    println!("{} {ram}", bold("Total RAM:"));
     let capacity = settings::effective_memory_bytes()
         .map(format_bytes)
-        .unwrap_or_else(|| "desconhecida (limites conservadores)".to_owned());
+        .unwrap_or_else(|| "unknown (conservative limits)".to_owned());
     println!(
-        "{} {capacity}",
-        bold("Capacidade observada para dimensionamento:")
+        "{} {capacity} here; the service sizes by its own memory limit",
+        bold("Memory sized for:")
     );
-    println!("{} {profile}", bold("Perfil efetivo:"));
+    println!("{} {profile}", bold("Effective profile:"));
     println!(
-        "{} pedido={}, efetivo={}",
-        bold("Modo de índice de conteúdo:"),
-        requested,
-        resolved,
+        "{} requested={requested}, effective={effective}",
+        bold("Content index mode:"),
     );
     println!(
         "{} {}",
-        bold("Limite de extração por arquivo:"),
+        bold("Text kept per file:"),
         settings::extract_max_mb_label()
     );
     println!(
         "{} {}",
-        bold("Limite de entrada de texto:"),
+        bold("Text input limit:"),
         input_cap_label(settings::text_max_input_bytes())
     );
     println!(
         "{} {}",
-        bold("Limite de entrada Office:"),
+        bold("Office input limit:"),
         input_cap_label(settings::office_max_input_bytes())
     );
     println!(
         "{} {}",
-        bold("Limite de entrada PDF:"),
+        bold("PDF input limit:"),
         input_cap_label(settings::pdf_max_input_bytes())
     );
+    println!("{} {}s", bold("PDF timeout:"), settings::pdf_timeout_secs());
     println!(
-        "{} {}s",
-        bold("Tempo limite de PDF:"),
-        settings::pdf_timeout_secs()
+        "{} BIG_SEARCH_* variables override these; DESIGN.md lists them",
+        bold("Environment:"),
     );
-    println!(
-        "{} BIG_SEARCH_NAMES_ONLY, BIG_SEARCH_CONTENT_INDEX_MODE, BIG_SEARCH_EXTRACT_MAX_MB, BIG_SEARCH_TEXT_MAX_MB, BIG_SEARCH_OFFICE_MAX_MB, BIG_SEARCH_PDF_MAX_MB",
-        bold("Variáveis de ambiente:"),
-    );
+    print_unknown_choices();
     Ok(())
+}
+
+/// The posting detail the content index on disk holds, which `auto` keeps
+/// whatever this shell's memory would choose; when there is none to reuse,
+/// the detail a new one would get.
+fn content_index_detail() -> String {
+    let dir = config::content_index_dir();
+    if !dir.join("meta.json").exists() {
+        return new_content_index_detail();
+    }
+    match index::open_read_only(&dir) {
+        Ok(content_index) => match index::stored_content_mode(&content_index) {
+            Some(mode) => format!("{}, from the content index on disk", mode.as_str()),
+            None => new_content_index_detail(),
+        },
+        Err(error) => format!("unknown, the content index is unreadable: {error:#}"),
+    }
+}
+
+fn new_content_index_detail() -> String {
+    format!(
+        "{} for a new content index",
+        settings::resolved_content_index_mode().as_str()
+    )
 }
 
 pub(super) fn format_bytes(bytes: u64) -> String {
@@ -137,7 +167,7 @@ pub(super) fn format_bytes(bytes: u64) -> String {
 
 pub(super) fn input_cap_label(bytes: u64) -> String {
     if bytes == 0 {
-        "sem limite de entrada".to_string()
+        "no input limit".to_string()
     } else {
         format!("{} MiB", bytes / (1 << 20))
     }
@@ -186,10 +216,9 @@ pub(super) fn set_config_key(key: &str, value: &str) -> Result<()> {
 /// A literal, not a parsed value: what goes into the file is text, and building
 /// a `toml::Value` only to print it again would need a TOML parser here.
 pub(super) fn parse_bool_value(value: &str) -> Result<String> {
-    match value.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok("true".to_string()),
-        "0" | "false" | "no" | "off" => Ok("false".to_string()),
-        _ => anyhow::bail!("expected boolean: true|false"),
+    match settings::parse_bool(value) {
+        Some(value) => Ok(value.to_string()),
+        None => anyhow::bail!("expected boolean: true|false"),
     }
 }
 

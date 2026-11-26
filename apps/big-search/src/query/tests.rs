@@ -5,8 +5,7 @@ use std::path::PathBuf;
 use tantivy::{IndexReader, doc};
 
 pub(super) fn index_with(label: &str, paths: &[&str]) -> tantivy::IndexReader {
-    let dir = std::env::temp_dir().join(format!("lsearch-test-{}-{label}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::test_env::scratch_dir(&format!("lsearch-test-{label}"));
     let index = open_or_create(&dir).unwrap();
     let f = fields(&index).unwrap();
     let mut writer = index.writer(15_000_000).unwrap();
@@ -30,11 +29,7 @@ pub(super) fn content_index_with_profile(
     entries: &[(&str, &str)],
     record: tantivy::schema::IndexRecordOption,
 ) -> tantivy::IndexReader {
-    let dir = std::env::temp_dir().join(format!(
-        "lsearch-test-{}-{label}-content",
-        std::process::id()
-    ));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::test_env::scratch_dir(&format!("lsearch-test-{label}-content"));
     let index = crate::index::create_content_fixture(&dir, record).unwrap();
     let f = content_fields(&index).unwrap();
     let mut writer = index.writer(15_000_000).unwrap();
@@ -56,11 +51,51 @@ fn no_catalogue() -> CatalogueReader {
     CatalogueReader::new(Path::new("/nonexistent/big-search/state.sqlite"))
 }
 
+/// A name index holding `paths`.
+fn index_of(label: &str, paths: &[PathBuf]) -> tantivy::IndexReader {
+    let owned: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    index_with(label, &owned.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// The page `mode` answers for `filter` without query words.
+fn wordless_page(
+    index: &tantivy::IndexReader,
+    catalogue: &CatalogueReader,
+    mode: &str,
+    filter: &Filter,
+    offset: usize,
+    limit: usize,
+) -> QueryOutcome {
+    let indexes = QueryIndexes {
+        name: index,
+        content: None,
+        catalogue,
+    };
+    run_query(
+        indexes,
+        "",
+        mode,
+        filter,
+        &Page { offset, limit },
+        false,
+        None,
+    )
+    .unwrap()
+}
+
+/// The file names of a page's hits, in order.
+fn page_names(outcome: &QueryOutcome) -> Vec<String> {
+    outcome.hits.iter().map(|hit| hit.name.clone()).collect()
+}
+
 /// A catalogue recording `files` with the given modification times and
 /// sizes, in a fresh directory under `dir`.
 fn catalogue_with(dir: &Path, files: &[(&Path, i64, u64)]) -> CatalogueReader {
     let db = dir.join("state/state.sqlite");
-    let mut names = State::empty(&db, NAME_NAMESPACE);
+    let mut names = State::empty(&db, NAME_NAMESPACE).unwrap();
     for (path, mtime, size) in files {
         names.set(path, *mtime, *size);
     }
@@ -92,15 +127,11 @@ fn run_names(
     .unwrap()
 }
 
-/// "Every PDF in my home folder" has no words to search for.
-///
-/// The name search refuses a query under two characters, because the ngram
-/// index cannot narrow one, so a caller narrowing purely by filter needs
-/// this mode or would have to walk the disk itself beside an index that
-/// already knows the answer.
+/// "Every PDF in my home folder" has no words to search for, and the name
+/// search finds nothing without one.
 #[test]
 fn list_mode_answers_wordless_queries() {
-    let root = std::env::temp_dir().join(format!("lsearch-list-{}", std::process::id()));
+    let root = crate::test_env::scratch_dir("lsearch-list");
     let mine = root.join("me");
     let other = root.join("elsewhere");
     std::fs::create_dir_all(&mine).unwrap();
@@ -112,14 +143,7 @@ fn list_mode_answers_wordless_queries() {
     for path in &paths {
         std::fs::write(path, b"x").unwrap();
     }
-    let listed: Vec<String> = paths
-        .iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect();
-    let index = index_with(
-        "list-mode",
-        &listed.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let index = index_of("list-mode", &paths);
     let catalogue = catalogue_with(
         &root,
         &paths
@@ -132,25 +156,7 @@ fn list_mode_answers_wordless_queries() {
         ext: vec!["pdf".to_string()],
         ..Default::default()
     };
-    let run = |mode: &str| {
-        run_query(
-            QueryIndexes {
-                name: &index,
-                content: None,
-                catalogue: &catalogue,
-            },
-            "",
-            mode,
-            &filter,
-            &Page {
-                offset: 0,
-                limit: 50,
-            },
-            false,
-            None,
-        )
-        .unwrap()
-    };
+    let run = |mode: &str| wordless_page(&index, &catalogue, mode, &filter, 0, 50);
     let outcome = run("list");
     let found: Vec<&str> = outcome.hits.iter().map(|hit| hit.path.as_str()).collect();
     assert_eq!(
@@ -161,15 +167,12 @@ fn list_mode_answers_wordless_queries() {
     // The same filter through the name search finds nothing, which is the
     // whole reason the mode exists.
     assert!(run("name").hits.is_empty());
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// The `largest` mode is the `list` mode ordered by recorded size.
 #[test]
 fn largest_pages_by_size() {
-    let root = std::env::temp_dir().join(format!("lsearch-largest-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::test_env::scratch_dir("lsearch-largest");
     // Recorded (mtime, size), in neither name nor time order.
     let recorded = [
         ("small.iso", 100, 10),
@@ -194,56 +197,28 @@ fn largest_pages_by_size() {
             .map(|(path, (_, mtime, size))| (path.as_path(), mtime, size))
             .collect::<Vec<_>>(),
     );
-    let owned: Vec<String> = paths
-        .iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect();
-    let index = index_with(
-        "largest",
-        &owned.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let index = index_of("largest", &paths);
     // "Large and old": everything not changed since 1000.
     let filter = Filter {
         under: Some(root.to_string_lossy().into_owned()),
         mtime: Some([i64::MIN, 1_000]),
         ..Default::default()
     };
-    let page = |offset, limit| {
-        run_query(
-            QueryIndexes {
-                name: &index,
-                content: None,
-                catalogue: &catalogue,
-            },
-            "",
-            "largest",
-            &filter,
-            &Page { offset, limit },
-            false,
-            None,
-        )
-        .unwrap()
-    };
-    let names = |outcome: &QueryOutcome| -> Vec<String> {
-        outcome.hits.iter().map(|hit| hit.name.clone()).collect()
-    };
+    let page = |offset, limit| wordless_page(&index, &catalogue, "largest", &filter, offset, limit);
 
     let first = page(0, 3);
     // Same size: the path breaks the tie.
-    assert_eq!(names(&first), ["huge.iso", "tie-a.iso", "tie-b.iso"]);
+    assert_eq!(page_names(&first), ["huge.iso", "tie-a.iso", "tie-b.iso"]);
     assert_eq!((first.total, first.next_offset), (4, Some(3)));
     let last = page(3, 3);
-    assert_eq!(names(&last), ["small.iso"]);
+    assert_eq!(page_names(&last), ["small.iso"]);
     assert_eq!((last.total, last.next_offset), (4, None));
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// A type filter finds videos by what they are, extension or not.
 #[test]
 fn type_filter_finds_videos_by_content() {
-    let dir = std::env::temp_dir().join(format!("lsearch-mime-query-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::test_env::scratch_dir("lsearch-mime-query");
     let mut stream = vec![0_u8; 188 * 4];
     stream.iter_mut().step_by(188).for_each(|byte| *byte = 0x47);
     // Only types the bytes tell: a type known by its name alone needs the
@@ -290,15 +265,13 @@ fn type_filter_finds_videos_by_content() {
             ("recording".to_string(), "video/mp2t".to_string()),
         ]
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A folder is its type in the name index, so the index keeps folders, or
 /// leaves them out, in the name search and the listing alike.
 #[test]
 fn kind_filter_keeps_folders_or_files() {
-    let dir = std::env::temp_dir().join(format!("lsearch-kind-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::test_env::scratch_dir("lsearch-kind");
     std::fs::create_dir_all(dir.join("fotos")).unwrap();
     std::fs::create_dir_all(dir.join("fotos.d")).unwrap();
     std::fs::write(dir.join("fotos.txt"), b"x").unwrap();
@@ -327,7 +300,6 @@ fn kind_filter_keeps_folders_or_files() {
         );
         assert_eq!(found(q, mode, EntryKind::File), ["fotos.txt"], "{mode}");
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -370,8 +342,7 @@ fn list_sees_past_the_ceiling() {
 /// counts every match, and pages through all of them.
 #[test]
 fn list_pages_newest_first() {
-    let root = std::env::temp_dir().join(format!("lsearch-newest-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
+    let root = crate::test_env::scratch_dir("lsearch-newest");
     let pictures = root.join("Pictures");
     std::fs::create_dir_all(&pictures).unwrap();
     // Recorded times, not in name or creation order.
@@ -397,60 +368,35 @@ fn list_pages_newest_first() {
             .map(|(path, mtime)| (path.as_path(), *mtime, 1))
             .collect::<Vec<_>>(),
     );
-    let owned: Vec<String> = files
-        .iter()
-        .map(|(path, _)| path.to_string_lossy().into_owned())
-        .collect();
-    let index = index_with(
-        "newest",
-        &owned.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let paths: Vec<PathBuf> = files.iter().map(|(path, _)| path.clone()).collect();
+    let index = index_of("newest", &paths);
     let filter = Filter {
         under: Some(pictures.to_string_lossy().into_owned()),
         ext: vec!["jpg".into(), "png".into()],
         ..Default::default()
     };
-    let page = |offset, limit| {
-        run_query(
-            QueryIndexes {
-                name: &index,
-                content: None,
-                catalogue: &catalogue,
-            },
-            "",
-            "list",
-            &filter,
-            &Page { offset, limit },
-            false,
-            None,
-        )
-        .unwrap()
-    };
-    let names = |outcome: &QueryOutcome| -> Vec<String> {
-        outcome.hits.iter().map(|hit| hit.name.clone()).collect()
-    };
+    let page = |offset, limit| wordless_page(&index, &catalogue, "list", &filter, offset, limit);
 
     let first = page(0, 2);
-    assert_eq!(names(&first), ["a.jpg", "b.JPG"]);
+    assert_eq!(page_names(&first), ["a.jpg", "b.JPG"]);
     assert_eq!((first.total, first.next_offset), (5, Some(2)));
     // Enriched like any page: the file's own stat and extension.
     assert!(first.hits.iter().all(|hit| hit.available && hit.size == 1));
     assert_eq!(first.hits[1].ext, "jpg");
     let second = page(2, 2);
-    assert_eq!(names(&second), ["c.jpg", "d.jpg"]);
+    assert_eq!(page_names(&second), ["c.jpg", "d.jpg"]);
     assert_eq!((second.total, second.next_offset), (5, Some(4)));
     let last = page(4, 2);
-    assert_eq!(names(&last), ["e.png"]);
+    assert_eq!(page_names(&last), ["e.png"]);
     assert_eq!((last.total, last.next_offset), (5, None));
 
     // A file deleted before the watcher noticed is dropped from its page,
     // and the next page still starts after the rows this one covered.
     std::fs::remove_file(pictures.join("b.JPG")).unwrap();
     let first = page(0, 2);
-    assert_eq!(names(&first), ["a.jpg"]);
+    assert_eq!(page_names(&first), ["a.jpg"]);
     assert_eq!((first.total, first.next_offset), (5, Some(2)));
-    assert_eq!(names(&page(2, 2)), ["c.jpg", "d.jpg"]);
-    std::fs::remove_dir_all(&root).ok();
+    assert_eq!(page_names(&page(2, 2)), ["c.jpg", "d.jpg"]);
 }
 
 /// `under` keeps what is inside the folder and not the folder itself, as
@@ -479,7 +425,7 @@ fn under_leaves_the_folder_out() {
 fn count_and_list_cataloged_paths() {
     let index = index_with("list", &["/c/three.rs", "/a/one.txt", "/b/two.md"]);
     // count = every cataloged file.
-    assert_eq!(count(&index).unwrap(), 3);
+    assert_eq!(count(&index), 3);
     // list = all paths, sorted.
     let all = list_paths(&index, 100, None).unwrap();
     assert_eq!(all, vec!["/a/one.txt", "/b/two.md", "/c/three.rs"]);
@@ -496,9 +442,7 @@ fn count_and_list_cataloged_paths() {
 /// from the postings, though only the page's candidates were read.
 #[test]
 fn a_page_counts_all_matches() {
-    let dir = std::env::temp_dir().join(format!("lsearch-paged-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::test_env::scratch_dir("lsearch-paged");
     let owned: Vec<String> = (0..30)
         .map(|i| {
             let path = dir.join(format!("nota {i}.txt"));
@@ -521,15 +465,50 @@ fn a_page_counts_all_matches() {
     assert_eq!(outcome.hits.len(), 5);
     assert_eq!(outcome.total, 30);
     assert_eq!(outcome.next_offset, Some(5));
-    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Guards: regression: a content search filtered by folder after the
+/// candidate ceiling found nothing in a folder holding matches, silently.
+#[test]
+fn ceiling_cut_reported_truncated() {
+    let mut paths: Vec<String> = (0..CANDIDATE_CEILING)
+        .map(|i| format!("/home/u/a/mango {i}.txt"))
+        .collect();
+    paths.extend((0..10).map(|i| format!("/home/u/b/mango {i}.txt")));
+    paths.push("/home/u/b/kiwi.txt".to_string());
+    let entries: Vec<(&str, &str)> = paths.iter().map(|p| (p.as_str(), p.as_str())).collect();
+    let content = content_index_with("ceiling-cut", &entries);
+    let names = index_with("ceiling-cut", &[]);
+    let content_page = |q: &str| {
+        run_query(
+            QueryIndexes {
+                name: &names,
+                content: Some(&content),
+                catalogue: &no_catalogue(),
+            },
+            q,
+            "content",
+            &Filter {
+                under: Some("/home/u/b".into()),
+                ..Default::default()
+            },
+            &Page {
+                offset: 0,
+                limit: 50,
+            },
+            false,
+            None,
+        )
+        .unwrap()
+    };
+    assert!(content_page("mango").truncated);
+    assert!(!content_page("kiwi").truncated);
 }
 
 /// A file found by name and by content is one hit and counts once.
 #[test]
 fn both_mode_counts_each_file_once() {
-    let dir = std::env::temp_dir().join(format!("lsearch-both-total-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::test_env::scratch_dir("lsearch-both-total");
     let owned: Vec<String> = (0..3)
         .map(|i| {
             let path = dir.join(format!("recibo {i}.txt"));
@@ -561,13 +540,11 @@ fn both_mode_counts_each_file_once() {
     assert_eq!(outcome.hits.len(), 2);
     assert_eq!(outcome.total, 3);
     assert_eq!(outcome.next_offset, Some(2));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn run_query_filters_paginates_and_enriches() {
-    let dir = std::env::temp_dir().join(format!("lsearch-rq-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::test_env::scratch_dir("lsearch-rq");
     std::fs::create_dir_all(dir.join("sub")).unwrap();
     let p_txt = dir.join("item_one.txt");
     let p_md = dir.join("sub/item_two.md");
@@ -619,8 +596,6 @@ fn run_query_filters_paginates_and_enriches() {
     assert_eq!(item(&f, &Page::default()).total, 2);
 
     assert_pages_of_two(&index);
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Pagination over the three `item` files: limit 2 → first page has
@@ -658,9 +633,7 @@ fn assert_pages_of_two(index: &IndexReader) {
 /// gone and is dropped.
 #[test]
 fn deleted_file_is_dropped() {
-    let dir = std::env::temp_dir().join(format!("lsearch-offline-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::test_env::scratch_dir("lsearch-offline");
     let kept = dir.join("nota_viva.txt");
     let gone = dir.join("nota_morta.txt");
     std::fs::write(&kept, b"x").unwrap();
@@ -684,6 +657,4 @@ fn deleted_file_is_dropped() {
         outcome.hits[0].available,
         "a file that stats is available, never flagged offline"
     );
-
-    std::fs::remove_dir_all(&dir).ok();
 }

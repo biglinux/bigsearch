@@ -1,6 +1,9 @@
 //! big-search: lean unprivileged search of file names and contents, kept current by watching the disk.
+//!
+//! `config_cmd` serves `config`; `index_cmd` serves `reindex` and `daemon`.
 use big_search::{
-    catalogue, config, content, extract, index, ipc, origin, query, scan, settings, throttle, watch,
+    catalogue, config, content, extract, index, ipc, mounts, origin, query, scan, settings,
+    terminal_text, throttle, watch,
 };
 
 use anyhow::{Context, Result};
@@ -135,24 +138,27 @@ fn print_usage() {
 
 fn colored_usage() -> String {
     let title = bold("big-search");
-    let usage = cyan("Uso");
-    let commands = cyan("Comandos principais");
-    let search = cyan("Busca");
-    let config = cyan("Configuração");
-    let examples = cyan("Exemplos");
-    let color = cyan("Cores");
+    let usage = cyan("Usage");
+    let commands = cyan("Commands");
+    let origin = cyan("Recording origin (for other programs, with the service running)");
+    let search = cyan("Search");
+    let config = cyan("Configuration");
+    let examples = cyan("Examples");
+    let color = cyan("Color");
     format!(
-        "{title} — busca local rápida por nomes e conteúdo\n\n\
-{usage}:\n  big-search [--color auto|always|never] <consulta>\n  big-search content <consulta>        busca no conteúdo indexado\n  big-search both <consulta>           une nome + conteúdo, sem duplicar\n  big-search config show               mostra perfil efetivo\n  big-search config preset low-memory  aplica perfil para máquina fraca\n  big-search reindex [RAIZ...]         reconstrói o índice\n\n\
-{commands}:\n  count        conta entradas catalogadas; aceita --under DIR\n  list         lista caminhos; aceita --under DIR e -n N\n  daemon       servidor local + watcher incremental\n  status       estado do daemon\n  pause/resume pausa ou retoma indexação de fundo\n  rebuild      pede rebuild ao daemon\n  origin       mostra proveniência registrada de um caminho\n  versions     lista as versões anteriores guardadas de um arquivo\n  forget-versions esquece as versões guardadas de um arquivo\n\n\
-{search}:\n  -n, --limit N      limita resultados\n  -a, --all          até 100000 resultados\n  --under DIR        restringe a uma árvore\n  -e, --ext EXT      restringe extensão; pode repetir\n  -p, --pages        tenta mostrar páginas/slides dos hits visíveis\n  --origin           inclui resumo de origem/proveniência\n  --                 encerra flags; o resto vira consulta literal\n\n\
-{config}:\n  config show\n  config path\n  config set names-only true|false\n  config set content-index-mode auto|basic|freqs\n  config set extract-max-mb 0|4|8|16|32\n  config preset names-only|low-memory|balanced|complete\n\n\
-{color}:\n  --color auto|always|never, --no-color. Também respeita NO_COLOR, CLICOLOR_FORCE e CLICOLOR.\n\n\
-{examples}:\n  big-search contrato --ext pdf --under ~/Documentos\n  big-search both goncalves relatorio -n 20 --origin\n  big-search config preset names-only && big-search reindex\n\n\
+        "{title}: fast local search of file names and contents\n\n\
+{usage}:\n  big-search [--color auto|always|never] <query>\n  big-search content <query>           search inside the indexed files\n  big-search both <query>              names and contents, without duplicates\n  big-search config show               the effective profile\n  big-search config preset low-memory  the profile for a weak machine\n  big-search reindex                   rebuild the index of the searched folders\n  big-search reindex ROOT...           an index of only these folders, until the\n                                       next reindex or service start\n\n\
+{commands}:\n  count           count catalogued entries; takes --under DIR\n  list            list paths; takes --under DIR and -n N\n  daemon          the service: local server and change watcher; run it from\n                  big-search.service, which restarts it when a source comes or goes\n  status          what the service is doing\n  pause/resume    pause or resume background indexing\n  rescan          look for changes made while the service was stopped\n  rebuild         ask the service to rebuild\n  origin          where a file came from\n  versions        the earlier versions kept of a file\n  forget-versions forget the versions kept of a file\n  capabilities    what the running service offers\n\n\
+{origin}:\n  register-created PATH [APP_ID]           created by a program\n  register-copy SOURCE TARGET [APP_ID]     a copy\n  register-move SOURCE TARGET [APP_ID]     moved or renamed\n  register-derived SOURCE TARGET [APP_ID]  made from another file\n\n\
+{search}:\n  -n, --limit N      at most N results\n  -a, --all          all results, up to {ceiling}\n  --under DIR        only inside DIR\n  -e, --ext EXT      only this extension; may repeat\n  -p, --pages        show matching pages or slides of the visible hits\n  --origin           show where each file came from\n  --                 end of options; the rest is the query, as written\n  -V, --version      print the version\n\n\
+{config}:\n  config show\n  config path\n  config set KEY VALUE   `big-search config --help` lists the keys\n  config preset names-only|low-memory|balanced|complete\n\n\
+{color}:\n  --color auto|always|never, --no-color. NO_COLOR, CLICOLOR_FORCE and CLICOLOR are honored.\n\n\
+{examples}:\n  big-search contract --ext pdf --under ~/Documents\n  big-search both goncalves report -n 20 --origin\n  big-search config preset names-only && big-search reindex\n\n\
 {}",
         dim(
-            "Observação: arquivos ocultos e entradas ignoradas por .gitignore continuam fora do índice por desenho."
+            "Hidden files and anything a .gitignore excludes are not indexed. Control and\nbidirectional characters in names print as escapes (\\u{1b})."
         ),
+        ceiling = big_indexd_client::CANDIDATE_CEILING,
     )
 }
 
@@ -227,6 +233,7 @@ fn main() -> Result<()> {
         Some("capabilities") => cmd_capabilities(),
         Some("pause") => cmd_lifecycle("pause"),
         Some("resume") => cmd_lifecycle("resume"),
+        Some("rescan") => cmd_lifecycle("rescan"),
         Some("rebuild") => cmd_lifecycle("rebuild"),
         Some("content") => cmd_search(&args[1..], "content"),
         Some("both") => cmd_search(&args[1..], "both"),
@@ -262,7 +269,7 @@ fn parse_query(tokens: &[String]) -> Search {
             "-a" | "--all" => limit = 100_000,
             "-p" | "--pages" => pages = true,
             "--origin" => include_origin = true,
-            "--under" => under = it.next().cloned(),
+            "--under" => under = it.next().map(|dir| folder_from_cwd(dir)),
             "--ext" | "-e" => {
                 if let Some(e) = it.next() {
                     ext.push(e.trim_start_matches('.').to_ascii_lowercase());
@@ -287,12 +294,35 @@ fn parse_query(tokens: &[String]) -> Search {
     }
 }
 
+/// `dir` as an absolute folder, relative ones read against the working
+/// directory as the shell would, `..` dropping the component before it like
+/// `cd`; catalogued paths are all absolute. Lexical, so the folder of an
+/// unplugged disk still names its offline entries.
+fn folder_from_cwd(dir: &str) -> String {
+    // No working directory, or one whose name is not UTF-8: as typed.
+    let Ok(absolute) = std::path::absolute(dir) else {
+        return dir.to_owned();
+    };
+    let mut folder = PathBuf::new();
+    for part in absolute.components() {
+        if part == std::path::Component::ParentDir {
+            folder.pop();
+        } else {
+            folder.push(part);
+        }
+    }
+    folder
+        .into_os_string()
+        .into_string()
+        .unwrap_or_else(|_| dir.to_owned())
+}
+
 /// `count`: print how many files are cataloged. `--under DIR` scopes the tally.
 fn cmd_count(tokens: &[String]) -> Result<()> {
     let s = parse_query(tokens);
     let index = index::open_read_only(&config::index_dir())?;
     let n = match s.under.as_deref() {
-        None => query::count(&index.reader()?)?,
+        None => query::count(&index.reader()?),
         Some(dir) => query::list_paths(&index.reader()?, usize::MAX, Some(dir))?.len() as u64,
     };
     println!("{n}");
@@ -313,7 +343,7 @@ fn cmd_list(tokens: &[String]) -> Result<()> {
     let s = parse_query(tokens);
     let index = index::open_read_only(&config::index_dir())?;
     for path in query::list_paths(&index.reader()?, s.limit, s.under.as_deref())? {
-        println!("{path}");
+        println!("{}", terminal_text(&path));
     }
     Ok(())
 }
@@ -337,10 +367,10 @@ fn cmd_status() -> Result<()> {
             println!("{} {} · {}", bold("indexed"), s.indexed, s.activity);
             let total_index_bytes = s.name_index_bytes.saturating_add(s.content_index_bytes);
             println!(
-                "{} {} documentos · {} {} (nomes {} + conteúdo {})",
-                bold("conteúdo:"),
+                "{} {} documents · {} {} (names {} + content {})",
+                bold("content:"),
                 s.content_docs,
-                dim("índices:"),
+                dim("indexes:"),
                 format_bytes(total_index_bytes),
                 format_bytes(s.name_index_bytes),
                 format_bytes(s.content_index_bytes)
@@ -349,7 +379,7 @@ fn cmd_status() -> Result<()> {
                 println!(
                     "{}",
                     yellow(&format!(
-                        "conteúdo pendente: {} arquivo(s) editados recentemente",
+                        "content pending: {} file(s) recently edited or busy in another program",
                         s.pending_content
                     ))
                 );
@@ -358,7 +388,7 @@ fn cmd_status() -> Result<()> {
                 println!(
                     "{}",
                     yellow(&format!(
-                        "{} pasta(s) sem acompanhamento de mudanças (provavelmente o limite fs.inotify.max_user_watches)",
+                        "{} folder(s) not watched for changes (probably the fs.inotify.max_user_watches limit)",
                         s.unwatched_dirs
                     ))
                 );
@@ -412,21 +442,20 @@ fn cmd_versions(tokens: &[String]) -> Result<()> {
         return Ok(());
     };
     let client = daemon_client()?;
-    let answer = client
-        .versions(path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let answer = match client.versions(path) {
+        Ok(answer) => answer,
+        Err(big_indexd_client::ClientError::Io(_)) => return Err(no_daemon()),
+        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+    };
     if let Some(reason) = answer.unavailable {
         println!("{path}: {}", dim(explain_unavailable(reason)));
         return Ok(());
     }
     if answer.paused_for_space {
-        println!(
-            "{}",
-            dim("pouco espaço livre: novas versões estão pausadas")
-        );
+        println!("{}", dim("low on free space: new versions are paused"));
     }
     if answer.versions.is_empty() {
-        println!("{path}: {}", dim("nenhuma versão guardada"));
+        println!("{path}: {}", dim("no versions kept"));
         return Ok(());
     }
     println!("{path}");
@@ -448,10 +477,12 @@ fn cmd_forget_versions(tokens: &[String]) -> Result<()> {
         return Ok(());
     };
     let client = daemon_client()?;
-    client
-        .forget_versions(path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    println!("{} {path}", green("esquecido"));
+    match client.forget_versions(path) {
+        Ok(()) => {}
+        Err(big_indexd_client::ClientError::Io(_)) => return Err(no_daemon()),
+        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+    }
+    println!("{} {path}", green("forgotten"));
     Ok(())
 }
 
@@ -462,18 +493,18 @@ fn explain_unavailable(reason: big_indexd_client::Unavailable) -> &'static str {
     // Exhaustive on purpose: a reason added to the store has to be given a
     // sentence here too, not swallowed by a catch-all that says nothing.
     match reason {
-        Unavailable::Disabled => "o histórico de versões está desligado",
-        Unavailable::NoReflink => "este disco não guarda versões anteriores",
-        Unavailable::OldKernel => "o núcleo deste sistema é antigo demais para guardar versões",
-        Unavailable::LiveSession => "na sessão de teste nada é guardado",
-        Unavailable::Unknown => "este serviço não guarda versões aqui",
+        Unavailable::Disabled => "file history is off",
+        Unavailable::NoReflink => "this disk keeps no earlier versions",
+        Unavailable::OldKernel => "this system's kernel is too old to keep versions",
+        Unavailable::LiveSession => "a live session keeps nothing",
+        Unavailable::Unknown => "this service keeps no versions here",
     }
 }
 
 /// How long ago, in words.
 ///
 /// Relative rather than a calendar date: this binary has no timezone database
-/// and no locale, and "há 2 horas" is what somebody helping over the telephone
+/// and no locale, and "2 h ago" is what somebody helping over the telephone
 /// needs anyway. The window shows the real date.
 fn how_long_ago(saved_at: i64) -> String {
     let now = std::time::SystemTime::now()
@@ -482,10 +513,10 @@ fn how_long_ago(saved_at: i64) -> String {
         .unwrap_or(0);
     let seconds = (now - saved_at).max(0);
     match seconds {
-        0..=90 => "agora há pouco".to_string(),
-        91..=5399 => format!("há {} min", seconds / 60),
-        5400..=86_399 => format!("há {} h", seconds / 3600),
-        _ => format!("há {} dias", seconds / 86_400),
+        0..=90 => "just now".to_string(),
+        91..=5399 => format!("{} min ago", seconds / 60),
+        5400..=86_399 => format!("{} h ago", seconds / 3600),
+        _ => format!("{} days ago", seconds / 86_400),
     }
 }
 
@@ -565,27 +596,15 @@ fn two_paths_and_optional_app<'a>(
 
 fn print_origin(path: &str, origin: Option<&big_indexd_client::OriginProvenance>) {
     // Every field but the numbers comes from file names, extended attributes or
-    // other programs' databases: control characters would reach the terminal
-    // as escape sequences.
-    let shown = |text: &str| -> String {
-        text.chars()
-            .flat_map(|c| {
-                if c.is_control() {
-                    c.escape_default().collect::<Vec<_>>()
-                } else {
-                    vec![c]
-                }
-            })
-            .collect()
-    };
+    // other programs' databases.
     let Some(origin) = origin else {
-        println!("{}: no origin", shown(path));
+        println!("{}: no origin", terminal_text(path));
         return;
     };
-    println!("{}", shown(path));
-    println!("kind: {}", shown(&origin.kind));
+    println!("{}", terminal_text(path));
+    println!("kind: {}", terminal_text(&origin.kind));
     println!("confidence: {}", origin.confidence);
-    println!("label: {}", shown(&origin.label));
+    println!("label: {}", terminal_text(&origin.label));
     println!("first_seen_at: {}", origin.first_seen_at);
     for (field, value) in [
         ("source_app", &origin.source_app),
@@ -595,12 +614,12 @@ fn print_origin(path: &str, origin: Option<&big_indexd_client::OriginProvenance>
         ("source_domain", &origin.source_domain),
     ] {
         if let Some(value) = value {
-            println!("{field}: {}", shown(value));
+            println!("{field}: {}", terminal_text(value));
         }
     }
 }
 
-/// Send a lifecycle command (`pause`/`resume`/`rebuild`) to the running daemon.
+/// Send a lifecycle command (`pause`/`resume`/`rescan`/`rebuild`) to the running daemon.
 /// These need a live daemon: without one there is nothing to control. The daemon
 /// accepts them asynchronously (it replies at once; the work runs in the watcher).
 fn cmd_lifecycle(action: &str) -> Result<()> {
@@ -608,6 +627,7 @@ fn cmd_lifecycle(action: &str) -> Result<()> {
     let result = match action {
         "pause" => client.pause(),
         "resume" => client.resume(),
+        "rescan" => client.rescan(),
         "rebuild" => client.rebuild(),
         _ => unreachable!("unknown lifecycle action {action}"),
     };
@@ -652,27 +672,63 @@ fn cmd_search(tokens: &[String], mode: &str) -> Result<()> {
     } else {
         client.query(&s.query, mode, filter.clone(), page.clone())
     };
-    let outcome = match daemon_query {
-        Ok(outcome) => outcome,
-        Err(big_indexd_client::ClientError::Io(_)) => {
-            query_without_daemon(&s, mode, &filter, &page)?
+    // A running daemon searches with the profile it started with, which may
+    // differ from the configuration on disk now.
+    let (outcome, content_on) = match daemon_query {
+        Ok(outcome) => {
+            // A status that fails after the query answered leaves the note out.
+            let content_on = mode == "name"
+                || !client.status().is_ok_and(|status| {
+                    status
+                        .capabilities
+                        .iter()
+                        .any(|c| c == big_indexd_client::NAMES_ONLY)
+                });
+            (outcome, content_on)
         }
+        Err(big_indexd_client::ClientError::Io(_)) => (
+            query_without_daemon(&s, mode, &filter, &page)?,
+            settings::content_index_enabled(),
+        ),
         Err(e) => return Err(anyhow::anyhow!(e.to_string())),
     };
 
     print_hits(&s, &outcome);
-    // "Loading" hint: recently-edited files are still being extracted (this very
-    // search already told the daemon to prioritise them, bypassing the cooldown).
+    print_search_notes(&outcome, mode != "name" && !content_on);
+    Ok(())
+}
+
+/// What may be missing from a search, on stderr: content search off in this
+/// profile, matches past the candidate ceiling, files not yet extracted.
+fn print_search_notes(outcome: &big_indexd_client::QueryOutcome, content_off: bool) {
+    if content_off {
+        eprintln!(
+            "{}",
+            dim(
+                "content search is off in this profile; `big-search config preset balanced` turns it on"
+            )
+        );
+    }
+    if outcome.truncated {
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "the search read only the first {} matches, so some may be missing; add words to narrow it",
+                big_indexd_client::CANDIDATE_CEILING
+            ))
+        );
+    }
+    // "Loading" hint: files recently edited or busy in another program are not
+    // extracted yet (this very search already told the daemon to try them now).
     if outcome.content_pending > 0 {
         eprintln!(
             "{}",
             dim(&format!(
-                "⏳ conteúdo de {} arquivo(s) editados há pouco ainda está sendo indexado — repita a busca em instantes",
+                "the content of {} file(s) recently edited or busy in another program is not indexed yet; search again in a moment",
                 outcome.content_pending
             ))
         );
     }
-    Ok(())
 }
 
 /// The same query against the index files, read-only, when no daemon listens.
@@ -718,7 +774,7 @@ fn print_hits(s: &Search, outcome: &big_indexd_client::QueryOutcome) {
             let pp = extract::pages_with(std::path::Path::new(&h.path), &terms);
             if !pp.is_empty() {
                 let list: Vec<String> = pp.iter().map(usize::to_string).collect();
-                println!("{}  (p. {})", h.path, list.join(", "));
+                println!("{}  (p. {})", terminal_text(&h.path), list.join(", "));
                 continue;
             }
         }
@@ -749,9 +805,11 @@ fn format_hit_path(
     if include_origin && let Some(origin) = &hit.origin {
         notes.push(format!("origin: {}", origin.label));
     }
+    let path = terminal_text(&hit.path);
     if notes.is_empty() {
-        hit.path.clone()
+        path.into_owned()
     } else {
-        format!("{}  {}", hit.path, dim(&format!("[{}]", notes.join("; "))))
+        let notes = terminal_text(&notes.join("; ")).into_owned();
+        format!("{path}  {}", dim(&format!("[{notes}]")))
     }
 }

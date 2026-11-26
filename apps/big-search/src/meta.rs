@@ -16,6 +16,7 @@
 //!   BIG_SEARCH_META_VIDEO      mkv/webm/mp4 duration (symphonia)
 //!   BIG_SEARCH_META_IMAGE      image dimensions (imagesize)
 //!   BIG_SEARCH_META_MAX_MB     skip metadata parse above this size (default 64)
+use crate::extract::{ext_of, open_regular};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -33,13 +34,7 @@ pub struct MetaConfig {
 
 impl MetaConfig {
     fn from_env() -> Self {
-        let on = |key: &str, default: bool| match std::env::var(key) {
-            Ok(v) => !matches!(
-                v.to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            ),
-            Err(_) => default,
-        };
+        let on = |key: &str, default: bool| crate::settings::env_bool(key).unwrap_or(default);
         let master = on("BIG_SEARCH_META", true);
         let sniff_type = master && on("BIG_SEARCH_META_SNIFF", true);
         let audio = master && on("BIG_SEARCH_META_AUDIO", true);
@@ -85,10 +80,6 @@ fn kind_word(kind: Kind) -> &'static str {
         Kind::Archive => "archive",
         Kind::Other => "file",
     }
-}
-
-fn ext_of(path: &Path) -> Option<String> {
-    Some(path.extension()?.to_str()?.to_ascii_lowercase())
 }
 
 fn kind_from_ext(ext: &str) -> Option<Kind> {
@@ -153,9 +144,9 @@ pub fn is_meta_candidate(path: &Path) -> bool {
 
 /// The extended attribute KDE and this desktop store user tags in.
 const TAGS_XATTR: &str = "user.xdg.tags";
-/// Longest tag list this will read. A tag list is a handful of words; anything
-/// larger is not one.
-const MAX_TAGS_BYTES: usize = 4 * 1024;
+/// Longest extended attribute this reads: a tag list or a source address. A tag
+/// list is a handful of words; anything larger is not one.
+const MAX_XATTR_BYTES: usize = 4 * 1024;
 /// The prefix a tag carries in the index.
 ///
 /// Reserved on purpose: indexing the bare word would make a document *about*
@@ -179,11 +170,11 @@ pub fn read_tags(path: &Path) -> Vec<String> {
 }
 
 /// One extended attribute, bounded, or `None` when it is absent or too large.
-fn read_xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+pub(crate) fn read_xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt as _;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let name = std::ffi::CString::new(name).ok()?;
-    let mut buffer = vec![0_u8; MAX_TAGS_BYTES];
+    let mut buffer = vec![0_u8; MAX_XATTR_BYTES];
     // SAFETY: both strings are NUL-terminated and the buffer is `len` bytes.
     let read = unsafe {
         libc::getxattr(
@@ -249,7 +240,8 @@ pub fn metadata_text(path: &Path, with_content: bool) -> Option<String> {
     let mut sniffed_mime: Option<String> = None;
     if kind.is_none()
         && metadata_config.sniff_type
-        && let Ok(fmt) = file_format::FileFormat::from_file(path)
+        && let Some(file) = open_regular(path)
+        && let Ok(fmt) = file_format::FileFormat::from_reader(file)
     {
         let mime = fmt.media_type();
         if mime != "application/octet-stream" {
@@ -303,7 +295,7 @@ fn media_text(path: &Path) -> Vec<String> {
     use symphonia::core::units::{Duration, Timestamp};
 
     let mut out = Vec::new();
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some(file) = open_regular(path) else {
         return out;
     };
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -354,18 +346,21 @@ fn media_text(path: &Path) -> Vec<String> {
 
 /// Image dimensions via imagesize (header only, no decode).
 fn image_text(path: &Path) -> Vec<String> {
-    match imagesize::size(path) {
+    let Some(file) = open_regular(path) else {
+        return Vec::new();
+    };
+    match imagesize::reader_size(std::io::BufReader::new(file)) {
         Ok(size) => vec![format!("{}x{}", size.width, size.height)],
         Err(_) => Vec::new(),
     }
 }
 
 #[cfg(test)]
-mod tag_tests {
+pub(crate) mod tag_tests {
     use super::*;
 
     /// Set one extended attribute, reporting whether the filesystem accepted it.
-    fn write_xattr(path: &Path, name: &str, value: &[u8]) -> bool {
+    pub(crate) fn write_xattr(path: &Path, name: &str, value: &[u8]) -> bool {
         use std::os::unix::ffi::OsStrExt as _;
         let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
             return false;
@@ -397,9 +392,7 @@ mod tag_tests {
 
     #[test]
     fn desktop_tag_list_is_read() {
-        let dir = std::env::temp_dir().join(format!("big-search-tags-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("test dir");
+        let dir = crate::test_env::scratch_dir("big-search-tags");
         let file = dir.join("tagged.bin");
         std::fs::write(&file, b"contents").expect("write");
         assert!(read_tags(&file).is_empty(), "no attribute, no tags");
@@ -417,8 +410,6 @@ mod tag_tests {
                 "a tagged file must be indexed whatever its type"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -457,30 +448,46 @@ mod tests {
         png.extend_from_slice(b"IHDR");
         png.extend_from_slice(&width.to_be_bytes());
         png.extend_from_slice(&height.to_be_bytes());
-        png.extend_from_slice(&[8, 2, 0, 0, 0]); // bit depth, colour type, etc.
+        png.extend_from_slice(&[8, 2, 0, 0, 0]); // bit depth, color type, etc.
         png.extend_from_slice(&[0, 0, 0, 0]); // CRC placeholder (imagesize ignores it)
         png
     }
 
     #[test]
     fn image_text_reads_png_dimensions() {
-        let dir = std::env::temp_dir().join(format!("bsmeta-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_env::scratch_dir("bsmeta");
         let path = dir.join("pic.png");
         std::fs::write(&path, minimal_png(320, 240)).unwrap();
         assert_eq!(image_text(&path), vec!["320x240".to_string()]);
-        std::fs::remove_file(&path).ok();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Guards: bound: the kind word and tags joined to a capped body keep the
+    /// whole text within the extraction cap.
+    #[test]
+    fn metadata_text_within_cap() {
+        use crate::test_env::{ENV_LOCK, EnvVarGuard};
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _cap = EnvVarGuard::set("BIG_SEARCH_EXTRACT_MAX_MB", "1");
+        let dir = crate::test_env::scratch_dir("bsmeta-cap");
+        let path = dir.join("script");
+        let mut script = b"#!/bin/sh\n".to_vec();
+        script.extend(b"echo x\n".repeat(300_000));
+        std::fs::write(&path, script).unwrap();
+        let text = metadata_text(&path, true).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(text.starts_with("document #!/bin/sh"), "{}", &text[..40]);
+        assert_eq!(text.len(), 1 << 20);
     }
 
     #[test]
     fn sniffed_document_text_follows_content_policy() {
-        let dir = std::env::temp_dir().join(format!("bsmeta-policy-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_env::scratch_dir("bsmeta-policy");
         let path = dir.join("notes");
         std::fs::write(&path, "#!/bin/sh\necho segredo\n").unwrap();
         let with = metadata_text(&path, true).unwrap_or_default();
         let without = metadata_text(&path, false).unwrap_or_default();
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(with.contains("segredo"), "{with:?}");
         assert_eq!(without, "document");
     }

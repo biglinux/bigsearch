@@ -14,7 +14,11 @@ use tantivy::{IndexReader, TantivyDocument};
 /// filter itself, so the ceiling counts matches rather than a sample of the
 /// whole index: cut first and filtered after, "every video in ~/Videos" would
 /// come back empty whenever the first files of the index held none.
-pub fn list_matching(reader: &IndexReader, filter: &Filter, limit: usize) -> Result<Vec<Hit>> {
+pub(crate) fn list_matching(
+    reader: &IndexReader,
+    filter: &Filter,
+    limit: usize,
+) -> Result<Vec<Hit>> {
     let mut clauses = filter_clauses(&fields(reader.searcher().index())?, filter);
     if clauses.is_empty() {
         return collect_paths(reader, &AllQuery, limit);
@@ -58,12 +62,16 @@ fn collect_paths(reader: &IndexReader, query: &dyn Query, limit: usize) -> Resul
 
 /// How many entries are cataloged (alive indexed documents: files and the
 /// visible directories the scan indexes, with deletions excluded).
-pub fn count(reader: &IndexReader) -> Result<u64> {
+pub fn count(reader: &IndexReader) -> u64 {
     crate::index::document_count(reader)
 }
 
 /// Every cataloged path, sorted and deduped. `under` keeps only paths
 /// inside that directory (or equal to it); `limit` caps the output.
+///
+/// # Errors
+///
+/// Returns an error when the index cannot be read.
 pub fn list_paths(reader: &IndexReader, limit: usize, under: Option<&str>) -> Result<Vec<String>> {
     let searcher = reader.searcher();
     let f = fields(searcher.index())?;

@@ -1,12 +1,17 @@
 //! Origin/provenance IPC contract: apps can register a file origin and later ask
 //! for it directly or as an opt-in query enrichment.
 #![cfg(not(miri))]
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] functions panic on setup failure"
+)]
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     reason = "integration test spawns the built big-search binary under test"
 )]
 
+mod daemon;
 mod scratch;
 
 use std::io::{BufRead, BufReader, Write};
@@ -26,15 +31,8 @@ impl Drop for KillOnDrop {
 }
 
 fn env_cmd(args: &[&str], home: &Path, xdg_storage_home: &Path, run: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_big-search"));
-    command
-        .args(args)
-        .env("RUST_LOG", "off")
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", xdg_storage_home)
-        .env("XDG_CONFIG_HOME", xdg_storage_home.join("cfg"))
-        .env("XDG_RUNTIME_DIR", run)
-        .env("BIG_SEARCH_ORIGIN_WATCH", "0");
+    let mut command = daemon::env_cmd(args, home, xdg_storage_home, run);
+    command.env("BIG_SEARCH_ORIGIN_WATCH", "0");
     command
 }
 
@@ -117,6 +115,20 @@ fn register_created_then_query_origin() {
         note_path
     );
     assert!(send_daemon_request(&sock, &register).contains(r#""kind":"ok""#));
+    // A path no source holds is no file of this index, nor one reached
+    // through a symlink inside a source: the origin store refuses both.
+    let outside = base.join("elsewhere/note.txt");
+    std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+    std::fs::write(&outside, "elsewhere").unwrap();
+    std::os::unix::fs::symlink(base.join("elsewhere"), home.join("docs/link")).unwrap();
+    for asked in [outside, home.join("docs/link/note.txt")] {
+        let refused = format!(
+            r#"{{"v":2,"cmd":"register_created","path":"{}"}}"#,
+            asked.to_string_lossy()
+        );
+        let reply = send_daemon_request(&sock, &refused);
+        assert!(reply.contains(r#""kind":"error""#), "{reply}");
+    }
 
     let origin = format!(r#"{{"v":2,"cmd":"origin","path":"{}"}}"#, note_path);
     let origin_reply = send_daemon_request(&sock, &origin);
@@ -128,15 +140,16 @@ fn register_created_then_query_origin() {
         origin_reply.contains(r#""kind":"app_created""#),
         "{origin_reply}"
     );
-    assert!(origin_reply.contains("Editor de Textos"), "{origin_reply}");
+    assert!(
+        origin_reply.contains("Created by Text Editor"),
+        "{origin_reply}"
+    );
 
     let query = r#"{"v":2,"cmd":"query","q":"note","mode":"name","include_origin":true,"page":{"limit":5}}"#;
     let query_reply = send_daemon_request(&sock, query);
     assert!(query_reply.contains(r#""kind":"query""#), "{query_reply}");
     assert!(query_reply.contains(r#""origin""#), "{query_reply}");
     assert!(query_reply.contains(r#""app_created""#), "{query_reply}");
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -166,18 +179,12 @@ fn cli_exposes_origin_commands() {
 
     let origin = run_stdout(&["origin", note_path], &home, &xdg_storage_home, &run);
     assert!(origin.contains("kind: app_created"), "{origin}");
-    assert!(
-        origin.contains("label: Criado por Editor de Textos"),
-        "{origin}"
-    );
+    assert!(origin.contains("label: Created by Text Editor"), "{origin}");
     assert!(origin.contains("source_app: big-text-editor"), "{origin}");
 
     let query = run_stdout(&["--origin", "note"], &home, &xdg_storage_home, &run);
     assert!(query.contains("note.txt"), "{query}");
-    assert!(
-        query.contains("origin: Criado por Editor de Textos"),
-        "{query}"
-    );
+    assert!(query.contains("origin: Created by Text Editor"), "{query}");
 
     let capabilities = run_stdout(&["capabilities"], &home, &xdg_storage_home, &run);
     assert!(capabilities.contains("file_origin"), "{capabilities}");
@@ -185,6 +192,4 @@ fn cli_exposes_origin_commands() {
         capabilities.contains("file_origin_register"),
         "{capabilities}"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }

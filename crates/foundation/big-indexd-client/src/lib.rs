@@ -1,9 +1,9 @@
 //! Client and wire types for the big-indexd (big-search) Unix-socket protocol.
 //!
-//! This crate is tiny (`serde` and `std` only, no Tantivy), so GUI
-//! consumers (big-shell, big-filemanager) link a few KB and never pull the index
-//! engine. The daemon (`big-search`) depends on these same types, so the wire
-//! format cannot drift between server and client.
+//! `serde` and `std` only, so graphical clients (the desktop, the file manager)
+//! never link the index engine. The daemon (`big-search`) depends on these same
+//! types, so the wire format cannot drift between server and client; the
+//! crate's `README.md` states the contract.
 //!
 //! ```rust,no_run
 //! # use std::io::{BufRead, BufReader, Write};
@@ -30,6 +30,7 @@
 //! # std::fs::remove_file(socket_path).ok();
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+
 use serde::{Deserialize, Serialize};
 use std::io;
 
@@ -64,18 +65,28 @@ pub struct OriginSummary {
 /// Full origin/provenance detail for a single path.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, Eq)]
 pub struct OriginProvenance {
+    /// How the file arrived: `web_download`, `removable_copy`,
+    /// `network_copy`, `local_copy`, `moved_or_renamed`, `app_created` or
+    /// `derived_file`. The service may send others; a reader shows nothing
+    /// for a kind it does not know.
     pub kind: String,
     pub confidence: u8,
     pub label: String,
+    /// When the service first recorded the file, in seconds since 1970; 0
+    /// when unknown.
     pub first_seen_at: i64,
+    /// The program that made the file, for `app_created`.
     #[serde(default)]
     pub source_app: Option<String>,
+    /// The file it was copied, moved or taken out of.
     #[serde(default)]
     pub source_path: Option<String>,
     #[serde(default)]
     pub source_device_id: Option<String>,
+    /// The name of the disk or network computer it was copied from.
     #[serde(default)]
     pub source_device_label: Option<String>,
+    /// The site it was downloaded from, for `web_download`.
     #[serde(default)]
     pub source_domain: Option<String>,
 }
@@ -117,7 +128,9 @@ pub enum MatchKind {
 /// One search result, with metadata the daemon resolved so the GUI never stats.
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Hit {
+    /// Absolute path of the file.
     pub path: String,
+    /// The file name, without its folder.
     pub name: String,
     #[serde(default)]
     pub score: f32,
@@ -153,19 +166,24 @@ pub struct Hit {
 /// Server-side result filter. `under`/`ext` are path-only; `mime` takes exact
 /// types or `major/*` groups (daemons with the `mime-filter` capability);
 /// `mtime`/`size` are inclusive `[min, max]` ranges; `kind` keeps folders or
-/// everything else (daemons with the `kind-filter` capability).
+/// everything else (daemons with the [`KIND_FILTER`] capability).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Filter {
     /// Only paths inside this folder, at any depth; the folder itself is not
     /// inside it. `/` holds everything.
     #[serde(default)]
     pub under: Option<String>,
+    /// Only these extensions, lowercase without the dot; empty for any.
     #[serde(default)]
     pub ext: Vec<String>,
+    /// Only these MIME types (`application/pdf`) or groups (`image/*`);
+    /// empty for any.
     #[serde(default)]
     pub mime: Vec<String>,
+    /// Only modification times in `[from, to]`, epoch seconds.
     #[serde(default)]
     pub mtime: Option<[i64; 2]>,
+    /// Only sizes in `[from, to]`, bytes.
     #[serde(default)]
     pub size: Option<[u64; 2]>,
     /// Left out when `None`, so a request without it reads the same to a
@@ -184,11 +202,25 @@ pub enum EntryKind {
     File,
 }
 
+/// The [`Status::capabilities`] entry of a daemon that answers
+/// [`Filter::kind`].
+pub const KIND_FILTER: &str = "kind-filter";
+
+/// The [`Status::capabilities`] entry of a daemon that answers
+/// [`RequestBody::Rescan`].
+pub const RESCAN: &str = "rescan";
+
+/// The [`Status::capabilities`] entry of a daemon that keeps no content
+/// index: its `content` and `both` searches find no file by its text.
+pub const NAMES_ONLY: &str = "names-only";
+
 /// Page window for virtual scrolling.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Page {
+    /// How many results to skip, from the first.
     #[serde(default)]
     pub offset: usize,
+    /// The most results to return; 50 when the field is absent.
     #[serde(default = "default_page_limit")]
     pub limit: usize,
 }
@@ -209,6 +241,7 @@ impl Default for Page {
 /// One page of results plus scrollbar context.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct QueryOutcome {
+    /// The results on this page, at most [`Page::limit`] of them.
     pub hits: Vec<Hit>,
     /// Matches after filtering.
     ///
@@ -234,12 +267,19 @@ pub struct QueryOutcome {
     pub total: usize,
     /// Offset to request next, or `None` at the end.
     pub next_offset: Option<usize>,
-    /// Approximate number of recently-changed files whose content is not yet
-    /// (re-)extracted. `> 0` on a content/both query means results may be
-    /// incomplete; the daemon has already been nudged to extract them, so a
-    /// retry shortly will see them ("loading" hint for UIs).
+    /// Approximate number of files whose content is not yet (re-)extracted
+    /// because they changed recently or another program held them busy. `> 0`
+    /// on a content/both query means results may be incomplete; the daemon has
+    /// already been nudged to extract them, so a retry shortly will see them
+    /// ("loading" hint for UIs).
     #[serde(default)]
     pub content_pending: u64,
+    /// The search stopped at [`CANDIDATE_CEILING`] candidates before the
+    /// folder, extension, type, date and size filters ran: matches past them
+    /// were never read, so this page can miss some and `total` is a floor.
+    /// Narrowing the query reaches them; paging does not.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// A versioned, command-tagged request.
@@ -250,19 +290,35 @@ pub struct Request {
     pub body: RequestBody,
 }
 
+/// One command and its fields; the variant's name in snake case is `cmd` on
+/// the wire.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum RequestBody {
+    /// Search, or list what a filter keeps.
     Query(QueryRequest),
+    /// The full origin of one file.
     Origin(OriginRequest),
+    /// A program copied a file.
     RegisterCopy(RegisterCopyRequest),
+    /// A program moved or renamed a file.
     RegisterMove(RegisterMoveRequest),
+    /// A program made a new file.
     RegisterCreated(RegisterCreatedRequest),
+    /// A program made a file out of another, as an archive extracted.
     RegisterDerived(RegisterDerivedRequest),
+    /// How big the index is and what the daemon is doing.
     Status,
+    /// Stop indexing; queries keep answering from the current index.
     Pause,
+    /// Index again, catching up on what changed while paused.
     Resume,
+    /// Reconcile the sources with the catalogue without resuming: refused
+    /// while indexing is paused.
+    Rescan,
+    /// Read every catalogued folder from the start.
     Rebuild,
+    /// Index one path again.
     Reindex(ReindexRequest),
     /// Which directories this daemon catalogues. See [`IndexedRoot`].
     Sources,
@@ -292,6 +348,7 @@ pub struct FileVersion {
     pub id: i64,
     /// When it was kept, in seconds since 1970.
     pub saved_at: i64,
+    /// Its size in bytes.
     pub size: u64,
     /// `baseline`, `saved` or `before_restore`.
     pub reason: String,
@@ -367,51 +424,76 @@ pub struct RegisterDerivedRequest {
     pub app_id: Option<String>,
 }
 
-/// A versioned reply; `kind` discriminates.
+/// A versioned reply; `kind` discriminates. Each carries `v`, the protocol
+/// version the daemon speaks.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reply {
+    /// The answer to [`RequestBody::Query`].
     Query {
         v: u32,
+        /// The page of results.
         #[serde(flatten)]
         outcome: QueryOutcome,
     },
+    /// The answer to [`RequestBody::Status`]; [`Status`] says what each field
+    /// holds.
     Status {
         v: u32,
+        /// Entries in the catalogue.
         indexed: u64,
+        /// Indexing is paused.
         paused: bool,
+        /// What the daemon is doing; empty from a daemon that does not say.
         #[serde(default)]
         activity: String,
+        /// Optional features this daemon answers, such as [`KIND_FILTER`].
         #[serde(default)]
         capabilities: Vec<String>,
+        /// Files whose content is still waiting to be read.
         #[serde(default)]
         pending_content: u64,
+        /// Documents in the content index.
         #[serde(default)]
         content_docs: u64,
+        /// Bytes the name index takes on disk.
         #[serde(default)]
         name_index_bytes: u64,
+        /// Bytes the content index takes on disk.
         #[serde(default)]
         content_index_bytes: u64,
+        /// Folders the daemon could not watch.
         #[serde(default)]
         unwatched_dirs: u64,
     },
+    /// The answer to [`RequestBody::Origin`].
     Origin {
         v: u32,
+        /// The file's origin; `None` when none is recorded.
         origin: Option<OriginProvenance>,
     },
-    Ok {
-        v: u32,
-    },
+    /// A command that returns nothing was carried out; `pause`, `resume`,
+    /// `rescan`, `rebuild` and `reindex` were queued for the watcher, which
+    /// carries them out after this reply. A pause that reaches it first drops
+    /// a queued rescan.
+    Ok { v: u32 },
+    /// The daemon refused the request; the client returns
+    /// [`ClientError::Daemon`].
     Error {
         v: u32,
+        /// Why, in the daemon's words.
         message: String,
     },
+    /// The answer to [`RequestBody::Sources`].
     Sources {
         v: u32,
+        /// Every catalogued directory.
         roots: Vec<IndexedRoot>,
     },
+    /// The answer to [`RequestBody::Versions`].
     Versions {
         v: u32,
+        /// The versions kept, newest first.
         versions: Vec<FileVersion>,
         /// Why this machine keeps no versions, when it keeps none: `disabled`,
         /// `no_reflink`, `old_kernel`, `live_session`. Empty when it does.
@@ -476,9 +558,11 @@ impl Unavailable {
 /// What the daemon knows about one document's earlier versions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionsAnswer {
+    /// The versions kept, newest first.
     pub versions: Vec<FileVersion>,
     /// Why nothing is kept on this machine. `None` when versions are kept.
     pub unavailable: Option<Unavailable>,
+    /// The disk got too full, so new versions are not being kept.
     pub paused_for_space: bool,
 }
 
@@ -512,11 +596,18 @@ pub struct IndexedRoot {
 /// Index daemon status: catalog size plus current background activity.
 #[derive(Clone, Debug)]
 pub struct Status {
+    /// Entries in the catalogue: files and folders.
     pub indexed: u64,
+    /// Indexing is paused; queries still answer.
     pub paused: bool,
+    /// What the daemon is doing, in its own words; `paused` or `indexing`
+    /// from a daemon that does not say.
     pub activity: String,
+    /// Optional features this daemon answers, such as [`KIND_FILTER`]: a
+    /// request field it does not list is ignored by it.
     pub capabilities: Vec<String>,
-    /// Recently-changed files whose content extraction is still deferred.
+    /// Files whose content extraction is still deferred: changed recently, or
+    /// held busy by another program.
     pub pending_content: u64,
     /// Live document count in the content index.
     pub content_docs: u64,
@@ -605,6 +696,7 @@ mod tests {
                 assert_eq!(outcome.hits[0].size, 5);
                 assert_eq!(outcome.hits[0].ext, "txt");
                 assert_eq!(outcome.content_pending, 0); // additive field defaults
+                assert!(!outcome.truncated);
             }
             other => panic!("wrong kind: {other:?}"),
         }
@@ -637,6 +729,18 @@ mod tests {
             Reply::Status { activity, .. } => assert_eq!(activity, "idle"),
             other => panic!("wrong kind: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rescan_wire_spelling() {
+        let request = Request {
+            v: PROTOCOL_VERSION,
+            body: RequestBody::Rescan,
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"v":2,"cmd":"rescan"}"#
+        );
     }
 
     /// The `sources` command and its reply keep the spelling both ends use.

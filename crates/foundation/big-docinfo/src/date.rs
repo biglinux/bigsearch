@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 BigLinux contributors
-// SPDX-License-Identifier: MIT
-
 //! The date that identifies a document, chosen by the words around each date.
 //!
 //! A contract mentions its signature, its start, its end and the tenant's birth;
@@ -757,7 +754,7 @@ mod tests {
 
     /// A law's date dates the law, unless the document is that law.
     #[test]
-    fn cited_acts_date_only_their_own_title() {
+    fn cited_acts_date_own_title() {
         let cites = "Política de privacidade da escola. Coletamos nome, endereço e telefone dos responsáveis para matrícula e comunicação com as famílias durante o ano letivo.\nBase legal: Lei nº 13.709, de 14 de agosto de 2018.";
         assert_eq!(document_date(cites), None);
         let own = "DECRETO Nº 010, DE 02 DE ABRIL DE 2020\nDispõe sobre medidas conforme o Decreto nº 006, de 17 de março de 2020.";

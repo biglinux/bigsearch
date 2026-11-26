@@ -1,0 +1,60 @@
+id: rust-sql-format
+language: Rust
+severity: error
+message: A value formatted into SQL can rewrite the statement; bind it as a parameter (?1, $1) instead.
+note: A table or column name cannot be bound; pick it from a fixed list of literals. A SCREAMING_CASE constant interpolated alone is such a literal and passes.
+utils:
+  sql-format:
+    all:
+      - kind: macro_invocation
+      - regex: '^(std::)?format!\(\s*r?#*"\s*(?i:select|insert|update|delete|replace|create|drop|alter|with|pragma|attach)\b'
+      # An interpolation other than a bare SCREAMING_CASE constant.
+      - regex: '\{([^{}A-Z][^{}]*|[A-Z0-9_]*[^{}A-Z0-9_][^{}]*)?\}'
+rule:
+  kind: call_expression
+  all:
+    - has:
+        field: function
+        regex: '(\.|::)(execute|execute_batch|query|query_row|query_map|query_one|query_as|query_scalar|prepare|prepare_cached|raw_sql)$'
+    - has:
+        field: arguments
+        has:
+          nthChild: 1
+          any:
+            - matches: sql-format
+            - kind: reference_expression
+              has:
+                matches: sql-format
+            # let sql = format!(...); conn.execute(&sql, ...)
+            - pattern: $Q
+              inside:
+                stopBy: end
+                kind: function_item
+                has:
+                  stopBy: end
+                  kind: let_declaration
+                  all:
+                    - has:
+                        field: pattern
+                        pattern: $Q
+                    - has:
+                        field: value
+                        matches: sql-format
+            - kind: reference_expression
+              has:
+                pattern: $Q
+              inside:
+                stopBy: end
+                kind: function_item
+                has:
+                  stopBy: end
+                  kind: let_declaration
+                  all:
+                    - has:
+                        field: pattern
+                        pattern: $Q
+                    - has:
+                        field: value
+                        matches: sql-format
+    - not:
+        matches: rust-test-code

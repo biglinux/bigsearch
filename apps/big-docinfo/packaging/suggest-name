@@ -3,7 +3,8 @@
 # person edit the suggested name. Nothing is renamed unless they press OK, and
 # big-docinfo refuses to replace an existing file.
 file=$1
-title="Sugerir nome"
+export TEXTDOMAIN=big-docinfo
+title=$(gettext "Suggest a name")
 
 if ! details=$(big-docinfo "$file" 2>&1); then
 	kdialog --title "$title" --sorry "$details"

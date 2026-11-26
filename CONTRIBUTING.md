@@ -14,7 +14,7 @@ file names and contents you would not want public.
 ## Building and testing
 
 You need Rust 1.98.1 (rustup picks it up from `rust-toolchain.toml`), SQLite 3,
-poppler and shared-mime-info. The settings page also needs GTK 4.22 and libadwaita 1.9.
+poppler and shared-mime-info.
 
 ```sh
 cargo fmt --all -- --check
@@ -24,6 +24,28 @@ cargo test --workspace --all-features
 
 The integration tests start real daemons in temporary directories; they need
 no running session and touch nothing under your home.
+
+CI runs the three commands above. The checks below run by hand before a pull
+request.
+
+Three files at the root hold limits a change may not pass without saying why:
+
+- `deny.toml`: `cargo deny check` (advisories, licenses, sources).
+- `approved-crates.txt`: every crate name `Cargo.lock` may hold. A new name is
+  checked on crates.io (owner, repository, a typo of a known crate) before it
+  joins the list.
+- `systemd-exposure.json`: the highest `systemd-analyze security --offline=yes`
+  score each unit may reach.
+
+`sgconfig.yml` and `rules/` are [ast-grep](https://ast-grep.github.io) rules
+for this tree: `ast-grep scan` refuses a call that bypasses the function owning
+it, such as reading `HOME` or `XDG_CONFIG_HOME` outside `big_search_config`,
+and a value formatted into SQL. An exception carries `ast-grep-ignore` and its
+reason on the line above.
+
+A function long enough to read in stages, kept whole on purpose, carries a
+`// shape:` line saying why: it declares a view (one line per setting) or maps
+fields one by one.
 
 `apps/big-search/dev/` has a long-running leak probe (`stress.sh`) and an
 adversarial-input probe (`security-probe.sh`); `apps/big-search/fuzz/` has the

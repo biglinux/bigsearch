@@ -109,8 +109,7 @@ fn names_rank_by_how_they_match() {
 /// Among names that match equally, the one changed most recently first.
 #[test]
 fn equal_names_rank_newest_first() {
-    let dir = std::env::temp_dir().join(format!("lsearch-recent-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = crate::test_env::scratch_dir("lsearch-recent");
     let day = std::time::Duration::from_secs(86_400);
     let now = std::time::SystemTime::now();
     let mut paths = Vec::new();
@@ -132,7 +131,6 @@ fn equal_names_rank_newest_first() {
         found,
         [paths[1].clone(), paths[2].clone(), paths[0].clone()]
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -215,7 +213,7 @@ fn every_typed_word_matches_separately() {
     assert_eq!(paths("raio bruno"), vec![raio_x.clone()]);
     // Order is irrelevant, and so is what sits between the words.
     assert_eq!(paths("bruno raio"), vec![raio_x.clone()]);
-    assert_eq!(paths("raio 2021"), vec![raio_x.clone()]);
+    assert_eq!(paths("raio 2021"), vec![raio_x]);
     // Every word still has to be there.
     assert!(paths("raio inexistente").is_empty());
     // A word shared by both files keeps both.
