@@ -71,7 +71,7 @@ fn xml_attribute(e: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<St
     e.attributes()
         .flatten()
         .find(|a| a.key.local_name().as_ref() == name)
-        .map(|a| decode_entities(&a.value))
+        .map(|a| decode_entities(a.value.into_owned()))
 }
 
 /// The package document `META-INF/container.xml` points to.

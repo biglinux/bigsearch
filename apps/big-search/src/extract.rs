@@ -277,50 +277,116 @@ fn html_element(html: &str, tag: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// Elements that sit inside a line of text: the others separate words.
-const INLINE_TAGS: &[&str] = &[
-    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "dfn", "em", "font", "i", "kbd",
-    "mark", "q", "s", "samp", "small", "span", "strong", "sub", "sup", "time", "u", "var", "wbr",
+/// Whether `name`, lowercase, is an element that sits inside a line of text:
+/// the others separate words.
+fn is_inline_element(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"a" | b"abbr"
+            | b"b"
+            | b"bdi"
+            | b"bdo"
+            | b"cite"
+            | b"code"
+            | b"data"
+            | b"dfn"
+            | b"em"
+            | b"font"
+            | b"i"
+            | b"kbd"
+            | b"mark"
+            | b"q"
+            | b"s"
+            | b"samp"
+            | b"small"
+            | b"span"
+            | b"strong"
+            | b"sub"
+            | b"sup"
+            | b"time"
+            | b"u"
+            | b"var"
+            | b"wbr"
+    )
+}
+
+/// Openings, lowercase, of the elements that end a line: a prefix, so `<h`
+/// also takes `<head>` and `<hr>`.
+const BLOCK_TAG_OPENINGS: &[&[u8]] = &[
+    b"<p", b"</p", b"<br", b"<div", b"</div", b"<h", b"</h", b"<li", b"<tr", b"<title", b"</title",
 ];
+
+/// Elements whose content is not text, by opening and closing prefix,
+/// lowercase.
+const SKIPPED_ELEMENTS: [(&[u8], &[u8]); 2] = [(b"<script", b"</script"), (b"<style", b"</style")];
+
+/// First position of `needle` in `haystack`, ASCII case ignored. The first
+/// byte of `needle` has no case, so a byte search finds every candidate.
+fn find_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    memchr::memchr_iter(needle[0], haystack).find(|&at| {
+        haystack
+            .get(at..at + needle.len())
+            .is_some_and(|found| found.eq_ignore_ascii_case(needle))
+    })
+}
 
 /// The readable text of HTML: scripts and styles dropped, block elements as
 /// line breaks, entities decoded. Enough to read a saved page's
 /// title and dates, not a renderer.
+///
+/// Markup is matched by bytes with ASCII case ignored: every byte it looks for
+/// is ASCII, so each position found is a char boundary.
 pub fn html_text(html: &str) -> String {
-    let lower = html.to_ascii_lowercase();
-    let mut out = String::with_capacity(html.len() / 2);
+    let bytes = html.as_bytes();
+    // What is kept is cut from the page, so its length nearly always fits.
+    let mut out = String::with_capacity(html.len());
     let mut at = 0;
-    while let Some(open) = lower[at..].find('<').map(|i| at + i) {
+    while let Some(open) = memchr::memchr(b'<', &bytes[at..]).map(|i| at + i) {
         out.push_str(&html[at..open]);
-        let tag_end = lower[open..].find('>').map_or(html.len(), |i| open + i + 1);
-        let tag = &lower[open..tag_end];
+        let tag_end = memchr::memchr(b'>', &bytes[open..]).map_or(html.len(), |i| open + i + 1);
+        let tag = &bytes[open..tag_end];
+        // The tag's start, lowercased once: every opening compared fits in it,
+        // and the NUL padding of a shorter tag matches none of them.
+        let mut head = [0u8; 8];
+        let head_len = tag.len().min(head.len());
+        head[..head_len].copy_from_slice(&tag[..head_len]);
+        head.make_ascii_lowercase();
         // An unclosed script or style runs to the end, as in a browser; searching
         // again from every later opener would make the scan quadratic.
-        let skip_to = ["script", "style"].iter().find_map(|name| {
-            tag.starts_with(&format!("<{name}")).then(|| {
-                lower[tag_end..]
-                    .find(&format!("</{name}"))
+        let skip_to = SKIPPED_ELEMENTS.iter().find_map(|&(opening, closing)| {
+            head.starts_with(opening).then(|| {
+                find_ignore_ascii_case(&bytes[tag_end..], closing)
                     .map_or(html.len(), |i| tag_end + i)
             })
         });
-        let block = [
-            "<p", "</p", "<br", "<div", "</div", "<h", "</h", "<li", "<tr", "<title", "</title",
-        ]
-        .iter()
-        .any(|b| tag.starts_with(b));
-        let name = tag
-            .trim_start_matches(['<', '/'])
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .next()
-            .unwrap_or_default();
+        let block = BLOCK_TAG_OPENINGS
+            .iter()
+            .any(|opening| head.starts_with(opening));
+        let name_start = tag
+            .iter()
+            .position(|&b| b != b'<' && b != b'/')
+            .unwrap_or(tag.len());
+        let name = &tag[name_start..];
+        let name = &name[..name
+            .iter()
+            .position(|b| !b.is_ascii_alphanumeric())
+            .unwrap_or(name.len())];
+        // No inline element's name is longer than the buffer.
+        let mut lowered = [0u8; 8];
+        let inline = name.len() <= lowered.len() && {
+            let lowered = &mut lowered[..name.len()];
+            lowered.copy_from_slice(name);
+            lowered.make_ascii_lowercase();
+            is_inline_element(lowered)
+        };
         // What an image or a link says of itself is read too; markup is not.
-        for attribute in [" alt=", " title="] {
-            let Some(found) = tag.find(attribute) else {
+        for attribute in [&b" alt="[..], b" title="] {
+            let Some(found) = find_ignore_ascii_case(tag, attribute) else {
                 continue;
             };
             let value = &html[open + found + attribute.len()..tag_end];
-            if let Some(quote @ ('"' | '\'')) = value.chars().next()
-                && let Some(len) = value[1..].find(quote)
+            if let Some(&quote @ (b'"' | b'\'')) = value.as_bytes().first()
+                && let Some(len) = memchr::memchr(quote, &value.as_bytes()[1..])
             {
                 out.push(' ');
                 out.push_str(&value[1..=len]);
@@ -329,21 +395,26 @@ pub fn html_text(html: &str) -> String {
         }
         if block {
             out.push('\n');
-        } else if skip_to.is_none() && !name.is_empty() && !INLINE_TAGS.contains(&name) {
+        } else if skip_to.is_none() && !name.is_empty() && !inline {
             // A table cell, a list or any other box ends the word before it.
             out.push(' ');
         }
         at = skip_to.unwrap_or(tag_end).min(html.len());
     }
     out.push_str(&html[at.min(html.len())..]);
-    decode_entities(&out)
+    decode_entities(out)
 }
 
-/// `&amp;`, `&nbsp;`, `&#8212;`, `&#x2014;` and the like as characters.
-fn decode_entities(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(at) = rest.find('&') {
+/// `&amp;`, `&nbsp;`, `&#8212;`, `&#x2014;` and the like as characters; text
+/// without an `&` is returned as it is.
+fn decode_entities(text: String) -> String {
+    let Some(first) = memchr::memchr(b'&', text.as_bytes()) else {
+        return text;
+    };
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..first]);
+    let mut rest = &text[first..];
+    while let Some(at) = memchr::memchr(b'&', rest.as_bytes()) {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
         // Only as far as the longest HTML5 name: a search to the end for every
@@ -353,27 +424,8 @@ fn decode_entities(s: &str) -> String {
             .take(33)
             .position(|&b| b == b';')
             .map(|end| &rest[1..=end]);
-        let decoded = |e: &str| -> Option<std::borrow::Cow<'static, str>> {
-            if e == "nbsp" {
-                return Some(" ".into());
-            }
-            match e.strip_prefix('#') {
-                Some(number) => number
-                    .strip_prefix(['x', 'X'])
-                    .map_or_else(
-                        || number.parse().ok(),
-                        |hex| u32::from_str_radix(hex, 16).ok(),
-                    )
-                    .and_then(char::from_u32)
-                    .map(|c| c.to_string().into()),
-                None => quick_xml::escape::resolve_html5_entity(e).map(Into::into),
-            }
-        };
-        match entity.and_then(|e| Some((e, decoded(e)?))) {
-            Some((e, text)) => {
-                out.push_str(&text);
-                rest = &rest[e.len() + 2..];
-            }
+        match entity {
+            Some(entity) if push_entity(entity, &mut out) => rest = &rest[entity.len() + 2..],
             _ => {
                 out.push('&');
                 rest = &rest[1..];
@@ -382,6 +434,31 @@ fn decode_entities(s: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Pushes the character an entity's name or number (between `&` and `;`)
+/// stands for; false, pushing nothing, when it stands for none.
+fn push_entity(entity: &str, out: &mut String) -> bool {
+    if entity == "nbsp" {
+        out.push(' ');
+        return true;
+    }
+    if let Some(number) = entity.strip_prefix('#') {
+        let code = match number.strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => number.parse().ok(),
+        };
+        let Some(c) = code.and_then(char::from_u32) else {
+            return false;
+        };
+        out.push(c);
+        return true;
+    }
+    let Some(text) = quick_xml::escape::resolve_html5_entity(entity) else {
+        return false;
+    };
+    out.push_str(text);
+    true
 }
 
 /// Extract text for a file identified by content sniffing (no usable extension):
@@ -417,7 +494,7 @@ fn text_input_size(path: &Path) -> Option<u64> {
 
 /// A blob with no text in it: empty, or holding a NUL byte early on.
 fn looks_binary(buf: &[u8]) -> bool {
-    buf.is_empty() || buf.iter().take(8192).any(|&b| b == 0)
+    buf.is_empty() || memchr::memchr(0, &buf[..buf.len().min(8192)]).is_some()
 }
 
 /// `bytes` as text, each invalid UTF-8 sequence as U+FFFD; valid text, nearly
