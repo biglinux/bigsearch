@@ -273,8 +273,6 @@ mod tests {
             leftovers.is_empty(),
             "temp files left behind: {leftovers:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A commit wakes the readers once, and reading `meta.json` (which is what a
@@ -317,8 +315,6 @@ mod tests {
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(calls.load(Ordering::SeqCst), 2, "a read woke the watch");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A reader opened before the commits sees them without being reopened:
@@ -340,7 +336,6 @@ mod tests {
         assert_eq!(reader.searcher().num_docs(), 1);
 
         drop(writer);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The daemon's layout: the watcher writes through one instance, queries read
@@ -389,7 +384,6 @@ mod tests {
         );
 
         drop(writer);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Commit repeatedly through the real index stack. Run under `strace` this is
@@ -430,7 +424,5 @@ mod tests {
             crate::index::document_count(&reopened.reader().unwrap()),
             20
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

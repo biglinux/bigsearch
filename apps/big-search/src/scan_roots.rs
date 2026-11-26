@@ -292,8 +292,6 @@ mod tests {
             "nested pruned: {on:?}"
         );
         assert_eq!(on.len(), 2, "exactly home + ext: {on:?}");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -335,8 +333,6 @@ mod tests {
             !roots.contains(&win_root),
             "windows root rejected: {roots:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -367,8 +363,6 @@ mod tests {
             "linux user home accepted: {roots:?}"
         );
         assert!(!roots.contains(&old_root), "linux root rejected: {roots:?}");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -400,8 +394,6 @@ mod tests {
             !roots.contains(&network),
             "network link rejected: {roots:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -427,8 +419,6 @@ mod tests {
             roots.contains(&canonical_local_photos_target),
             "plain local data accepted: {roots:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

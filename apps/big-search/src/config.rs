@@ -132,7 +132,6 @@ mod tests {
         ensure_private_data_dir().unwrap();
         let mode = std::fs::metadata(data_dir()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

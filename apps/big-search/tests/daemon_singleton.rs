@@ -131,5 +131,4 @@ fn second_daemon_leaves_first_intact() {
     );
 
     drop(d1); // kills the first daemon
-    let _ = std::fs::remove_dir_all(&base);
 }

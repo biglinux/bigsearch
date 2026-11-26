@@ -150,8 +150,6 @@ fn register_created_then_query_origin() {
     assert!(query_reply.contains(r#""kind":"query""#), "{query_reply}");
     assert!(query_reply.contains(r#""origin""#), "{query_reply}");
     assert!(query_reply.contains(r#""app_created""#), "{query_reply}");
-
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -194,6 +192,4 @@ fn cli_exposes_origin_commands() {
         capabilities.contains("file_origin_register"),
         "{capabilities}"
     );
-
-    let _ = std::fs::remove_dir_all(&base);
 }

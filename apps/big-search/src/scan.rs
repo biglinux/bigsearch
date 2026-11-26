@@ -551,8 +551,6 @@ mod tests {
         delete_path(&writer, &f, &tree.join("sub/nested.md"));
         writer.commit().unwrap();
         assert_eq!(name_hits(&index, "nested"), 0);
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -597,8 +595,6 @@ mod tests {
         writer.commit().unwrap();
         drop(writer);
         assert_eq!(crate::index::document_count(&index.reader().unwrap()), 2);
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -696,7 +692,6 @@ mod tests {
         assert!(dirs.is_empty() && !outcome.any());
         writer.commit().unwrap();
         assert_eq!(crate::index::document_count(&index.reader().unwrap()), 0);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -740,8 +735,6 @@ mod tests {
             "metadata-only change must not rewrite the name index"
         );
         assert!(second.state_changed, "content work must still be scheduled");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The `ignore` walker exempts its own root, so a `target/` created after
@@ -799,8 +792,6 @@ mod tests {
         )
         .unwrap();
         assert!(in_scope.index_changed);
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -824,8 +815,6 @@ mod tests {
         std::fs::write(&path, "github/\n").unwrap();
         seed_user_ignore();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "github/\n");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -861,7 +850,5 @@ mod tests {
             !paths.iter().any(|path| path.contains("/build/")),
             "build directories should be pruned: {paths:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 }

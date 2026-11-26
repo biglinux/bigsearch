@@ -183,7 +183,6 @@ fn corrupt_index_is_recreated() {
     let index = open_or_create(&dir).unwrap();
 
     assert_eq!(document_count(&index.reader().unwrap()), 0);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -221,6 +220,4 @@ fn deflated_index_repair_adds_missing_paths() {
             .path,
         "/catalog/keep-alpha.txt"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

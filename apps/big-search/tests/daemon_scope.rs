@@ -45,7 +45,6 @@ fn global_git_ignore_covers_events() {
         "the visible file was not indexed"
     );
     assert_eq!(catalogue_rows(&xdg_storage_home, "name", &repo), 1);
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The global git ignore file is anchored at the root of each work tree, as
@@ -80,7 +79,6 @@ fn global_ignore_anchors_at_work_tree() {
     let (found, paths) = query_paths(&sock, "name", "rootnote", &home);
     assert_eq!(found, 1, "{paths:?}");
     assert!(paths[0].ends_with("/repo/sub/rootnote.md"), "{paths:?}");
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A source inside a dot-folder indexes the files that appear in it: only what
@@ -114,7 +112,6 @@ fn hidden_source_indexes_new_files() {
         settles(|| query_paths(&sock, "name", "appeared", &notes).0 == 1),
         "the new file in the hidden source was not indexed"
     );
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The ignore rules apply below the source: a home inside a folder named
@@ -149,7 +146,6 @@ fn source_under_excluded_name_indexed() {
         "the watcher left out a new file of the source"
     );
     assert_eq!(query_paths(&sock, "name", "artifact", &home).0, 0);
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// An ignore file above a source speaks only for what lies below it, as the
@@ -205,7 +201,6 @@ fn ignore_file_above_source_spares_it() {
     assert!(settles(|| found("marker") == 1), "the watcher stopped");
     assert_eq!(found("first"), 1, "the reindex evicted the file");
     assert_eq!(found("second"), 1, "the reindex evicted the folder");
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A forced reindex judges the path as new: a catalogued folder its repository
@@ -255,7 +250,6 @@ fn reindex_evicts_ignored_folder() {
         settles(|| inotify_watches(daemon.0.id()) + 11 <= watches),
         "the ignored folders are still watched"
     );
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A rescan judges the folder list as the walk does: a folder its repository
@@ -302,7 +296,6 @@ fn rescan_unwatches_ignored_folder() {
         settles(|| inotify_watches(daemon.0.id()) + 11 <= watches),
         "the ignored folders are still watched"
     );
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A forced reindex of a folder compares its whole tree with the catalogue: a
@@ -367,7 +360,6 @@ fn reindex_of_parent_evicts_ignored_subtree() {
         settles(|| inotify_watches(daemon.0.id()) + 12 <= watches),
         "the ignored folders are still watched"
     );
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A forced reindex of a file its repository came to ignore takes its text out
@@ -416,7 +408,6 @@ fn reindex_evicts_ignored_file_content() {
         }),
         "the ignored file is still found by its text"
     );
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A source inside another applies the ignore rules below itself, in the
@@ -472,7 +463,6 @@ fn nested_source_anchors_its_rules() {
     std::fs::write(sync.join("after.txt"), "d").unwrap();
     assert!(settles(|| found("after") == 1), "the watcher stopped");
     assert_eq!(found("old"), 0, "the rescan indexed the excluded folder");
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A `.ignore` file leaves its folders out of a forced reindex and of the
@@ -513,7 +503,6 @@ fn dot_ignore_applies_to_every_pass() {
     );
     assert_eq!(found("walked"), 0, "the reindex entered the ignored folder");
     assert_eq!(found("created"), 0, "the watcher entered an ignored folder");
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The effective ignore rules come before a repository's own: a `.gitignore`
@@ -551,5 +540,4 @@ fn effective_rules_precede_gitignore() {
         0,
         "the walk entered a built-in exclusion"
     );
-    let _ = std::fs::remove_dir_all(&base);
 }

@@ -384,8 +384,6 @@ mod tests {
             signatures.claim_identity(&second, identity(), |_| identity()),
             ContentClaim::Duplicate
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -433,7 +431,6 @@ mod tests {
             signatures.claim_identity(&first, identity(), |_| identity()),
             ContentClaim::Duplicate
         );
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -453,8 +450,6 @@ mod tests {
             signatures.claim_identity(&second, None, |_| unreachable!()),
             ContentClaim::Unique
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A FIFO renamed in after the worker's check has no identity, and no wait

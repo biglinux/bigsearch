@@ -21,8 +21,6 @@ fn dedup_roundtrip() {
     let mut s2 = State::load(&file, NAME_NAMESPACE);
     s2.remove(p);
     assert!(!s2.unchanged(p, 100, 5));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A folder's inode, kept in the size column of the watch list, reads back as
@@ -76,8 +74,6 @@ fn cleared_state_hides_persisted_rows() {
     // A fresh empty state (clear_before_persist) also denies persisted rows.
     let empty = State::empty(&file, NAME_NAMESPACE).unwrap();
     assert!(!empty.contains(path));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The pages of the two sides end at different paths; whatever the page
@@ -118,7 +114,6 @@ fn scan_changes_ignore_page_size() {
         }
         assert_eq!(changes, expected, "page size {limit}");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -135,7 +130,6 @@ fn children_are_one_level_deep() {
         children,
         [PathBuf::from("/p/ção/a"), PathBuf::from("/p/ção/s")]
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -168,7 +162,6 @@ fn removed_tree_spares_its_siblings() {
     .filter(|path| state.contains(Path::new(path)))
     .collect();
     assert_eq!(kept, ["/p/t/a", "/p/t-2", "/p/t0"]);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -193,7 +186,6 @@ fn retained_prefix_keeps_accented_paths() {
         changes,
         vec![ScanChange::Gone(PathBuf::from("/run/media/joão/USB-2/b"))]
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -222,8 +214,6 @@ fn entries_after_merges_pending_rows() {
     assert_eq!(after, vec![(PathBuf::from("/c/added.md"), 2, 2)]);
     assert_eq!(state.len(), 2);
     assert!(!state.is_empty());
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -262,8 +252,6 @@ fn entries_after_pages_pending_rows() {
         .map(|page| page.into_iter().map(PathBuf::from).collect())
         .collect();
     assert_eq!(pages, expected);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -304,8 +292,6 @@ fn stale_entries_stream_pending_work() {
         resumed,
         vec![(PathBuf::from("/c/never-extracted.md"), 300, 7)]
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -343,8 +329,6 @@ fn len_tracks_pending_overlaps_and_removals() {
         state.unseen_paths_after(None, 5).unwrap().is_empty(),
         "a cleared state has no deletions to stream"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -354,7 +338,6 @@ fn on_disk_state_uses_wal_journal() {
     let dir = crate::test_env::scratch_dir("bs-state-wal");
     let state = State::empty(&dir.join("state.sqlite"), crate::catalogue::NAME_NAMESPACE).unwrap();
     assert_eq!(state.journal_mode(), "wal");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A catalogue database holding `rows` in the name namespace, and a reader of it.
@@ -427,12 +410,11 @@ fn newest_first_with_exact_total() {
     assert_eq!(page(4, 2), (5, vec!["/p/old.jpg".to_string()]));
     assert_eq!(page(9, 2), (5, Vec::new()), "past the end");
     assert_eq!(page(0, 0), (5, Vec::new()), "a count alone");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn under_stops_at_the_folder_boundary() {
-    let (dir, reader) = catalogue_of(
+    let (_dir, reader) = catalogue_of(
         "under",
         &[
             ("/home/a", 1, 0),
@@ -463,12 +445,11 @@ fn under_stops_at_the_folder_boundary() {
             "under {root:?}"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn ext_matches_ending_in_any_case() {
-    let (dir, reader) = catalogue_of(
+    let (_dir, reader) = catalogue_of(
         "ext",
         &[
             ("/p/a.JPG", 1, 1),
@@ -496,12 +477,11 @@ fn ext_matches_ending_in_any_case() {
         newest_paths(&reader, &ext(&["tar.gz", "png"])),
         ["/p/c.png"]
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn ranges_compare_recorded_values() {
-    let (dir, reader) = catalogue_of(
+    let (_dir, reader) = catalogue_of(
         "range",
         &[
             ("/p/a", 100, 10),
@@ -527,7 +507,6 @@ fn ranges_compare_recorded_values() {
         ..Default::default()
     };
     assert_eq!(newest_paths(&reader, &both), ["/p/huge", "/p/c"]);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -577,5 +556,4 @@ fn newest_page_uses_mtime_index() {
             .any(|step| step.contains("file_state_name_by_mtime")),
         "{steps:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

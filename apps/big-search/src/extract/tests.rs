@@ -35,7 +35,6 @@ fn readers_pass_over_fifo() {
     }
     assert!(open_regular_with(&link, libc::O_NOFOLLOW).is_err());
     assert!(open_regular(&dir).is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A write lease held by another process (a Samba oplock, an NFS delegation)
@@ -110,7 +109,6 @@ fn html_page_indexed_as_text() {
     assert_eq!(page.declared_title.as_deref(), Some("Ata"));
     assert_eq!(page.prominent, ["Reunião"]);
     assert!(page.text.contains("Relatório"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -155,7 +153,6 @@ fn text_file_and_binary_reject() {
     let unknown = dir.join("thing.xyz");
     std::fs::write(&unknown, b"data").unwrap();
     assert!(content(&unknown).is_none()); // not content-eligible
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -170,7 +167,6 @@ fn office_skips_oversized_input() {
     file.set_len(2 * 1024 * 1024).unwrap();
     drop(file);
     assert!(exceeds_input_cap(&path));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -186,7 +182,6 @@ fn text_skips_oversized_input() {
     drop(file);
     assert!(text_input_size(&path).is_none());
     assert!(content(&path).is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// An office archive in memory holding `parts`.
@@ -362,7 +357,6 @@ fn docx_zip_xml_extraction() {
     let text = content(&path).unwrap();
     assert!(text.contains("quarterly"));
     assert!(text.contains("budget"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// An EPUB reads in its spine's order, from the package `container.xml`
@@ -412,7 +406,6 @@ fn epub_reads_spine_in_order() {
         first < second && text.contains("Uma noite destas…"),
         "{text:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -438,7 +431,6 @@ fn docx_page_split_by_rendered_break() {
     assert_eq!(pages_with(&path, &["betaword".to_string()]), vec![2]);
     assert_eq!(pages_with(&path, &["relatorio".to_string()]), vec![2]);
     assert!(pages_with(&path, &["missing".to_string()]).is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -456,7 +448,6 @@ fn docx_without_breaks_reports_no_page() {
     }
     // term is present, but no cached page breaks → no page reported (no guess).
     assert!(pages_with(&path, &["soloword".to_string()]).is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

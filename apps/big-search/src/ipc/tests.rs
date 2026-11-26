@@ -10,7 +10,6 @@ fn socket_and_directory_private() {
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&sock), 0o600);
     assert_eq!(mode(&base.join("biglinux")), 0o700);
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A symlink planted where the runtime directory goes is refused, and the
@@ -25,5 +24,4 @@ fn symlinked_runtime_dir_refused() {
     assert!(bind_private_socket(&base.join("biglinux/indexd.sock")).is_err());
     let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o755);
-    let _ = std::fs::remove_dir_all(&base);
 }

@@ -450,7 +450,6 @@ mod tests {
         assert_eq!(gauge.load(Ordering::Relaxed), 0);
         let hits = crate::query::search_content(&index.reader().unwrap(), "leased", 10).unwrap();
         assert_eq!(hits.len(), 1);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A file the cooldown deferred in an early batch of a pass still keeps the
@@ -487,7 +486,6 @@ mod tests {
         assert!(!run_content_backfill_batch(&index, &mut writer, &f, &mut backfill).unwrap());
         assert_eq!(gauge.load(Ordering::Relaxed), 1);
         assert!(backfill.should_run_when_idle(&AtomicBool::new(false)));
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Searches typed faster than the idle delay must not keep restarting it,
@@ -551,6 +549,5 @@ mod tests {
         let mut sizes: Vec<u32> = metas.iter().map(|meta| meta.max_doc()).collect();
         sizes.sort_unstable();
         assert_eq!(sizes, vec![2, 24]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -571,7 +571,6 @@ mod tests {
         assert_eq!(rows[0], (1, None));
         assert!(rows[1].0 == 3 && rows[1].1.is_some(), "{rows:?}");
         assert_eq!(rows[2].0, 5, "{rows:?}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Rows recording `real/own.odt`: at its key, at `real/other.odt`, at
@@ -630,7 +629,7 @@ mod tests {
     /// replaced by a link; its own file keeps it, a gone one counts it missing.
     #[test]
     fn kept_paths_checked_after_start() {
-        let (dir, history) = rows_of_own("bs-history-kept-after-start");
+        let (_dir, history) = rows_of_own("bs-history-kept-after-start");
         history.lock().started_at = i64::MAX;
         check_kept_paths(&history).unwrap();
         assert_eq!(
@@ -642,13 +641,12 @@ mod tests {
                 (4, false, true)
             ]
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A file born during the run is left to the change the watcher hears.
     #[test]
     fn kept_paths_born_during_run() {
-        let (dir, history) = rows_of_own("bs-history-kept-during-run");
+        let (_dir, history) = rows_of_own("bs-history-kept-during-run");
         check_kept_paths(&history).unwrap();
         assert_eq!(
             row_states(&history),
@@ -659,7 +657,6 @@ mod tests {
                 (4, false, true)
             ]
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A thread that panicked holding the store leaves it usable to the
@@ -684,7 +681,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Guards: recovery: a step that panics holding the store costs that step
@@ -704,7 +700,6 @@ mod tests {
             swept = true;
         });
         assert!(swept);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

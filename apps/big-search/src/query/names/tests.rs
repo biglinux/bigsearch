@@ -131,7 +131,6 @@ fn equal_names_rank_newest_first() {
         found,
         [paths[1].clone(), paths[2].clone(), paths[0].clone()]
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

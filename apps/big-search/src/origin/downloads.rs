@@ -139,7 +139,6 @@ mod tests {
                 Some("files.example.org")
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Only the site survives: no credential, path or query, and nothing that
@@ -217,6 +216,5 @@ mod tests {
             &downloads
         ));
         assert!(!should_probe_xdg_origin_in_downloads(&nested, &downloads));
-        let _ = std::fs::remove_dir_all(&base);
     }
 }

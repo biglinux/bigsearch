@@ -410,8 +410,6 @@ pub(crate) mod tag_tests {
                 "a tagged file must be indexed whatever its type"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

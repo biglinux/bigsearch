@@ -167,7 +167,6 @@ fn list_mode_answers_wordless_queries() {
     // The same filter through the name search finds nothing, which is the
     // whole reason the mode exists.
     assert!(run("name").hits.is_empty());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The `largest` mode is the `list` mode ordered by recorded size.
@@ -214,7 +213,6 @@ fn largest_pages_by_size() {
     let last = page(3, 3);
     assert_eq!(page_names(&last), ["small.iso"]);
     assert_eq!((last.total, last.next_offset), (4, None));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A type filter finds videos by what they are, extension or not.
@@ -267,7 +265,6 @@ fn type_filter_finds_videos_by_content() {
             ("recording".to_string(), "video/mp2t".to_string()),
         ]
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A folder is its type in the name index, so the index keeps folders, or
@@ -303,7 +300,6 @@ fn kind_filter_keeps_folders_or_files() {
         );
         assert_eq!(found(q, mode, EntryKind::File), ["fotos.txt"], "{mode}");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -401,7 +397,6 @@ fn list_pages_newest_first() {
     assert_eq!(page_names(&first), ["a.jpg"]);
     assert_eq!((first.total, first.next_offset), (5, Some(2)));
     assert_eq!(page_names(&page(2, 2)), ["c.jpg", "d.jpg"]);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// `under` keeps what is inside the folder and not the folder itself, as
@@ -470,7 +465,6 @@ fn a_page_counts_all_matches() {
     assert_eq!(outcome.hits.len(), 5);
     assert_eq!(outcome.total, 30);
     assert_eq!(outcome.next_offset, Some(5));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Guards: regression: a content search filtered by folder after the
@@ -546,7 +540,6 @@ fn both_mode_counts_each_file_once() {
     assert_eq!(outcome.hits.len(), 2);
     assert_eq!(outcome.total, 3);
     assert_eq!(outcome.next_offset, Some(2));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -603,8 +596,6 @@ fn run_query_filters_paginates_and_enriches() {
     assert_eq!(item(&f, &Page::default()).total, 2);
 
     assert_pages_of_two(&index);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Pagination over the three `item` files: limit 2 → first page has
@@ -666,6 +657,4 @@ fn deleted_file_is_dropped() {
         outcome.hits[0].available,
         "a file that stats is available, never flagged offline"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

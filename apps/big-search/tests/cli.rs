@@ -83,8 +83,6 @@ fn count_and_list_subcommands_report_catalog() {
             .count(),
         1
     );
-
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// A reindex after an index directory was deleted must re-extract content even
@@ -110,8 +108,6 @@ fn reindex_rebuilds_either_missing_index() {
             run(&home, &xdg_storage_home, &["content", "cassia"]).contains("release-runbook.md"),
             "content lost after deleting {lost}"
         );
-
-        let _ = fs::remove_dir_all(&base);
     }
 }
 
@@ -133,7 +129,6 @@ fn config_change_names_the_restart() {
             "{args:?}: {out}"
         );
     }
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// `config show` reports the posting detail the content index holds, which
@@ -159,7 +154,6 @@ fn config_show_reads_stored_detail() {
         after.contains("requested=auto, effective=basic, from the content index"),
         "{after}"
     );
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// A file name is outside text: its control characters reach the terminal
@@ -190,7 +184,6 @@ fn file_names_print_without_control_characters() {
             "{args:?}: {out:?}"
         );
     }
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// An error exits 1; a search with no hits is no error.
@@ -215,7 +208,6 @@ fn exit_status_tells_error_from_empty() {
     };
     assert_eq!(status(&["nothing-matches-this"]), Some(0));
     assert_eq!(status(&["config", "set", "no-such-key", "1"]), Some(1));
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// `reindex ROOT` stores absolute paths whatever the working directory, and a
@@ -245,7 +237,6 @@ fn reindex_root_absolute_and_checked() {
     assert_eq!(missing.status.code(), Some(1));
     // Only docs/a.txt: the entries strictly under the root.
     assert_eq!(run(&home, &xdg_storage_home, &["count"]), "1");
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// A reindex whose state database will not open is refused before it touches
@@ -272,7 +263,6 @@ fn reindex_refuses_unopenable_state() {
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         assert!(index_meta() == before, "{args:?} rewrote the name index");
     }
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// `--under` names a folder the way the shell does, relative to where the
@@ -304,7 +294,6 @@ fn under_relative_to_working_directory() {
             "{folder}"
         );
     }
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// The commands that need the service say so when it is not running, instead
@@ -324,5 +313,4 @@ fn versions_without_service_named() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("daemon"), "{command}: {stderr}");
     }
-    let _ = fs::remove_dir_all(&base);
 }

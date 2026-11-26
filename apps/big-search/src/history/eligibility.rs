@@ -173,8 +173,6 @@ mod tests {
         // The nearest `.gitignore` overrides the one above it.
         assert!(!ignored("docs/notes.txt"));
         assert!(!ignored("docs/drafts/a.md"));
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Only documents, and never the files somebody keeps their passwords in.

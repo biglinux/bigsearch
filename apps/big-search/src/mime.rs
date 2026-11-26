@@ -409,7 +409,6 @@ mod tests {
             db.of(&write("odd.ts", &png), None).as_deref(),
             Some("image/png")
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -443,7 +442,6 @@ mod tests {
                 .as_deref(),
             Some("text/plain")
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -471,7 +469,6 @@ mod tests {
             assert_eq!(db.of(path, Some(&metadata)).as_deref(), Some(inode));
             assert_eq!(db.of(path, None).as_deref(), Some(inode));
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

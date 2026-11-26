@@ -81,8 +81,6 @@ fn pause_resume_rebuild_cycle() {
     // Resume → status reports running again.
     assert!(command_accepted(&sock, "resume"));
     assert!(await_paused(&sock, false), "daemon did not report resumed");
-
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// Debug builds only: a release binary ignores the batch size this test sets.
@@ -131,8 +129,6 @@ fn content_backfill_continues_past_batch() {
         ),
         "second content file was not indexed by an idle follow-up batch"
     );
-
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A folder deleted or moved while the daemon runs leaves nothing of its tree
@@ -190,8 +186,6 @@ fn departed_tree_leaves_every_index() {
         settled(&|| query_paths(&sock, "content", "movingworddeep", &home).1 == [deep.clone()]),
         "the moved tree is not searchable by content under its new path"
     );
-
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A tree `tree` at `dir`: a file on top and one a folder down, each with a
@@ -251,7 +245,6 @@ fn content_off_named() {
     );
     assert!(wait_socket(&sock), "daemon never bound socket");
     assert!(content_search("0"), "names-only daemon");
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A request naming the file another one came from and the file it made.
@@ -307,7 +300,6 @@ fn client_symlink_out_refused() {
             (path_cmd("reindex", &spelled(format!("{docs}/./"))), None),
         ],
     );
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The ids of the versions the daemon lists for `path`.
