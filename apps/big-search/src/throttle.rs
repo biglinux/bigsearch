@@ -362,11 +362,8 @@ struct Signals {
     on_battery: bool,
 }
 
-/// Classify how much this service would be in the way.
-///
-/// The unit's weight settles its CPU share; what it misses is an SMT sibling,
-/// slowed by a worker at any priority, and memory, disk and battery, whose cost
-/// falls on every program (DESIGN.md section 7).
+/// How much this service would be in the way where the unit's CPU weight cannot
+/// see it: an SMT sibling, memory, disk and battery (DESIGN.md section 7).
 fn classify_load(signals: Signals) -> Load {
     let Signals {
         own_io,

@@ -242,9 +242,9 @@ pub struct Inotify {
 }
 
 /// Start inotify for the sources `roots`; the first event heard after the
-/// watcher loop takes a batch wakes it through `wake`. notify's reader thread takes its caller's policy, nice
-/// value and cgroup: the daemon calls this through
-/// [`crate::throttle::spawn_lowered`].
+/// watcher loop takes a batch wakes it through `wake`. notify's reader thread
+/// takes its caller's policy, nice value and cgroup: the daemon calls this
+/// through [`crate::throttle::spawn_lowered`].
 ///
 /// # Errors
 ///

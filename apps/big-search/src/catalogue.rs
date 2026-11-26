@@ -609,11 +609,7 @@ impl State {
     }
 
     /// The value stored under `key` in the database's `meta` table.
-    ///
-    /// # Errors
-    ///
-    /// The table cannot be read.
-    pub fn meta(&self, key: &str) -> rusqlite::Result<Option<i64>> {
+    pub(crate) fn meta(&self, key: &str) -> rusqlite::Result<Option<i64>> {
         self.conn
             .query_row(
                 "SELECT value FROM meta WHERE key = ?1",
