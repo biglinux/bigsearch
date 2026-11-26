@@ -867,9 +867,11 @@ mod tests {
     }
 
     /// A source `src` holding `docs/a.txt`, beside a folder `outside` holding
-    /// `secret.txt` and `sub/`: the base folder, canonical, and the sources.
-    fn client_path_fixture(name: &str) -> (PathBuf, Sources) {
-        let base = std::fs::canonicalize(crate::test_env::scratch_dir(name)).unwrap();
+    /// `secret.txt` and `sub/`: the scratch folder, its canonical path, and the
+    /// sources.
+    fn client_path_fixture(name: &str) -> (crate::test_env::ScratchDir, PathBuf, Sources) {
+        let scratch = crate::test_env::scratch_dir(name);
+        let base = std::fs::canonicalize(&scratch).unwrap();
         let source = base.join("src");
         let outside = base.join("outside");
         std::fs::create_dir_all(source.join("docs")).unwrap();
@@ -879,7 +881,7 @@ mod tests {
         let sources = Sources {
             list: vec![src(source.to_str().unwrap(), true)],
         };
-        (base, sources)
+        (scratch, base, sources)
     }
 
     /// Guards: security refusal: a path a client names for the daemon to read
@@ -887,7 +889,7 @@ mod tests {
     /// is keyed one way however it was spelled.
     #[test]
     fn client_paths_resolved_inside_sources() {
-        let (base, sources) = client_path_fixture("bs-client-path");
+        let (_scratch, base, sources) = client_path_fixture("bs-client-path");
         let source = base.join("src");
         let outside = base.join("outside");
         std::os::unix::fs::symlink(&outside, source.join("out")).unwrap();
@@ -939,7 +941,6 @@ mod tests {
                 "{asked}"
             );
         }
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Guards: security refusal: a source folder replaced by a symlink while
@@ -947,7 +948,7 @@ mod tests {
     /// folder resolved at load.
     #[test]
     fn replaced_source_leads_nowhere_new() {
-        let (base, sources) = client_path_fixture("bs-client-replaced");
+        let (_scratch, base, sources) = client_path_fixture("bs-client-replaced");
         let source = base.join("src");
         let outside = base.join("outside");
         std::fs::rename(&source, base.join("src.old")).unwrap();
@@ -960,7 +961,6 @@ mod tests {
             sources.client_row_key(&source.join("docs/a.txt")),
             Some(source.join("docs/a.txt"))
         );
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
