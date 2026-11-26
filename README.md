@@ -48,7 +48,7 @@ documents.
 Requirements:
 
 - Linux with inotify, and systemd for the user service.
-- Rust 1.98.1; with rustup, `rust-toolchain.toml` selects it.
+- Rust 1.100.0; with rustup, `rust-toolchain.toml` selects it.
 - SQLite 3; poppler (`pdftotext`) for PDF content and `antiword` for Word
   97-2003 documents.
 - shared-mime-info, which names a file's type from its name.

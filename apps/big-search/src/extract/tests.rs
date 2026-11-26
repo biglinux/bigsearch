@@ -12,9 +12,8 @@ fn readers_pass_over_fifo() {
         let path = dir.join(name);
         crate::test_env::make_fifo(&path);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let reader_path = path.clone();
         std::thread::spawn(move || {
-            let _ = done_tx.send(content(&reader_path));
+            let _ = done_tx.send(content(&path));
         });
         let text = done_rx
             .recv_timeout(std::time::Duration::from_secs(10))
