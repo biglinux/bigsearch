@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use big_indexd_client::Filter;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -609,14 +609,18 @@ impl State {
     }
 
     /// The value stored under `key` in the database's `meta` table.
-    pub fn meta(&self, key: &str) -> Option<i64> {
+    ///
+    /// # Errors
+    ///
+    /// The table cannot be read.
+    pub fn meta(&self, key: &str) -> rusqlite::Result<Option<i64>> {
         self.conn
             .query_row(
                 "SELECT value FROM meta WHERE key = ?1",
                 params![key],
                 |row| row.get(0),
             )
-            .ok()
+            .optional()
     }
 
     /// Store `value` under `key` in the `meta` table, or remove the key.

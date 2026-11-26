@@ -786,7 +786,7 @@ fn open_content_writer<'a>(
 }
 
 /// Apply a lifecycle command the run loop leaves to this function: Pause
-/// flips the shared flag; Rebuild wipes the index/cache and re-indexes names
+/// forgets the run record; Rebuild wipes the index/cache and re-indexes names
 /// from scratch, then schedules content backfill. Whether the index changed.
 fn apply_control_command(
     command: WatchControlCommand,
@@ -800,9 +800,12 @@ fn apply_control_command(
 ) -> Result<bool> {
     match command {
         WatchControlCommand::Pause => {
-            // The flag was set when the command was accepted, so a request
-            // right after it already sees it. Events are dropped while
-            // paused, so the next start must walk.
+            // The flag was set when the command was accepted; cleared again,
+            // a resume accepted after this pause is waiting in the queue.
+            if !runtime.paused.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            // Events are dropped while paused, so the next start must walk.
             watches.forget_run()?;
             runtime.activity.store(ACTIVITY_IDLE, Ordering::Relaxed);
             log::info!("indexing paused");
@@ -873,8 +876,12 @@ fn send_history_page(
     cursor: &mut Option<String>,
 ) -> bool {
     const PAGE: usize = 256;
-    let Ok(entries) = state.entries_after(cursor.as_deref(), PAGE) else {
-        return true;
+    let entries = match state.entries_after(cursor.as_deref(), PAGE) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::warn!("the versions pass stopped: cannot read the catalogue: {error:#}");
+            return true;
+        }
     };
     if entries.is_empty() {
         return true;

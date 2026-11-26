@@ -42,15 +42,18 @@ impl Heard {
     /// Add one event, and wake the loop when it is the first since the loop
     /// last took the batch.
     pub(super) fn hear(&self, watcher_result: notify::Result<notify::Event>) {
-        let Ok(event) = watcher_result else {
-            return;
-        };
         let first = {
             let mut batch = self.batch.lock().unwrap_or_else(PoisonError::into_inner);
             let first = batch.is_none();
-            batch
-                .get_or_insert_with(WatchBatch::new)
-                .ingest(event, &self.roots);
+            let batch = batch.get_or_insert_with(WatchBatch::new);
+            match watcher_result {
+                Ok(event) => batch.ingest(event, &self.roots),
+                // A failed read of the kernel's queue loses what it held.
+                Err(error) => {
+                    log::warn!("inotify read failed: {error}");
+                    batch.give_up_paths(Rescan::Overflowed);
+                }
+            }
             first
         };
         if first {
@@ -71,7 +74,7 @@ impl Heard {
 /// Why a batch walks the sources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Rescan {
-    /// The kernel's queue overflowed: events were lost.
+    /// The kernel's queue overflowed, or reading it failed: events were lost.
     Overflowed,
     /// The folders passed [`MAX_FOLDERS`].
     Collapsed,

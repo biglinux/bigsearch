@@ -31,10 +31,16 @@ pub fn fingerprint(roots: &[PathBuf], ignore_rules: &str, git_excludes: &[u8]) -
 /// When the last run started, if its record in `watch_list` carries
 /// `fingerprint`: every folder it listed was watched from then on.
 pub fn saved_run_started(watch_list: &State, fingerprint: i64) -> Option<SystemTime> {
-    if watch_list.meta(RUN_FINGERPRINT)? != fingerprint {
+    let read = |key| {
+        watch_list.meta(key).unwrap_or_else(|error| {
+            log::warn!("cannot read the saved run's record, so this start walks: {error}");
+            None
+        })
+    };
+    if read(RUN_FINGERPRINT)? != fingerprint {
         return None;
     }
-    let secs = u64::try_from(watch_list.meta(RUN_STARTED)?).ok()?;
+    let secs = u64::try_from(read(RUN_STARTED)?).ok()?;
     UNIX_EPOCH.checked_add(Duration::from_secs(secs))
 }
 
