@@ -18,12 +18,9 @@ const STATE_FLUSH_ROWS: usize = 2048;
 /// catalogue: bounded memory on a catalogue of millions.
 const SCAN_PAGE: usize = 2048;
 
-/// `ignore` walker over what `scope` keeps: its own filters are off, so the
-/// walk, the watcher and a reindex read the same rules.
-/// Symlinks are never followed during the walk (`follow_links(false)`); a
-/// symlinked folder at the top of a source becomes a source of its own through
-/// [`crate::scan_roots::resolve_roots_with_policy`], so the thousands of deep
-/// symlinks a tree holds, and their loops, are never chased.
+/// `ignore` walker over what `scope` keeps, its own filters off so the walk,
+/// the watcher and a reindex read the same rules; it never follows a symlink
+/// (one at the top of a source is a source of its own).
 fn walker(root: &Path, scope: &Scope) -> ignore::Walk {
     // The walk is sequential; the lock only meets `filter_entry`'s `Sync`.
     let filter = std::sync::Mutex::new(scope.walk_filter(root));
