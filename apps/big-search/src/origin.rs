@@ -371,21 +371,11 @@ impl OriginWriter {
         let Some(conn) = &self.conn else {
             return Ok(());
         };
-        let path = key_under_source(path)?;
-        let record = OriginRecord {
-            source_domain: Some(domain.to_string()),
-            first_seen_at: downloaded_at,
-            ..OriginRecord::arrived(
-                &path,
-                OriginKind::WebDownload,
-                OriginConfidence::High,
-                now_secs(),
-            )
-        };
-        upsert_record(conn, &record)
+        upsert_record(conn, &web_download(path, domain, downloaded_at)?)
     }
 
-    /// The same for a whole list, in one transaction.
+    /// The same for a whole list, in one transaction; a path outside the
+    /// sources is left out.
     ///
     /// A browser's download list is thousands of rows, read in one go when the
     /// service starts. One at a time is one commit each against a database that
@@ -399,16 +389,21 @@ impl OriginWriter {
         let Some(conn) = &self.conn else {
             return Ok(0);
         };
+        // Resolved before the write lock, which a stat on a network mount that
+        // stopped answering would hold.
+        let records: Vec<OriginRecord> = downloads
+            .iter()
+            .filter_map(|(path, domain, downloaded_at)| {
+                web_download(path, domain, *downloaded_at).ok()
+            })
+            .collect();
         // `unchecked_transaction` because the connection is behind `&self`; the
         // store is single-threaded, which is what makes that safe here.
         let transaction = conn.unchecked_transaction()?;
         let mut recorded = 0;
-        for (path, domain, downloaded_at) in downloads {
-            if self
-                .register_web_download_at(path, domain, *downloaded_at)
-                .is_ok()
-                && conn.changes() > 0
-            {
+        for record in &records {
+            upsert_record(conn, record)?;
+            if conn.changes() > 0 {
                 recorded += 1;
             }
         }
@@ -588,6 +583,25 @@ fn add_identity_columns(conn: &Connection) -> Result<()> {
     if has_fs()? {
         return Ok(());
     }
+    // Read before the write lock: a recorded path on a network mount that
+    // stopped answering blocks its stat, and every other writer with it.
+    let recorded: Vec<(String, i64, i64)> = conn
+        .prepare(
+            "SELECT path, dev, ino FROM file_origin WHERE dev IS NOT NULL AND ino IS NOT NULL",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let identified: Vec<_> = recorded
+        .into_iter()
+        .filter_map(|(path, dev, ino)| {
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if metadata.dev().cast_signed() != dev || metadata.ino().cast_signed() != ino {
+                return None;
+            }
+            let (fs, _, born) = crate::history::identity(Path::new(&path), &metadata).ok()?;
+            Some((path, dev, ino, fs, born))
+        })
+        .collect();
     // Immediate, and asked again: another connection opening the store may
     // have added them while this one waited for the lock.
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -598,25 +612,13 @@ fn add_identity_columns(conn: &Connection) -> Result<()> {
         "ALTER TABLE file_origin ADD COLUMN fs INTEGER;
          ALTER TABLE file_origin ADD COLUMN born INTEGER;",
     )?;
-    let recorded: Vec<(String, i64, i64)> = transaction
-        .prepare(
-            "SELECT path, dev, ino FROM file_origin WHERE dev IS NOT NULL AND ino IS NOT NULL",
-        )?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
     {
-        let mut identify =
-            transaction.prepare("UPDATE file_origin SET fs = ?2, born = ?3 WHERE path = ?1")?;
-        for (path, dev, ino) in recorded {
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if metadata.dev().cast_signed() != dev || metadata.ino().cast_signed() != ino {
-                continue;
-            }
-            if let Ok((fs, _, born)) = crate::history::identity(Path::new(&path), &metadata) {
-                identify.execute(params![path, fs, born])?;
-            }
+        // Only a row still as it was read: another writer may have replaced it.
+        let mut identify = transaction.prepare(
+            "UPDATE file_origin SET fs = ?4, born = ?5 WHERE path = ?1 AND dev = ?2 AND ino = ?3",
+        )?;
+        for (path, dev, ino, fs, born) in identified {
+            identify.execute(params![path, dev, ino, fs, born])?;
         }
     }
     transaction.commit()?;
@@ -887,6 +889,21 @@ fn key_under_source(path: &Path) -> Result<PathBuf> {
                 path.display()
             )
         })
+}
+
+/// The record of a download from `domain` at `downloaded_at`.
+fn web_download(path: &Path, domain: &str, downloaded_at: i64) -> Result<OriginRecord> {
+    let path = key_under_source(path)?;
+    Ok(OriginRecord {
+        source_domain: Some(domain.to_string()),
+        first_seen_at: downloaded_at,
+        ..OriginRecord::arrived(
+            &path,
+            OriginKind::WebDownload,
+            OriginConfidence::High,
+            now_secs(),
+        )
+    })
 }
 
 /// The file another one came from: anywhere, a device included, keyed as its
