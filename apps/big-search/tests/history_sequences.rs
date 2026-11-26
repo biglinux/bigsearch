@@ -903,6 +903,15 @@ fn every_sequence_keeps_the_promises() {
         std::env::set_var("XDG_DATA_HOME", home.join("data"));
         std::env::set_var("XDG_CONFIG_HOME", home.join("config"));
     }
+    // Asked before the checks open the store, which an unsupported disk never gets.
+    let support = started().lock().support();
+    if let Support::Unavailable(reason) = support {
+        eprintln!(
+            "this filesystem keeps no versions ({}); test declared unsupported",
+            reason.as_str()
+        );
+        return;
+    }
     let docs = home.join("Documentos");
     std::fs::create_dir(&docs).expect("create the documents folder");
     let mut world = World::new(docs);
@@ -918,17 +927,6 @@ fn every_sequence_keeps_the_promises() {
 
     for seed in seeds {
         world.reset(seed);
-        if let Some(Support::Unavailable(reason)) = world
-            .history
-            .as_ref()
-            .map(|history| history.lock().support())
-        {
-            eprintln!(
-                "this filesystem keeps no versions ({}); test declared unsupported",
-                reason.as_str()
-            );
-            return;
-        }
         for step in 1..=STEPS {
             world.step = step;
             world.step_once();
