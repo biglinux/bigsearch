@@ -160,6 +160,14 @@ ms, and 55 to 213 ms right after a full merge. On the notebook's own index a
 full merge took 61 MB to 32 MB and cold queries from 743 to 1041 ms down to 42
 to 62 ms.
 
+`reindex` writes both indexes without merges and merges each into one segment
+at the end (`index::merge_into_one_segment`): tantivy's policy rewrites the same
+documents in every larger merge. On the notebook's corpus this cut CPU time
+from 106 to 92 s and disk writes from 148 to 117 MB, and cold queries took a
+third to two thirds less time; the run took 91 to 99 s instead of 78 to 79 s,
+since the final merge runs alone, and peaked at 145 MB instead of 128 MB. The daemon
+keeps tantivy's policy, because its queries run while it indexes.
+
 SQLite FTS5, measured on the same machine and corpus, was 7 to 65x slower on
 common terms with a warm cache, slower to build and larger, so the engine is
 tantivy.

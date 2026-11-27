@@ -534,6 +534,11 @@ fn catalog_pass_indexes_every_batch() {
         3,
         "every batch of the pass is extracted"
     );
+    assert_eq!(
+        index.searchable_segment_ids().unwrap().len(),
+        1,
+        "the pass ends in one segment"
+    );
     let content_state = catalogue::State::load(
         &crate::config::state_db_path(),
         crate::catalogue::CONTENT_NAMESPACE,
