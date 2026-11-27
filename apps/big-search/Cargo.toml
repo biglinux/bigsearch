@@ -1,8 +1,8 @@
 [package]
 name = "big-search"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.98.1"
+edition.workspace = true
+rust-version.workspace = true
 description = "Lean unprivileged filename + content search for the Linux desktop"
 license.workspace = true
 repository.workspace = true
@@ -22,6 +22,7 @@ ignore = { version = "0.4.27" }
 imagesize = { version = "0.15" }
 libc = { version = "0.2.186" }
 log = { version = "0.4.33" }
+memchr = { version = "2.8.3" }
 notify = { version = "9.0.0" }
 quick-xml = { version = "0.42.0", features = ["escape-html"] }
 rusqlite = { version = "0.43.0", default-features = false, features = ["cache"] }

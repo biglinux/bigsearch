@@ -48,7 +48,7 @@ documents.
 Requirements:
 
 - Linux with inotify, and systemd for the user service.
-- Rust 1.98.1; with rustup, `rust-toolchain.toml` selects it.
+- Rust 1.100.0; with rustup, `rust-toolchain.toml` selects it.
 - SQLite 3; poppler (`pdftotext`) for PDF content and `antiword` for Word
   97-2003 documents.
 - shared-mime-info, which names a file's type from its name.
@@ -123,7 +123,7 @@ The indexes and state live in `~/.local/share/big-search/`; the socket is
 
 `cargo build` compiles only the daemon; add `--workspace` for `big-docinfo` and
 the libraries. The settings window that edits `config.toml` belongs to
-[BigDesktop](https://github.com/biglinux/big), which takes the two
+BigDesktop, which takes the two
 libraries above from this repository.
 
 ## Help

@@ -3,10 +3,13 @@
 //! lighter than in-process Rust PDF libraries (DESIGN.md, "Extraction").
 //! Word 97-2003 `.doc` the same way through `antiword`.
 mod epub;
+mod html;
 
 pub(crate) use crate::extract_pdf::read_pdf;
 use crate::fold::{fold_lower, fold_lower_into};
 use epub::read_epub;
+pub use html::html_text;
+use html::{decode_entities, html_element};
 use std::io::Read;
 use std::path::Path;
 
@@ -266,124 +269,6 @@ fn markdown_headings(text: &str) -> Vec<String> {
     level(1).chain(level(2)).collect()
 }
 
-/// The text of the first `<tag>…</tag>` of an HTML page, tags inside removed.
-fn html_element(html: &str, tag: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let open = lower.find(&format!("<{tag}"))?;
-    let start = open + lower[open..].find('>')? + 1;
-    let end = start + lower[start..].find(&format!("</{tag}"))?;
-    let text = html_text(&html[start..end]);
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!text.is_empty()).then_some(text)
-}
-
-/// Elements that sit inside a line of text: the others separate words.
-const INLINE_TAGS: &[&str] = &[
-    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "dfn", "em", "font", "i", "kbd",
-    "mark", "q", "s", "samp", "small", "span", "strong", "sub", "sup", "time", "u", "var", "wbr",
-];
-
-/// The readable text of HTML: scripts and styles dropped, block elements as
-/// line breaks, entities decoded. Enough to read a saved page's
-/// title and dates, not a renderer.
-pub fn html_text(html: &str) -> String {
-    let lower = html.to_ascii_lowercase();
-    let mut out = String::with_capacity(html.len() / 2);
-    let mut at = 0;
-    while let Some(open) = lower[at..].find('<').map(|i| at + i) {
-        out.push_str(&html[at..open]);
-        let tag_end = lower[open..].find('>').map_or(html.len(), |i| open + i + 1);
-        let tag = &lower[open..tag_end];
-        // An unclosed script or style runs to the end, as in a browser; searching
-        // again from every later opener would make the scan quadratic.
-        let skip_to = ["script", "style"].iter().find_map(|name| {
-            tag.starts_with(&format!("<{name}")).then(|| {
-                lower[tag_end..]
-                    .find(&format!("</{name}"))
-                    .map_or(html.len(), |i| tag_end + i)
-            })
-        });
-        let block = [
-            "<p", "</p", "<br", "<div", "</div", "<h", "</h", "<li", "<tr", "<title", "</title",
-        ]
-        .iter()
-        .any(|b| tag.starts_with(b));
-        let name = tag
-            .trim_start_matches(['<', '/'])
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .next()
-            .unwrap_or_default();
-        // What an image or a link says of itself is read too; markup is not.
-        for attribute in [" alt=", " title="] {
-            let Some(found) = tag.find(attribute) else {
-                continue;
-            };
-            let value = &html[open + found + attribute.len()..tag_end];
-            if let Some(quote @ ('"' | '\'')) = value.chars().next()
-                && let Some(len) = value[1..].find(quote)
-            {
-                out.push(' ');
-                out.push_str(&value[1..=len]);
-                out.push(' ');
-            }
-        }
-        if block {
-            out.push('\n');
-        } else if skip_to.is_none() && !name.is_empty() && !INLINE_TAGS.contains(&name) {
-            // A table cell, a list or any other box ends the word before it.
-            out.push(' ');
-        }
-        at = skip_to.unwrap_or(tag_end).min(html.len());
-    }
-    out.push_str(&html[at.min(html.len())..]);
-    decode_entities(&out)
-}
-
-/// `&amp;`, `&nbsp;`, `&#8212;`, `&#x2014;` and the like as characters.
-fn decode_entities(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(at) = rest.find('&') {
-        out.push_str(&rest[..at]);
-        rest = &rest[at..];
-        // Only as far as the longest HTML5 name: a search to the end for every
-        // `&` is quadratic. `;` is ASCII, so its index is a char boundary.
-        let entity = rest.as_bytes()[1..]
-            .iter()
-            .take(33)
-            .position(|&b| b == b';')
-            .map(|end| &rest[1..=end]);
-        let decoded = |e: &str| -> Option<std::borrow::Cow<'static, str>> {
-            if e == "nbsp" {
-                return Some(" ".into());
-            }
-            match e.strip_prefix('#') {
-                Some(number) => number
-                    .strip_prefix(['x', 'X'])
-                    .map_or_else(
-                        || number.parse().ok(),
-                        |hex| u32::from_str_radix(hex, 16).ok(),
-                    )
-                    .and_then(char::from_u32)
-                    .map(|c| c.to_string().into()),
-                None => quick_xml::escape::resolve_html5_entity(e).map(Into::into),
-            }
-        };
-        match entity.and_then(|e| Some((e, decoded(e)?))) {
-            Some((e, text)) => {
-                out.push_str(&text);
-                rest = &rest[e.len() + 2..];
-            }
-            _ => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Extract text for a file identified by content sniffing (no usable extension):
 /// PDF via `pdftotext`, HTML as its readable text, anything else `text/*` as
 /// plain text. Used by the metadata pass so an extension-less document is still
@@ -417,7 +302,15 @@ fn text_input_size(path: &Path) -> Option<u64> {
 
 /// A blob with no text in it: empty, or holding a NUL byte early on.
 fn looks_binary(buf: &[u8]) -> bool {
-    buf.is_empty() || buf.iter().take(8192).any(|&b| b == 0)
+    buf.is_empty() || memchr::memchr(0, &buf[..buf.len().min(8192)]).is_some()
+}
+
+/// `bytes` as text, each invalid UTF-8 sequence as U+FFFD; valid text, nearly
+/// all of it, becomes the string without a copy. `String::from_utf8_lossy_owned`
+/// validates through `Utf8Chunks`, without `from_utf8`'s word-at-a-time ASCII
+/// path.
+pub(crate) fn lossy_utf8(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(std::string::FromUtf8Error::into_utf8_lossy)
 }
 
 /// Decode a text blob: reject empty or binary (NUL in the first chunk), else
@@ -425,17 +318,13 @@ fn looks_binary(buf: &[u8]) -> bool {
 /// path is fuzzable; it is the path `read_text` really takes, so what the
 /// fuzzer drives is what runs.
 ///
-/// The bytes are consumed: almost every file read is already valid UTF-8, and
-/// then they simply become the string. `from_utf8_lossy(&buf).into_owned()`
-/// would copy the whole file a second time even when nothing is replaced.
+/// The bytes are consumed so valid UTF-8, almost every file, becomes the
+/// string without a second copy.
 pub fn text_from_bytes(buf: Vec<u8>) -> Option<String> {
     if looks_binary(&buf) {
         return None;
     }
-    Some(match String::from_utf8(buf) {
-        Ok(text) => text,
-        Err(invalid) => String::from_utf8_lossy(invalid.as_bytes()).into_owned(),
-    })
+    Some(lossy_utf8(buf))
 }
 
 pub(crate) fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {

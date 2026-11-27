@@ -211,8 +211,8 @@ const CATALOG_PATH_BATCH: usize = 2048;
 const DEFAULT_CATALOG_CONTENT_BATCH: usize = 1000;
 
 /// Default worker count: 2 on desktop-class machines (the DESIGN.md §6 pool
-/// width), 1 on low-memory or dual-core hardware so extraction never dominates
-/// the machine.
+/// width), 1 on low-memory hardware or two logical CPUs or fewer, so extraction
+/// never dominates the machine.
 pub(crate) fn default_workers() -> usize {
     let cores = std::thread::available_parallelism()
         .map(std::num::NonZero::get)
@@ -244,8 +244,9 @@ fn content_channel_capacity() -> usize {
 }
 
 /// Index all pending content/metadata by streaming the name catalogue from
-/// SQLite in bounded batches. This avoids constructing `Vec<PathBuf>` for the
-/// full catalogue during a reindex or daemon backfill.
+/// SQLite in bounded batches, for `reindex`. This avoids constructing
+/// `Vec<PathBuf>` for the full catalogue. Nothing merges until the pass ends in
+/// one segment ([`crate::index::merge_into_one_segment`]).
 ///
 /// # Errors
 ///
@@ -256,9 +257,19 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
         return Ok(0);
     }
     let f = content_fields(index)?;
-    // One writer for the whole pass: a writer per batch, dropped without
-    // waiting, leaves its merges running, and they pile up across batches.
     let mut writer = crate::index::content_writer(index).context("content writer")?;
+    writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
+    let pass = index_catalog_batches(&mut writer, &f);
+    // A pass that fails halfway has committed its batches: merged, they cost
+    // the daemon's queries one segment instead of one per batch.
+    let merged = crate::index::merge_into_one_segment(writer).context("merge the content index");
+    let indexed = pass?;
+    merged?;
+    Ok(indexed)
+}
+
+/// The batches of [`index_pending_catalog`], each committed through `writer`.
+fn index_catalog_batches(writer: &mut IndexWriter, f: &ContentFields) -> Result<u64> {
     let mut indexed_total = 0u64;
     let mut cursor: CatalogCursor = None;
     loop {
@@ -274,8 +285,8 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
             break;
         }
         let read = index_content_limited_with_writer(
-            &mut writer,
-            &f,
+            writer,
+            f,
             batch.files,
             Some(catalog_content_batch_limit()),
         )?;
@@ -284,9 +295,6 @@ pub fn index_pending_catalog(index: &Index) -> Result<u64> {
             break;
         }
     }
-    writer
-        .wait_merging_threads()
-        .context("wait content merges")?;
     Ok(indexed_total)
 }
 

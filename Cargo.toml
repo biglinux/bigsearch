@@ -48,11 +48,9 @@ redundant_test_prefix = "warn"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.98.1"
+rust-version = "1.100.0"
 license = "MIT"
 repository = "https://github.com/biglinux/bigsearch"
-homepage = "https://github.com/biglinux/bigsearch"
-authors = ["BigLinux contributors"]
 
 [profile.dev]
 debug = "line-tables-only"

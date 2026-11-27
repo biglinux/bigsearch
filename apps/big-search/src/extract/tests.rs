@@ -12,9 +12,8 @@ fn readers_pass_over_fifo() {
         let path = dir.join(name);
         crate::test_env::make_fifo(&path);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let reader_path = path.clone();
         std::thread::spawn(move || {
-            let _ = done_tx.send(content(&reader_path));
+            let _ = done_tx.send(content(&path));
         });
         let text = done_rx
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -58,7 +57,7 @@ fn readers_pass_over_write_lease() {
 #[test]
 fn pages_and_markdown_name_titles() {
     assert_eq!(
-        decode_entities("A &amp; B &#8212; C &#x2014; D &nbsp;&bogus; &"),
+        decode_entities("A &amp; B &#8212; C &#x2014; D &nbsp;&bogus; &".to_owned()),
         "A & B — C — D  &bogus; &"
     );
     let html = "<html><head><title>Shader Setup &#8212; Nsight</title><style>p{}</style></head>\

@@ -1,8 +1,8 @@
 [package]
 name = "big-docinfo-cli"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.98.1"
+edition.workspace = true
+rust-version.workspace = true
 description = "Suggests a file name for a document from what it says, and renames it without ever overwriting"
 license.workspace = true
 repository.workspace = true

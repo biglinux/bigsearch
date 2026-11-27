@@ -42,7 +42,12 @@ pub(super) fn cmd_reindex(roots: &[String]) -> Result<()> {
     };
 
     let t0 = Instant::now();
-    let sync_outcome = scan::sync(&index, &scan_roots, &mut state)?;
+    let mut name_writer = index::bulk_writer(&index)?;
+    name_writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
+    let synced = scan::sync(&mut name_writer, &scan_roots, &mut state);
+    let merged = index::merge_into_one_segment(name_writer).context("merge the name index");
+    let sync_outcome = synced?;
+    merged?;
     let names = index::document_count(&index.reader()?);
     println!(
         "indexed {names} names in {:.2}s",
@@ -830,7 +835,8 @@ fn sync_with_retry(
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
     let mut last_error = None;
     for attempt in 1..=ATTEMPTS {
-        match scan::sync(index, roots, state) {
+        match index::bulk_writer(index).and_then(|mut writer| scan::sync(&mut writer, roots, state))
+        {
             Ok(count) => return Ok(count),
             Err(e) => {
                 log::warn!("sync attempt {attempt}/{ATTEMPTS} failed: {e:#}");

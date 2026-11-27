@@ -7,7 +7,7 @@ use ignore::WalkBuilder;
 use std::io::ErrorKind::{NotFound, PermissionDenied};
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
-use tantivy::{Index, IndexWriter, TantivyDocument, Term};
+use tantivy::{IndexWriter, TantivyDocument, Term};
 
 mod scope;
 pub(crate) use scope::work_tree_root;
@@ -259,11 +259,10 @@ pub fn visible_dirs(root: &Path) -> Vec<PathBuf> {
 ///
 /// Returns an error when the catalogue cannot be read or written, or the index cannot be
 /// committed.
-pub fn sync(index: &Index, roots: &[PathBuf], state: &mut State) -> Result<SyncOutcome> {
-    let f = crate::index::fields(index)?;
-    let mut writer = crate::index::bulk_writer(index)?;
+pub fn sync(writer: &mut IndexWriter, roots: &[PathBuf], state: &mut State) -> Result<SyncOutcome> {
+    let f = crate::index::fields(writer.index())?;
     let mut visible_dirs = Vec::new();
-    let outcome = reconcile_roots(&mut writer, &f, state, roots, None, &mut |dir| {
+    let outcome = reconcile_roots(writer, &f, state, roots, None, &mut |dir| {
         visible_dirs.push(dir.to_path_buf())
     })?;
     state.persist()?;

@@ -28,7 +28,7 @@ pub(super) fn read_epub(path: &Path) -> Option<(String, Option<String>)> {
             .take(limit as u64)
             .read_to_end(&mut bytes)
             .ok()?;
-        Some(String::from_utf8_lossy(&bytes).into_owned())
+        Some(crate::extract::lossy_utf8(bytes))
     };
     let container = part("META-INF/container.xml", cap)?;
     let opf_path = epub_package(container.as_bytes())?;
@@ -71,7 +71,7 @@ fn xml_attribute(e: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<St
     e.attributes()
         .flatten()
         .find(|a| a.key.local_name().as_ref() == name)
-        .map(|a| decode_entities(&a.value))
+        .map(|a| decode_entities(a.value.into_owned()))
 }
 
 /// The package document `META-INF/container.xml` points to.
@@ -153,5 +153,5 @@ fn percent_decoded(href: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    crate::extract::lossy_utf8(out)
 }

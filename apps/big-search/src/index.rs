@@ -727,6 +727,24 @@ fn writer_memory_budget_mb(env_name: &str, default_mb: usize) -> usize {
         .saturating_mul(1 << 20)
 }
 
+/// Merges every segment of the writer's index into one, then closes the
+/// writer. `reindex` writes with [`tantivy::indexer::NoMergePolicy`] and ends
+/// here whatever it wrote: tantivy's policy merges the small segments as they
+/// appear and rewrites the same documents again in each larger merge, and one
+/// merge at the end writes them once and leaves the single segment a cold
+/// query reads fastest.
+///
+/// # Errors
+///
+/// Returns an error when the segments cannot be listed or a merge fails.
+pub fn merge_into_one_segment(mut writer: IndexWriter<TantivyDocument>) -> Result<()> {
+    let segments = writer.index().searchable_segment_ids()?;
+    if segments.len() > 1 {
+        writer.merge(&segments).wait().context("merge segments")?;
+    }
+    writer.wait_merging_threads().context("wait merges")
+}
+
 fn low_impact_writer(index: &Index, memory_budget: usize) -> Result<IndexWriter<TantivyDocument>> {
     let options = IndexWriterOptions::builder()
         .num_worker_threads(1)
