@@ -28,7 +28,7 @@ pub(super) fn read_epub(path: &Path) -> Option<(String, Option<String>)> {
             .take(limit as u64)
             .read_to_end(&mut bytes)
             .ok()?;
-        Some(String::from_utf8_lossy(&bytes).into_owned())
+        Some(crate::extract::lossy_utf8(bytes))
     };
     let container = part("META-INF/container.xml", cap)?;
     let opf_path = epub_package(container.as_bytes())?;
@@ -153,5 +153,5 @@ fn percent_decoded(href: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    crate::extract::lossy_utf8(out)
 }

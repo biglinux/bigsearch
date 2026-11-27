@@ -20,12 +20,7 @@ use std::time::Duration;
 pub(crate) fn read_pdf(path: &Path) -> Option<String> {
     let cap = crate::extract::max_extract_bytes();
     let bytes = pdftotext_capped(path, cap, &[])?;
-    // Valid UTF-8 (every ordinary PDF) becomes the string without a second copy.
-    let text = match String::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(invalid) => String::from_utf8_lossy(invalid.as_bytes()).into_owned(),
-    };
-    text_layer(text, cap)
+    text_layer(crate::extract::lossy_utf8(bytes), cap)
 }
 
 /// Pages read to describe a PDF. Its title, kind and date are in its opening,
@@ -125,7 +120,7 @@ fn pdftotext_capped(path: &Path, max_bytes: usize, options: &[&str]) -> Option<V
 pub(crate) fn read_word(path: &Path) -> Option<String> {
     let cap = crate::extract::max_extract_bytes();
     let bytes = run_capped("antiword", path, cap, &["-m", "UTF-8.txt", "-w", "0"])?;
-    text_layer(String::from_utf8_lossy(&bytes).into_owned(), cap)
+    text_layer(crate::extract::lossy_utf8(bytes), cap)
 }
 
 /// Runs `program` (`pdftotext` to stdout, `pdfinfo` or `antiword`) on

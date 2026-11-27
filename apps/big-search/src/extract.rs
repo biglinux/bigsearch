@@ -420,22 +420,26 @@ fn looks_binary(buf: &[u8]) -> bool {
     buf.is_empty() || buf.iter().take(8192).any(|&b| b == 0)
 }
 
+/// `bytes` as text, each invalid UTF-8 sequence as U+FFFD; valid text, nearly
+/// all of it, becomes the string without a copy. `String::from_utf8_lossy_owned`
+/// validates through `Utf8Chunks`, without `from_utf8`'s word-at-a-time ASCII
+/// path.
+pub(crate) fn lossy_utf8(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(std::string::FromUtf8Error::into_utf8_lossy)
+}
+
 /// Decode a text blob: reject empty or binary (NUL in the first chunk), else
 /// UTF-8, lossily where it has to be. Split out from `read_text` so the decode
 /// path is fuzzable; it is the path `read_text` really takes, so what the
 /// fuzzer drives is what runs.
 ///
-/// The bytes are consumed: almost every file read is already valid UTF-8, and
-/// then they simply become the string. `from_utf8_lossy(&buf).into_owned()`
-/// would copy the whole file a second time even when nothing is replaced.
+/// The bytes are consumed so valid UTF-8, almost every file, becomes the
+/// string without a second copy.
 pub fn text_from_bytes(buf: Vec<u8>) -> Option<String> {
     if looks_binary(&buf) {
         return None;
     }
-    Some(match String::from_utf8(buf) {
-        Ok(text) => text,
-        Err(invalid) => String::from_utf8_lossy(invalid.as_bytes()).into_owned(),
-    })
+    Some(lossy_utf8(buf))
 }
 
 pub(crate) fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {

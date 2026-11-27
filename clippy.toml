@@ -27,6 +27,7 @@ disallowed-methods = [
     { path = "std::io::stdin", reason = "stdin blocks; the daemon has no interactive input" },
     { path = "zip::read::ZipArchive::new", reason = "open archives through extract::capped_zip, which refuses one declaring too many entries" },
     { path = "libc::statvfs", reason = "ask history::disk (identity, disk_capacity), which reads f_fsid and the free space" },
+    { path = "std::string::String::from_utf8_lossy_owned", reason = "decode through extract::lossy_utf8, whose from_utf8 validates ASCII a word at a time" },
     { path = "std::os::unix::fs::MetadataExt::dev", reason = "a file kept across a restart is told by history::identity: btrfs draws st_dev anew at each mount" },
 ]
 
