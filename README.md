@@ -123,7 +123,7 @@ The indexes and state live in `~/.local/share/big-search/`; the socket is
 
 `cargo build` compiles only the daemon; add `--workspace` for `big-docinfo` and
 the libraries. The settings window that edits `config.toml` belongs to
-[BigDesktop](https://github.com/biglinux/bigdesktop), which takes the two
+BigDesktop, which takes the two
 libraries above from this repository.
 
 ## Help
