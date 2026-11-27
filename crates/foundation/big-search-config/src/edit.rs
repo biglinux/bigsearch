@@ -383,7 +383,7 @@ pub(crate) fn edit_file(
     } else if text.is_empty() {
         (Vec::new(), "\n")
     } else {
-        let body = text.strip_suffix('\n').unwrap_or(&text);
+        let body = text.trim_suffix('\n');
         (body.split('\n').map(String::from).collect(), "\n")
     };
     let before = lines.clone();

@@ -98,7 +98,7 @@ pub(super) fn read_xdg_origin_domain(path: &Path) -> Option<String> {
 /// list or a file's xattr, so anything but a plain host name or IP literal is
 /// refused rather than stored and later printed.
 pub(crate) fn domain_from_url(url: &str) -> Option<String> {
-    let url = url.strip_prefix("blob:").unwrap_or(url);
+    let url = url.trim_prefix("blob:");
     let after_scheme = url.split_once("://")?.1;
     let authority = after_scheme.split(['/', '?', '#']).next()?;
     let authority = authority.rsplit('@').next()?;
@@ -111,7 +111,7 @@ pub(crate) fn domain_from_url(url: &str) -> Option<String> {
         valid.then_some(literal)?
     } else {
         let name = authority.split(':').next()?;
-        let name = name.strip_prefix("www.").unwrap_or(name);
+        let name = name.trim_prefix("www.");
         let valid = name.len() <= 253
             && name
                 .bytes()

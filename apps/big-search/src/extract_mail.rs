@@ -129,7 +129,7 @@ fn multipart_text(kind: &str, content_type: &str, body: &str, depth: usize) -> O
         .split(delimiter.as_str())
         .skip(1)
         .take_while(|part| !part.starts_with("--"))
-        .map(|part| split_message(part.strip_prefix('\n').unwrap_or(part)))
+        .map(|part| split_message(part.trim_prefix('\n')))
         .collect();
     // An alternative's plain text and its HTML say the same: keep one.
     let plain = parts
