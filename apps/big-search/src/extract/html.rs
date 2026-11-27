@@ -3,10 +3,10 @@
 
 /// The text of the first `<tag>…</tag>` of an HTML page, tags inside removed.
 pub(super) fn html_element(html: &str, tag: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let open = lower.find(&format!("<{tag}"))?;
-    let start = open + lower[open..].find('>')? + 1;
-    let end = start + lower[start..].find(&format!("</{tag}"))?;
+    let bytes = html.as_bytes();
+    let open = find_ignore_ascii_case(bytes, format!("<{tag}").as_bytes())?;
+    let start = open + memchr::memchr(b'>', &bytes[open..])? + 1;
+    let end = start + find_ignore_ascii_case(&bytes[start..], format!("</{tag}").as_bytes())?;
     let text = html_text(&html[start..end]);
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     (!text.is_empty()).then_some(text)
