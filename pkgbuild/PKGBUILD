@@ -7,8 +7,8 @@
 
 pkgbase=bigsearch
 pkgname=(big-search big-docinfo)
-pkgver=0.1.0
-pkgrel=1
+pkgver=$(date +%y.%m.%d)
+pkgrel=$(date +%H%M)
 arch=('x86_64')
 url="https://github.com/biglinux/bigsearch"
 license=('MIT' 'Unicode-3.0')
